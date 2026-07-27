@@ -41,8 +41,10 @@ const DRAWER = { top: '#e8d9be', left: '#b9a27d', right: '#d2be99' }
 const CHAIR = { top: '#66738f', left: '#3c4457', right: '#4f5b74' }
 const CHAIR_BACK = { top: '#71809d', left: '#414b60', right: '#5c6982' }
 
-const PART_FABRIC = { top: '#c3ccd8', left: '#93a0b2', right: '#aeb9c8' }
-const PART_RAIL = { top: '#e7ecf2', left: '#b6c0cd', right: '#d2dae4' }
+// 밝은 바닥 위에서 묻히지 않게 한 단계 진하게. 예전 색은 패널이 안 보이고
+// 양 끝 기둥만 남아 흰 장대처럼 보였다.
+const PART_FABRIC = { top: '#9fb0c4', left: '#6d7f96', right: '#8798ad' }
+const PART_RAIL = { top: '#d5dde6', left: '#9aa5b3', right: '#bcc6d2' }
 
 const BEZEL = { top: '#3b4351', left: '#232935', right: '#2f3644' }
 const METAL = { top: '#9aa3b2', left: '#6d7686', right: '#828c9c' }
@@ -125,7 +127,7 @@ export function drawRug(ctx, s, gx, gy, w = 3, d = 3) {
 // ── 벽 ───────────────────────────────────────────────────────────────────
 const WALL_H = 54
 const WAINSCOT = 18
-const INNER_H = 38 // 내벽은 낮게 — 높으면 안쪽 방이 안 보인다
+const INNER_H = 32 // 유리 파티션 높이. 낮게 잡아야 안쪽 방이 보인다
 
 export function drawWalls(ctx, s, t) {
   // 바깥벽 — 도면 전체를 감싼다
@@ -151,22 +153,46 @@ export function drawWalls(ctx, s, t) {
 }
 
 /**
- * 내벽 한 칸. 깊이 정렬 대상이라 조각으로 그린다.
+ * 내벽 한 칸 — **유리 파티션**이다.
+ *
+ * 불투명 벽으로 세웠더니 사무실을 통째로 가렸다. 카메라가 남동쪽에서 보는데
+ * 이 벽은 사무실 **앞**에 서 있기 때문이다(깊이가 더 크다). 실제 사무실이 쓰는
+ * 해법을 그대로 쓴다: 아래는 불투명 패널, 위는 유리. 뒤가 비쳐 보인다.
+ *
  * dir='nw'면 gy 방향(세로벽), 'ne'면 gx 방향(가로벽).
  */
 export function drawInnerWall(ctx, s, gx, gy, dir) {
-  const w = dir === 'nw' ? 0.1 : 1.02
-  const d = dir === 'nw' ? 1.02 : 0.1
-  drawBox(ctx, s, gx, gy, w, d, INNER_H, {
-    top: '#f2ede3',
-    left: '#cfc6b6',
-    right: '#e4dccd',
-  })
-  const p = toScreen(gx, gy)
-  // 걸레받이와 상단 몰딩
-  const half = (dir === 'nw' ? TILE_W : TILE_W) / 2
-  px(ctx, s, p.x - half * 0.5, p.y - 2.2, half, 2.2, '#d8cfbe')
-  px(ctx, s, p.x - half * 0.5, p.y - INNER_H - 0.8, half, 0.9, '#fbf7ef')
+  const along = dir === 'nw' ? { gx: 0, gy: 0.5 } : { gx: 0.5, gy: 0 }
+  const a = toScreen(gx - along.gx, gy - along.gy)
+  const b = toScreen(gx + along.gx, gy + along.gy)
+  const SOLID = 8 // 아래쪽 불투명 패널 높이
+
+  const quad = (yLow, yHigh, color, alpha = 1) => {
+    ctx.save()
+    ctx.globalAlpha = alpha
+    ctx.beginPath()
+    ctx.moveTo(a.x * s, (a.y - yHigh) * s)
+    ctx.lineTo(b.x * s, (b.y - yHigh) * s)
+    ctx.lineTo(b.x * s, (b.y - yLow) * s)
+    ctx.lineTo(a.x * s, (a.y - yLow) * s)
+    ctx.closePath()
+    ctx.fillStyle = color
+    ctx.fill()
+    ctx.restore()
+  }
+
+  quad(0, SOLID, '#dcd6ca') // 하부 패널
+  quad(SOLID - 1, SOLID, '#b9b2a4') // 패널 상단 몰딩
+  quad(SOLID, INNER_H, '#cfe3ef', 0.3) // 유리
+  quad(INNER_H - 8, INNER_H - 3, '#ffffff', 0.16) // 유리 반사 띠
+  quad(INNER_H, INNER_H + 1.4, '#e8e2d6') // 상단 프레임
+
+  // 세로 멀리언(칸 경계 기둥)
+  for (const e of [-1, 1]) {
+    const q = e < 0 ? a : b
+    px(ctx, s, q.x - 0.9, q.y - INNER_H - 1.4, 1.8, INNER_H + 1.4, '#cfc9bb')
+    px(ctx, s, q.x - 0.9, q.y - INNER_H - 1.4, 0.7, INNER_H + 1.4, '#efe9dd')
+  }
 }
 
 /** 문틀 — 기둥 두 개 + 상인방. 문은 열려 있다(다니는 게 보여야 하므로). */
@@ -183,11 +209,12 @@ export function drawDoorway(ctx, s, gx, gy) {
     })
     px(ctx, s, q.x - 1.6, q.y - H + 1, 0.8, H - 2, '#fdfaf3')
   }
-  // 상인방
-  px(ctx, s, p.x - 11, p.y - H - 1, 22, 3.5, '#efe9dd')
-  px(ctx, s, p.x - 11, p.y - H - 1, 22, 0.9, '#fdfaf3')
+  // 상인방 — 유리 파티션 상단 프레임과 높이를 맞춘다
+  px(ctx, s, p.x - 12, p.y - H - 1.4, 24, 2.8, '#e8e2d6')
+  px(ctx, s, p.x - 12, p.y - H - 1.4, 24, 0.8, '#fbf7ef')
   // 문지방
-  px(ctx, s, p.x - 9, p.y - 0.8, 18, 1.4, '#c9bfa9')
+  px(ctx, s, p.x - 9, p.y - 0.9, 18, 1.4, '#c9bfa9')
+  px(ctx, s, p.x - 9, p.y - 0.9, 18, 0.5, '#e2d9c5')
 }
 
 /** 창문 — 6칸 유리, 창틀 두께, 걷어올린 블라인드, 창턱까지 나눠 그린다. */
@@ -413,17 +440,16 @@ export function drawPartitions(ctx, s, gx, gy) {
     }
     ctx.restore()
 
-    // 양 끝 기둥 — 패널이 공중에 뜬 판때기로 보이지 않게 한다
+    // 양 끝 기둥 — 패널보다 살짝 진하게(밝게 하면 흰 장대처럼 튄다)
     for (const e of [-1, 1]) {
-      px(ctx, s, p.x + e * half - 1, p.y - PART_H, 2, PART_H, '#9aa6b6')
-      px(ctx, s, p.x + e * half - 1, p.y - PART_H, 0.8, PART_H, '#c3ccd8')
-      // 받침 발
-      px(ctx, s, p.x + e * half - 2.6, p.y - 1.2, 5.2, 1.4, '#7b8798')
+      px(ctx, s, p.x + e * half - 1, p.y - PART_H, 2, PART_H, '#5f7087')
+      px(ctx, s, p.x + e * half - 1, p.y - PART_H, 0.7, PART_H, '#8496ab')
+      px(ctx, s, p.x + e * half - 2.4, p.y - 1.2, 4.8, 1.4, '#4e5e73') // 받침 발
     }
 
-    // 상단 레일 + 하이라이트
+    // 상단 레일 + 하이라이트(폭을 줄여 얌전하게)
     drawBox(ctx, s, cx, cy, w + 0.05, d + 0.05, 0.9, PART_RAIL, PART_H)
-    px(ctx, s, p.x - half + 1, p.y - PART_H - 0.7, half * 2 - 2, 0.7, '#f6f9fc')
+    px(ctx, s, p.x - half + 2, p.y - PART_H - 0.6, half * 2 - 4, 0.6, '#e6ecf3')
   }
   panel(gx - 0.55, gy - 0.02, 0.07, 1.1, 1.1) // 서쪽
   panel(gx - 0.02, gy - 0.55, 1.1, 0.07, 1.1) // 북쪽
