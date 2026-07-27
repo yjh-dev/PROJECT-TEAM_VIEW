@@ -163,6 +163,31 @@ export function faceQuad(ctx, s, gx, gy, side, w, yLow, yHigh, color) {
   ctx.fill()
 }
 
+/**
+ * 논리 좌표계(1 = 도트 하나) 기준의 사각형. 가구에 픽셀 디테일을 얹을 때 쓴다.
+ * 소수 배율에서도 경계가 어긋나지 않게 반올림한다.
+ */
+export function px(ctx, s, x, y, w, h, color) {
+  const x0 = Math.round(x * s)
+  const y0 = Math.round(y * s)
+  const x1 = Math.round((x + w) * s)
+  const y1 = Math.round((y + h) * s)
+  ctx.fillStyle = color
+  ctx.fillRect(x0, y0, Math.max(1, x1 - x0), Math.max(1, y1 - y0))
+}
+
+/** 아이소 윗면(마름모)에 얹는 얇은 선. 나뭇결·이음매용. */
+export function topSeam(ctx, s, gx, gy, lift, from, to, color, thick = 0.8) {
+  const a = toScreen(gx + from.gx, gy + from.gy)
+  const b = toScreen(gx + to.gx, gy + to.gy)
+  ctx.strokeStyle = color
+  ctx.lineWidth = Math.max(1, thick * s)
+  ctx.beginPath()
+  ctx.moveTo(a.x * s, (a.y - lift) * s)
+  ctx.lineTo(b.x * s, (b.y - lift) * s)
+  ctx.stroke()
+}
+
 /** 가구 밑 그늘. 바닥에 놓여 있다는 느낌을 준다(입체감의 절반은 이것에서 나온다). */
 export function drawAO(ctx, s, gx, gy, rx = 16, ry = 8, alpha = 0.18) {
   const { x, y } = toScreen(gx, gy)
