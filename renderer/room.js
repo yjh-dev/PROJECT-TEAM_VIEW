@@ -66,12 +66,18 @@ const FLOOR_SETS = {
     { top: '#eef0f2', side: '#c3c7cd' },
     { top: '#e2e6ea', side: '#b8bdc4' },
   ],
+  // 휴게실 — 따뜻한 색 러그 느낌
+  lounge: [
+    { top: '#e6d9c6', side: '#bfae97' },
+    { top: '#dfd0ba', side: '#b8a68e' },
+  ],
 }
 
 export function drawFloor(ctx, s) {
   for (const key of Object.keys(ROOMS)) {
     const r = ROOMS[key]
-    const set = FLOOR_SETS[r.floor]
+    // 없는 바닥재 이름이 들어와도 화면 전체가 죽지 않게 기본값으로 떨어진다.
+    const set = FLOOR_SETS[r.floor] ?? FLOOR_SETS.wood
     for (let gy = r.y0; gy <= r.y1; gy++) {
       for (let gx = r.x0; gx <= r.x1; gx++) {
         const c = set[(gx + gy) % 2]
@@ -150,6 +156,7 @@ export function drawWalls(ctx, s, t) {
   drawWhiteboard(ctx, s, 'nw', 1.2)
   drawPoster(ctx, s, 'ne', 4.2)
   drawClock(ctx, s, 'nw', 5.4, t)
+  drawTV(ctx, s, 'nw', 13.6, t) // 휴게실 벽걸이 TV
 }
 
 /**

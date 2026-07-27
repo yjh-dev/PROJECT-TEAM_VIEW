@@ -620,12 +620,25 @@ function draw(t) {
   }
 }
 
+let renderError = null
+
 function loop(now) {
   const dt = Math.min(now - lastFrame, 100)
   lastFrame = now
-  update(dt, now)
-  draw(now)
-  syncOverlay(now)
+  try {
+    update(dt, now)
+    draw(now)
+    syncOverlay(now)
+  } catch (err) {
+    // 그리다 한 번 던지면 그 뒤 순서(가구·캐릭터)가 통째로 사라진다. 조용히
+    // 사라지는 게 최악이므로 화면 상태줄에 드러내고 루프는 계속 돌린다.
+    if (renderError !== String(err)) {
+      renderError = String(err)
+      console.error('[team-view] 렌더 오류:', err)
+      statusEl.textContent = `렌더 오류: ${renderError.slice(0, 60)}`
+      statusEl.className = 'warn'
+    }
+  }
   requestAnimationFrame(loop)
 }
 
