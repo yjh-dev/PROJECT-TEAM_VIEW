@@ -76,6 +76,7 @@ export function makeAgent(role, desk) {
     lastEventAt: 0,
     busyUntil: 0,
     queued: 0, // 이 팀원에게 보낸 지시 중 아직 결과가 안 온 개수
+    cups: 0, // 탕비실에 다녀온 횟수만큼 책상에 쌓이는 커피컵
   }
 }
 

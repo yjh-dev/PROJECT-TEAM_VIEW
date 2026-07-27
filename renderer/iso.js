@@ -8,15 +8,15 @@ export const TILE_H = 22
 // 도면 전체가 들어가는 격자 크기 (gx 0..GRID_W-1, gy 0..GRID_H-1).
 // 방 구획은 layout.js가 정한다.
 export const GRID_W = 13
-export const GRID_H = 12
+export const GRID_H = 17 // 휴게실까지 포함한 깊이
 export const GRID = Math.max(GRID_W, GRID_H) // 하위 호환용
 
-export const STAGE_W = 560
-export const STAGE_H = 356
+export const STAGE_W = 680
+export const STAGE_H = 430
 
 // 격자 원점(0,0)이 놓일 화면 좌표. 위쪽에 벽 공간을 남긴다.
-const ORIGIN_X = 276
-const ORIGIN_Y = 74
+const ORIGIN_X = 386
+const ORIGIN_Y = 72
 
 /** 격자 좌표 → 화면 좌표(타일 중심). gx/gy는 소수여도 된다(캐릭터가 부드럽게 움직인다). */
 export function toScreen(gx, gy) {

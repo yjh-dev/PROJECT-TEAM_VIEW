@@ -19,7 +19,7 @@ import {
   drawDoorway,
   PROPS,
 } from './room.js'
-import { routeTo, interiorWallSegments, DOORWAYS, ROOMS } from './layout.js'
+import { routeTo, interiorWallSegments, DOORWAYS, SPOTS } from './layout.js'
 
 const canvas = document.getElementById('stage')
 const ctx = canvas.getContext('2d')
@@ -40,6 +40,15 @@ const TALK_MS = 3200
 
 const WALL_SEGMENTS = interiorWallSegments()
 
+// 카메라 — 드래그로 이동, Ctrl+휠/Ctrl+± 로 확대. fit은 창에 딱 맞는 기본 배율.
+const cam = { zoom: 1, x: 0, y: 0 }
+const ZOOM_MIN = 0.6
+const ZOOM_MAX = 4
+let fitScale = 3
+
+/** 실제 그리기에 쓰는 배율. */
+const eff = () => fitScale * cam.zoom
+
 let scale = 3
 let agents = buildAgents()
 let target = 'all' // 채팅 대상: 'all' 또는 에이전트 id
@@ -49,17 +58,97 @@ const lastChatAt = new Map() // 도구 이벤트가 채팅을 도배하지 않�
 
 function resize() {
   const wrap = document.getElementById('left')
-  const availW = wrap.clientWidth - 4
-  const availH = wrap.clientHeight - 4
-  // 정수 배율을 고집하면 창의 절반이 빈 여백으로 남는다. 소수 배율을 쓰되
-  // 스프라이트는 픽셀 좌표를 반올림해 찍으므로 도트가 흐려지지 않는다.
-  scale = Math.max(1, Math.min(availW / STAGE_W, availH / STAGE_H))
-  canvas.width = STAGE_W * scale
-  canvas.height = STAGE_H * scale
-  canvas.style.width = `${STAGE_W * scale}px`
-  canvas.style.height = `${STAGE_H * scale}px`
+  const w = Math.max(320, wrap.clientWidth - 4)
+  const h = Math.max(240, wrap.clientHeight - 4)
+  // 캔버스는 남는 영역 전체를 채운다(팬·줌을 하려면 여백이 필요하다).
+  canvas.width = w
+  canvas.height = h
+  canvas.style.width = `${w}px`
+  canvas.style.height = `${h}px`
+  // 기본 배율은 도면이 창에 딱 들어오는 크기
+  fitScale = Math.max(0.5, Math.min(w / STAGE_W, h / STAGE_H))
+  scale = eff()
+  clampCam()
   ctx.imageSmoothingEnabled = false
 }
+
+/** 도면이 화면 밖으로 완전히 사라지지 않도록 이동 범위를 제한한다. */
+function clampCam() {
+  const s = eff()
+  const stageW = STAGE_W * s
+  const stageH = STAGE_H * s
+  const marginX = Math.min(240, canvas.width * 0.4)
+  const marginY = Math.min(200, canvas.height * 0.4)
+  cam.x = Math.min(canvas.width - marginX, Math.max(marginX - stageW, cam.x))
+  cam.y = Math.min(canvas.height - marginY, Math.max(marginY - stageH, cam.y))
+}
+
+/** 화면 좌표를 기준으로 확대/축소한다(그 점이 제자리에 남는다). */
+function zoomAt(px_, py_, factor) {
+  const before = eff()
+  cam.zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, cam.zoom * factor))
+  const after = eff()
+  const k = after / before
+  cam.x = px_ - (px_ - cam.x) * k
+  cam.y = py_ - (py_ - cam.y) * k
+  scale = after
+  clampCam()
+}
+
+// ── 마우스 드래그로 이동 ─────────────────────────────────────────────────
+let dragging = null
+canvas.addEventListener('mousedown', (e) => {
+  if (e.button !== 0) return
+  dragging = { x: e.clientX, y: e.clientY, camX: cam.x, camY: cam.y, moved: false }
+})
+window.addEventListener('mousemove', (e) => {
+  if (!dragging) return
+  const dx = e.clientX - dragging.x
+  const dy = e.clientY - dragging.y
+  if (Math.abs(dx) + Math.abs(dy) > 3) dragging.moved = true
+  cam.x = dragging.camX + dx
+  cam.y = dragging.camY + dy
+  clampCam()
+  canvas.style.cursor = 'grabbing'
+})
+window.addEventListener('mouseup', () => {
+  if (dragging) canvas.style.cursor = 'grab'
+  // 드래그 직후의 click 이벤트는 무시해야 한다(끌었는데 캐릭터가 선택되면 곤란)
+  setTimeout(() => {
+    dragging = null
+  }, 0)
+})
+canvas.style.cursor = 'grab'
+
+// ── Ctrl + 휠 / Ctrl + ± 로 줌 ───────────────────────────────────────────
+canvas.addEventListener(
+  'wheel',
+  (e) => {
+    if (!e.ctrlKey) return
+    e.preventDefault()
+    const rect = canvas.getBoundingClientRect()
+    zoomAt(e.clientX - rect.left, e.clientY - rect.top, e.deltaY < 0 ? 1.12 : 1 / 1.12)
+  },
+  { passive: false },
+)
+window.addEventListener('keydown', (e) => {
+  if (!e.ctrlKey) return
+  const cx = canvas.width / 2
+  const cy = canvas.height / 2
+  if (e.key === '+' || e.key === '=') {
+    e.preventDefault()
+    zoomAt(cx, cy, 1.2)
+  } else if (e.key === '-' || e.key === '_') {
+    e.preventDefault()
+    zoomAt(cx, cy, 1 / 1.2)
+  } else if (e.key === '0') {
+    e.preventDefault()
+    cam.zoom = 1
+    cam.x = 0
+    cam.y = 0
+    scale = eff()
+  }
+})
 window.addEventListener('resize', resize)
 
 // ---------- 이벤트 → 상태 ----------
@@ -242,13 +331,12 @@ inputEl.addEventListener('keydown', (e) => {
 // **이건 실제 작업이 아니다.** 그래서 채팅 로그에는 남기지 않고, 말풍선도
 // 회색 작은 스타일(.small)로 구분한다. 진짜 활동은 이벤트에서만 나온다.
 
-// 커피는 탕비실, 회의는 회의실. 방이 갈렸으므로 캐릭터는 문을 거쳐 이동한다.
-const COFFEE = { gx: 10, gy: 8.6 }
-const MEETING = [
-  { gx: 9.4, gy: 2 },
-  { gx: 11.6, gy: 2 },
-  { gx: 10.5, gy: 3.1 },
-]
+// 목적지는 layout.js가 방과 함께 정의한다.
+const COFFEE = SPOTS.coffee
+const TRASH = SPOTS.trash
+const MEETING = SPOTS.meeting
+const LOUNGE = SPOTS.lounge
+const MAX_CUPS = 6
 const SMALL_TALK = [
   '커피 한 잔 하고 올게요',
   '잠깐 스트레칭…',
@@ -277,12 +365,33 @@ function scheduleIdle(now) {
   // 절반쯤은 아무 일도 일어나지 않는다. 계속 북적이면 오히려 가짜처럼 보인다.
   if (Math.random() < 0.45) return
 
+  // 컵이 쌓였으면 먼저 치우러 간다(쌓인 채로 계속 커피를 뽑지 않도록)
+  const messy = free.filter((a) => a.cups >= 3)
+  if (messy.length && Math.random() < 0.55) {
+    const a = pick(messy)
+    a.plan = { kind: 'trash', dest: TRASH, until: now + 9000, bubble: '컵 좀 버리고 올게요' }
+    return
+  }
+
   const roll = Math.random()
-  if (roll < 0.3) {
-    // 커피
+  if (roll < 0.26) {
+    // 커피 — 탕비실까지 걸어가서 한 잔 받아 온다
     const a = pick(free)
-    a.plan = { dest: COFFEE, until: now + 7000, bubble: '커피 한 잔 하고 올게요' }
-  } else if (roll < 0.72) {
+    a.plan = { kind: 'coffee', dest: COFFEE, until: now + 9000, bubble: '커피 한 잔 하고 올게요' }
+  } else if (roll < 0.42) {
+    // 휴게실에서 잠깐 쉰다
+    const n = 1 + (Math.random() < 0.5 ? 1 : 0)
+    const chosen = free.slice().sort(() => Math.random() - 0.5).slice(0, n)
+    chosen.forEach((a, i) => {
+      a.plan = {
+        kind: 'lounge',
+        dest: LOUNGE[(i + Math.floor(Math.random() * LOUNGE.length)) % LOUNGE.length],
+        until: now + 13000,
+        bubble: i === 0 ? '잠깐 쉬었다 올게요' : null,
+        faceId: chosen[(i + 1) % chosen.length]?.id,
+      }
+    })
+  } else if (roll < 0.75) {
     // 둘이 마주보고 잡담
     const a = pick(free)
     const b = pick(free.filter((x) => x !== a))
@@ -347,6 +456,18 @@ function update(dt, now) {
       continue
     }
 
+    // 목적지 도착 판정 — 커피는 한 잔 늘고, 분리수거는 쌓인 컵을 비운다.
+    if (dist <= 0.25 && a.plan && !a.plan.done && a.path.length === 1) {
+      a.plan.done = true
+      if (a.plan.kind === 'coffee') {
+        a.cups = Math.min(MAX_CUPS, a.cups + 1)
+        a.plan.bubble = a.cups >= MAX_CUPS ? '책상에 컵이 너무 많네…' : '한 잔 받았습니다'
+      } else if (a.plan.kind === 'trash') {
+        a.cups = 0
+        a.plan.bubble = '분리수거 완료'
+      }
+    }
+
     if (dist > 0.03) {
       const speed = 1.7
       const step = Math.min(dist, (speed * dt) / 1000)
@@ -398,8 +519,8 @@ function syncOverlay(now) {
 
     // 이름표는 **머리 위**에. 앉으면 머리가 내려가므로 그만큼 함께 내린다.
     const headY = y - (a.pose === 'sit' ? 19 : 21)
-    tag.style.left = `${x * scale}px`
-    tag.style.top = `${headY * scale}px`
+    tag.style.left = `${x * scale + cam.x}px`
+    tag.style.top = `${headY * scale + cam.y}px`
     tag.classList.toggle('on', a.active)
     tag.classList.toggle('sel', target === a.id)
 
@@ -418,8 +539,8 @@ function syncOverlay(now) {
       bubble.hidden = false
       bubble.textContent = text
       bubble.className = `bubble${kind ? ' ' + kind : ''}`
-      bubble.style.left = `${x * scale}px`
-      bubble.style.top = `${(headY - 9) * scale}px`
+      bubble.style.left = `${x * scale + cam.x}px`
+      bubble.style.top = `${(headY - 9) * scale + cam.y}px`
     } else {
       bubble.hidden = true
     }
@@ -429,7 +550,10 @@ function syncOverlay(now) {
 // ---------- 그리기 ----------
 
 function draw(t) {
+  ctx.setTransform(1, 0, 0, 1, 0, 0)
   ctx.clearRect(0, 0, canvas.width, canvas.height)
+  scale = eff()
+  ctx.setTransform(1, 0, 0, 1, cam.x, cam.y) // 카메라 이동
   drawWalls(ctx, scale, t)
   drawFloor(ctx, scale)
   drawRug(ctx, scale, 9, 1, 3, 3) // 회의실 러그
@@ -469,7 +593,7 @@ function draw(t) {
       continue
     }
     if (it.kind === 'desk') {
-      drawWorkstation(ctx, scale, a.desk.gx, a.desk.gy, a.pose === 'sit', t)
+      drawWorkstation(ctx, scale, a.desk.gx, a.desk.gy, a.pose === 'sit', t, a.cups)
       continue
     }
     if (it.kind === 'chair') {
@@ -508,9 +632,10 @@ function loop(now) {
 // ---------- 클릭 → 대화 상대 선택 ----------
 
 canvas.addEventListener('click', (e) => {
+  if (dragging?.moved) return // 화면을 끌던 중이면 선택하지 않는다
   const rect = canvas.getBoundingClientRect()
-  const lx = (e.clientX - rect.left) / scale
-  const ly = (e.clientY - rect.top) / scale
+  const lx = (e.clientX - rect.left - cam.x) / scale
+  const ly = (e.clientY - rect.top - cam.y) / scale
   let best = null
   let bestD = Infinity
   for (const a of agents.values()) {

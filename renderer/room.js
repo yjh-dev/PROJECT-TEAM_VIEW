@@ -455,44 +455,68 @@ export function drawPartitions(ctx, s, gx, gy) {
   panel(gx - 0.02, gy - 0.55, 1.1, 0.07, 1.1) // 북쪽
 }
 
-// ── 업무 자리 ─────────────────────────────────────────────────────────────
-export function drawWorkstation(ctx, s, gx, gy, screenOn, t) {
-  drawAO(ctx, s, gx, gy, 19, 9.5, 0.2)
+// ── 업무 자리(ㄱ자 책상 + 듀얼 모니터) ────────────────────────────────────
+//
+// 정사각 책상 하나로는 모니터 두 대를 올릴 자리가 안 나온다. 실제 사무용처럼
+// 메인 상판 + 옆으로 뻗은 리턴(보조 상판)으로 ㄱ자를 만든다.
 
-  // 다리 — 빛 받는 쪽에 1픽셀 하이라이트
-  for (const [ox, oy] of [
-    [-0.34, -0.34],
-    [0.34, -0.34],
-    [-0.34, 0.34],
-    [0.34, 0.34],
-  ]) {
-    drawBox(ctx, s, gx + ox, gy + oy, 0.08, 0.08, DESK_H, DESK_LEG)
-    const lp = toScreen(gx + ox, gy + oy)
+const MAIN = { w: 1.3, d: 0.62 } // 메인 상판(캐릭터가 마주보는 쪽)
+const RET = { w: 0.6, d: 1.0 } // 리턴(왼쪽으로 꺾인 보조 상판)
+
+export function drawWorkstation(ctx, s, gx, gy, screenOn, t, cups = 0) {
+  const mainC = { gx, gy: gy - 0.18 }
+  const retC = { gx: gx - 0.6, gy: gy + 0.32 }
+
+  drawAO(ctx, s, gx - 0.15, gy, 26, 12, 0.2)
+
+  // 다리: 메인 4개 + 리턴 2개
+  const legs = [
+    [mainC.gx - 0.55, mainC.gy - 0.24],
+    [mainC.gx + 0.55, mainC.gy - 0.24],
+    [mainC.gx - 0.55, mainC.gy + 0.24],
+    [mainC.gx + 0.55, mainC.gy + 0.24],
+    [retC.gx - 0.22, retC.gy + 0.42],
+    [retC.gx + 0.22, retC.gy + 0.42],
+  ]
+  for (const [lx, ly] of legs) {
+    drawBox(ctx, s, lx, ly, 0.08, 0.08, DESK_H, DESK_LEG)
+    const lp = toScreen(lx, ly)
     px(ctx, s, lp.x - 1.7, lp.y - DESK_H + 0.5, 0.8, DESK_H - 1.5, '#c9b48f')
   }
 
-  // 상판
-  drawBox(ctx, s, gx, gy, 1.0, 1.0, 1.5, DESK_TOP, DESK_H - 1.5)
-  const p = toScreen(gx, gy)
-  for (const f of [-0.3, 0, 0.3]) {
-    topSeam(ctx, s, gx, gy, DESK_H, { gx: -0.45, gy: f }, { gx: 0.45, gy: f }, 'rgba(150,120,80,0.22)', 0.7)
-  }
-  // 앞모서리를 한 줄 어둡게 — 상판 두께가 살아난다
-  px(ctx, s, p.x - TILE_W * 0.5, p.y - DESK_H + TILE_H * 0.5 - 0.5, TILE_W, 0.8, 'rgba(120,95,60,0.3)')
+  // 상판 두 장(겹치는 모서리가 ㄱ자를 만든다)
+  drawBox(ctx, s, retC.gx, retC.gy, RET.w, RET.d, 1.5, DESK_TOP, DESK_H - 1.5)
+  drawBox(ctx, s, mainC.gx, mainC.gy, MAIN.w, MAIN.d, 1.5, DESK_TOP, DESK_H - 1.5)
 
-  // 서랍장 — 이음매와 손잡이까지
-  drawBox(ctx, s, gx + 0.3, gy + 0.28, 0.32, 0.32, DESK_H - 2.2, DRAWER)
-  const dp = toScreen(gx + 0.3, gy + 0.28)
+  // 나뭇결과 앞모서리 그림자
+  const mp = toScreen(mainC.gx, mainC.gy)
+  for (const f of [-0.18, 0, 0.18]) {
+    topSeam(ctx, s, mainC.gx, mainC.gy, DESK_H, { gx: -0.6, gy: f }, { gx: 0.6, gy: f }, 'rgba(150,120,80,0.2)', 0.7)
+  }
+  px(ctx, s, mp.x - TILE_W * 0.62, mp.y - DESK_H + TILE_H * 0.62 - 0.5, TILE_W * 1.24, 0.8, 'rgba(120,95,60,0.28)')
+
+  // 서랍장(메인 상판 오른쪽 아래)
+  drawBox(ctx, s, gx + 0.42, gy + 0.06, 0.3, 0.3, DESK_H - 2.2, DRAWER)
+  const dp = toScreen(gx + 0.42, gy + 0.06)
   for (const dy of [3.0, 6.2]) {
-    px(ctx, s, dp.x - 4.2, dp.y - dy - 0.4, 8.6, 0.7, 'rgba(140,115,80,0.5)')
-    px(ctx, s, dp.x - 2.2, dp.y - dy + 1.1, 4.6, 1.1, '#8a7659')
-    px(ctx, s, dp.x - 2.2, dp.y - dy + 1.1, 4.6, 0.5, '#c2ab86')
+    px(ctx, s, dp.x - 4, dp.y - dy - 0.4, 8.2, 0.7, 'rgba(140,115,80,0.5)')
+    px(ctx, s, dp.x - 2.1, dp.y - dy + 1.1, 4.4, 1.1, '#8a7659')
+    px(ctx, s, dp.x - 2.1, dp.y - dy + 1.1, 4.4, 0.5, '#c2ab86')
   }
 
-  drawMonitor(ctx, s, gx - 0.2, gy - 0.22, screenOn, t)
-  drawKeyboard(ctx, s, gx + 0.04, gy + 0.12)
-  drawMug(ctx, s, gx + 0.36, gy - 0.06, t)
-  drawPapers(ctx, s, gx - 0.34, gy + 0.32)
+  // 듀얼 모니터 — 안쪽으로 살짝 각을 준다
+  drawMonitor(ctx, s, mainC.gx - 0.34, mainC.gy - 0.2, screenOn, t, 0)
+  drawMonitor(ctx, s, mainC.gx + 0.3, mainC.gy - 0.2, screenOn, t, 1)
+
+  drawKeyboard(ctx, s, mainC.gx, mainC.gy + 0.2)
+  drawPapers(ctx, s, retC.gx - 0.02, retC.gy + 0.2)
+
+  // 탕비실에 다녀온 만큼 커피컵이 쌓인다(리턴 상판 위)
+  for (let i = 0; i < Math.min(cups, 6); i++) {
+    const col = i % 3
+    const row = Math.floor(i / 3)
+    drawMug(ctx, s, retC.gx - 0.16 + col * 0.16, retC.gy - 0.34 + row * 0.18, t, i === 0)
+  }
 }
 
 export function drawChair(ctx, s, gx, gy) {
@@ -550,40 +574,37 @@ export function drawChairBack(ctx, s, gx, gy) {
   }
 }
 
-function drawMonitor(ctx, s, gx, gy, on, t) {
+function drawMonitor(ctx, s, gx, gy, on, t, seed = 0) {
   const p = toScreen(gx, gy)
-  drawBox(ctx, s, gx, gy, 0.22, 0.16, 0.7, METAL, DESK_H)
-  px(ctx, s, p.x - 0.9, p.y - DESK_H - 3.6, 1.8, 3, '#8d96a5')
+  drawBox(ctx, s, gx, gy, 0.2, 0.14, 0.7, METAL, DESK_H)
+  px(ctx, s, p.x - 0.9, p.y - DESK_H - 3.4, 1.8, 2.8, '#8d96a5')
 
-  // 베젤 — 캐릭터 키(20)의 절반 정도로 작게
-  const bottom = DESK_H + 3.6
-  const w = 15
-  const h = 9.5
+  const bottom = DESK_H + 3.4
+  const w = 13
+  const h = 8.6
   px(ctx, s, p.x - w / 2, p.y - bottom - h, w, h, '#2f3644')
   px(ctx, s, p.x - w / 2, p.y - bottom - h, w, 0.8, '#4a5464')
-  px(ctx, s, p.x - w / 2, p.y - bottom - 1.4, w, 1.4, '#242a35')
+  px(ctx, s, p.x - w / 2, p.y - bottom - 1.3, w, 1.3, '#242a35')
 
   const sx = p.x - w / 2 + 1
   const sy = p.y - bottom - h + 1
   const sw = w - 2
-  const sh = h - 3
+  const sh = h - 2.8
   if (on) {
     px(ctx, s, sx, sy, sw, sh, '#16202e')
     const colors = ['#7fd1ff', '#a5e887', '#ffd479', '#ff9ec4', '#c4b5fd']
-    for (let i = 0; i < 5; i++) {
-      const row = sy + 0.7 + i * 1.15
-      const indent = ((i * 3 + Math.floor(t / 300)) % 3) * 1.2
-      const len = 2.5 + ((i * 5 + Math.floor(t / 700)) % 8)
-      px(ctx, s, sx + 0.8 + indent, row, Math.min(len, sw - 1.6 - indent), 0.75, colors[i % colors.length])
+    for (let i = 0; i < 4; i++) {
+      const row = sy + 0.7 + i * 1.2
+      const indent = ((i * 3 + seed * 2 + Math.floor(t / 300)) % 3) * 1.1
+      const len = 2 + ((i * 5 + seed * 3 + Math.floor(t / 700)) % 7)
+      px(ctx, s, sx + 0.8 + indent, row, Math.min(len, sw - 1.6 - indent), 0.7, colors[(i + seed) % colors.length])
     }
-    if (Math.floor(t / 500) % 2 === 0) px(ctx, s, sx + 1.2, sy + 0.7 + 5 * 1.15, 0.8, 0.8, '#ffffff')
+    if (Math.floor(t / 500) % 2 === seed % 2) px(ctx, s, sx + 1.1, sy + 0.7 + 4 * 1.2, 0.8, 0.8, '#ffffff')
   } else {
     px(ctx, s, sx, sy, sw, sh, '#c4d2e2')
     px(ctx, s, sx, sy, sw, sh / 2, '#d8e4f0')
-    px(ctx, s, sx + 1, sy + 1, 3, 0.7, '#aebccc')
   }
-  px(ctx, s, p.x + w / 2 - 2.2, p.y - bottom - 1.1, 1, 0.8, on ? '#7ee08a' : '#7b8494')
-  px(ctx, s, p.x - 1.4, p.y - bottom - 1.1, 2.8, 0.7, '#535d6d')
+  px(ctx, s, p.x + w / 2 - 2, p.y - bottom - 1, 0.9, 0.7, on ? '#7ee08a' : '#7b8494')
 }
 
 function drawKeyboard(ctx, s, gx, gy) {
@@ -627,16 +648,18 @@ function drawKeyboard(ctx, s, gx, gy) {
   px(ctx, s, p.x + 9.2, p.y - DESK_H + 0.8, 0.6, 1, '#c2cad7')
 }
 
-function drawMug(ctx, s, gx, gy, t) {
+/** 머그. fresh=true면 김이 오른다(방금 내려온 커피). */
+function drawMug(ctx, s, gx, gy, t, fresh = false) {
   const p = toScreen(gx, gy)
-  const h = 3.6
-  px(ctx, s, p.x - 1.7, p.y - DESK_H - h, 3.4, h, '#ffffff')
-  px(ctx, s, p.x + 0.9, p.y - DESK_H - h, 0.8, h, '#d7dee8')
-  px(ctx, s, p.x + 1.7, p.y - DESK_H - h + 0.9, 0.9, 1.4, '#e6ecf3')
-  px(ctx, s, p.x - 1.7, p.y - DESK_H - h - 0.6, 3.4, 0.7, '#6b4a2f')
-  px(ctx, s, p.x - 1.7, p.y - DESK_H - 1.6, 3.4, 0.8, '#e05c5c')
+  const h = 3.4
+  px(ctx, s, p.x - 1.6, p.y - DESK_H - h, 3.2, h, '#ffffff')
+  px(ctx, s, p.x + 0.8, p.y - DESK_H - h, 0.8, h, '#d7dee8')
+  px(ctx, s, p.x + 1.6, p.y - DESK_H - h + 0.9, 0.9, 1.3, '#e6ecf3')
+  px(ctx, s, p.x - 1.6, p.y - DESK_H - h - 0.6, 3.2, 0.7, '#6b4a2f')
+  px(ctx, s, p.x - 1.6, p.y - DESK_H - 1.5, 3.2, 0.8, '#e05c5c')
+  if (!fresh) return
   ctx.save()
-  ctx.globalAlpha = 0.45
+  ctx.globalAlpha = 0.42
   for (let i = 0; i < 2; i++) {
     const rise = ((t / 900 + i * 0.5) % 1) * 4
     px(ctx, s, p.x - 0.6 + i * 1.2 + Math.sin(rise * 2) * 0.5, p.y - DESK_H - h - 1.4 - rise, 0.7, 0.7, '#ffffff')
@@ -905,14 +928,107 @@ export function drawPlant(ctx, s, gx, gy) {
 }
 
 // 회의 테이블은 회의실(gx 9..12, gy 0..4), 커피 코너는 탕비실(gx 9..12, gy 6..11)에.
+// ── 휴게실 가구 ───────────────────────────────────────────────────────────
+export function drawSofa(ctx, s, gx, gy) {
+  drawAO(ctx, s, gx, gy, 26, 12, 0.2)
+  const body = { top: '#7a8fae', left: '#4e6180', right: '#647a99' }
+  const cushion = { top: '#93a8c4', left: '#5f7391', right: '#7c91ae' }
+
+  drawBox(ctx, s, gx, gy, 1.5, 0.75, 5, body) // 몸통
+  drawBox(ctx, s, gx, gy - 0.28, 1.5, 0.18, 11, body) // 등받이
+  // 방석 두 장
+  for (const e of [-0.34, 0.34]) {
+    drawBox(ctx, s, gx + e, gy + 0.06, 0.62, 0.6, 1.6, cushion, 5)
+  }
+  // 팔걸이
+  for (const e of [-1, 1]) {
+    drawBox(ctx, s, gx + e * 0.78, gy, 0.14, 0.7, 8, body)
+  }
+  const p = toScreen(gx, gy)
+  px(ctx, s, p.x - 15, p.y - 11.6, 30, 0.8, '#9db1cc') // 등받이 윗선
+  // 쿠션 두 개
+  px(ctx, s, p.x - 11, p.y - 10, 5, 4.5, '#e0c07a')
+  px(ctx, s, p.x + 6, p.y - 10, 5, 4.5, '#c98b96')
+}
+
+export function drawLoungeTable(ctx, s, gx, gy, t) {
+  drawAO(ctx, s, gx, gy, 16, 8, 0.18)
+  drawBox(ctx, s, gx, gy, 0.8, 0.8, 5, { top: '#e9d6b6', left: '#b39a75', right: '#d3bc98' })
+  const p = toScreen(gx, gy)
+  // 잡지 두 권과 화분
+  px(ctx, s, p.x - 7, p.y - 6.2, 7, 3, '#7fb3d5')
+  px(ctx, s, p.x - 6, p.y - 6.8, 7, 3, '#e8a0a8')
+  px(ctx, s, p.x + 3, p.y - 8, 3.4, 3.4, '#c9714b')
+  px(ctx, s, p.x + 3.4, p.y - 10.4, 2.6, 2.6, '#5aa85d')
+  // 김 나는 커피
+  px(ctx, s, p.x - 1, p.y - 8.6, 2.8, 3.2, '#ffffff')
+  px(ctx, s, p.x - 1, p.y - 9.2, 2.8, 0.7, '#6b4a2f')
+  ctx.save()
+  ctx.globalAlpha = 0.35
+  const rise = ((t / 1200) % 1) * 3.5
+  px(ctx, s, p.x + 0.2, p.y - 10.4 - rise, 0.7, 0.7, '#ffffff')
+  ctx.restore()
+}
+
+/** 벽걸이 TV — 휴게실 벽에 건다(벽면에 눕혀 그린다). */
+export function drawTV(ctx, s, side, g, t) {
+  const len = 2.4
+  const low = 26
+  const high = 40
+  wallQuad(ctx, s, side, g - 0.08, len + 0.16, low - 0.8, high + 0.8, '#22262e')
+  wallQuad(ctx, s, side, g, len, low, high, '#0f1620')
+  // 화면 — 색 띠가 천천히 바뀐다
+  const hue = Math.floor(t / 2500) % 3
+  const sets = [
+    ['#2b6cb0', '#4a9fd8', '#8ecae6'],
+    ['#7a4a8f', '#b06ab3', '#e0a3d5'],
+    ['#2f7a5a', '#4fae7f', '#93d8b0'],
+  ][hue]
+  sets.forEach((c, i) => {
+    wallQuad(ctx, s, side, g + 0.15 + i * 0.72, 0.62, low + 2 + i, high - 2 - i, c)
+  })
+  wallQuad(ctx, s, side, g, len, high - 1.5, high, 'rgba(255,255,255,0.18)')
+}
+
+/** 분리수거함 — 일반/재활용 두 칸. 커피컵을 여기 버린다. */
+export function drawTrashBins(ctx, s, gx, gy) {
+  drawAO(ctx, s, gx, gy, 14, 7, 0.18)
+  const bins = [
+    { off: -0.26, body: { top: '#5b6472', left: '#3a414c', right: '#4a525e' }, lid: '#6f7a8a', mark: '#c9d2de' },
+    { off: 0.26, body: { top: '#4a7fa8', left: '#2f5372', right: '#3d6a8f' }, lid: '#5b93bd', mark: '#cfe6f5' },
+  ]
+  for (const b of bins) {
+    drawBox(ctx, s, gx + b.off, gy, 0.26, 0.26, 8, b.body)
+    const p = toScreen(gx + b.off, gy)
+    // 뚜껑과 투입구
+    px(ctx, s, p.x - 5.4, p.y - 9.4, 10.8, 1.6, b.lid)
+    px(ctx, s, p.x - 5.4, p.y - 9.4, 10.8, 0.6, '#ffffff40')
+    px(ctx, s, p.x - 2.6, p.y - 9.8, 5.2, 0.9, '#1b2029')
+    // 라벨
+    px(ctx, s, p.x - 2.4, p.y - 6, 4.8, 2.6, b.mark)
+    px(ctx, s, p.x - 1.6, p.y - 5.2, 3.2, 0.7, b.body.left)
+  }
+}
+
 export const PROPS = [
+  // 회의실
   { gx: 10.5, gy: 2, draw: drawMeetingTable },
   { gx: 9.4, gy: 2, draw: drawMeetingChair },
   { gx: 11.6, gy: 2, draw: drawMeetingChair },
   { gx: 10.5, gy: 3.1, draw: drawMeetingChair },
   { gx: 10.5, gy: 0.9, draw: drawMeetingChair },
+  // 탕비실
   { gx: 10, gy: 7.4, draw: drawCoffeeCorner },
-  { gx: 11.6, gy: 10.4, draw: drawPlant },
+  { gx: 11.8, gy: 10.6, draw: drawTrashBins },
+  { gx: 9.3, gy: 11, draw: drawPlant },
+  // 휴게실
+  { gx: 3.2, gy: 15.2, draw: drawSofa },
+  { gx: 3.2, gy: 14.1, draw: drawLoungeTable },
+  { gx: 9.6, gy: 15.2, draw: drawSofa },
+  { gx: 9.6, gy: 14.1, draw: drawLoungeTable },
+  { gx: 0.5, gy: 15.6, draw: drawPlant },
+  { gx: 12.4, gy: 13.4, draw: drawPlant },
+  // 사무실
   { gx: 0.4, gy: 11, draw: drawPlant },
   { gx: 8, gy: 11, draw: drawPlant },
 ]
