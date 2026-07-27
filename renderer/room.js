@@ -108,54 +108,72 @@ export function drawWalls(ctx, s, t) {
   drawClock(ctx, s, 'nw', 4.5, t)
 }
 
-/** 창문 — 틀·유리·창살·블라인드·창턱을 나눠 그린다. */
+/** 창문 — 6칸 유리, 창틀 두께, 걷어올린 블라인드, 창턱까지 나눠 그린다. */
 function drawWindow(ctx, s, side, g, t) {
-  const len = 3.0
-  const low = 23
-  const high = 45
-  const mid = (low + high) / 2
+  const len = 2.8
+  const low = 22
+  const high = 44
+  const H = high - low
+  const cols = 3
+  const rows = 2
 
-  // 바깥 틀(두께가 보이도록 두 겹)
-  wallQuad(ctx, s, side, g - 0.16, len + 0.32, low - 2, high + 2, '#f7f7f5')
-  wallQuad(ctx, s, side, g - 0.08, len + 0.16, low - 1, high + 1, '#dfe3e8')
+  // 벽에 파인 개구부(안쪽 그림자) → 창틀 → 유리 순서
+  wallQuad(ctx, s, side, g - 0.2, len + 0.4, low - 2.4, high + 2.4, 'rgba(120,105,85,0.35)')
+  wallQuad(ctx, s, side, g - 0.16, len + 0.32, low - 2, high + 2, '#fbfaf7')
+  wallQuad(ctx, s, side, g - 0.16, len + 0.32, high + 1.2, high + 2, '#d9d4c8') // 윗틀 그늘
+  wallQuad(ctx, s, side, g - 0.08, len + 0.16, low - 1, high + 1, '#e7e3da')
 
-  // 유리 — 위가 밝고 아래로 갈수록 진한 하늘
-  wallQuad(ctx, s, side, g, len, low, high, '#9ecff0')
-  wallQuad(ctx, s, side, g, len, mid, high, '#b9e2fa')
-  wallQuad(ctx, s, side, g, len, high - 3, high, '#d6f0ff')
+  // 유리 칸 6개 — 칸마다 하늘 밝기를 조금씩 달리해 유리로 보이게 한다
+  const cw = len / cols
+  const ch = H / rows
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const x0 = g + c * cw + 0.05
+      const y0 = low + r * ch + 0.4
+      const w = cw - 0.1
+      const h = ch - 0.8
+      const top = r === rows - 1
+      wallQuad(ctx, s, side, x0, w, y0, y0 + h, top ? '#a9d8f2' : '#8ec5e8')
+      wallQuad(ctx, s, side, x0, w, y0 + h * 0.55, y0 + h, top ? '#c6e9fb' : '#a6d5ef')
+      // 유리 반사 — 칸마다 대각 띠 하나
+      ctx.save()
+      ctx.globalAlpha = 0.22
+      wallQuad(ctx, s, side, x0 + w * 0.15, w * 0.22, y0 + 0.5, y0 + h - 0.5, '#ffffff')
+      ctx.restore()
+    }
+  }
 
-  // 구름 두 조각이 아주 느리게 흐른다
-  const d1 = ((t / 9000) % 1) * len
-  const d2 = ((t / 13000 + 0.45) % 1) * len
-  wallQuad(ctx, s, side, g + d1 * 0.9, 0.55, high - 11, high - 7.5, 'rgba(255,255,255,0.95)')
-  wallQuad(ctx, s, side, g + d1 * 0.9 + 0.2, 0.3, high - 13, high - 10, 'rgba(255,255,255,0.9)')
-  wallQuad(ctx, s, side, g + d2 * 0.85, 0.42, low + 6, low + 8.5, 'rgba(255,255,255,0.75)')
-
-  // 유리 반사 — 대각으로 지나가는 밝은 띠
+  // 아래 칸 바닥에 도시 실루엣 — 밖에 세상이 있다는 신호
   ctx.save()
-  ctx.globalAlpha = 0.18
-  wallQuad(ctx, s, side, g + 0.15, 0.5, low + 1, high - 1, '#ffffff')
-  wallQuad(ctx, s, side, g + 0.85, 0.28, low + 1, high - 1, '#ffffff')
+  ctx.globalAlpha = 0.35
+  for (let i = 0; i < 7; i++) {
+    const bw = 0.12 + ((i * 7) % 3) * 0.06
+    const bh = 2 + ((i * 5) % 4)
+    wallQuad(ctx, s, side, g + 0.15 + i * 0.36, bw, low + 0.6, low + 0.6 + bh, '#7a93ad')
+  }
   ctx.restore()
 
-  // 창살 — 세로 둘, 가로 하나
-  for (const f of [1 / 3, 2 / 3]) {
-    wallQuad(ctx, s, side, g + len * f - 0.045, 0.09, low, high, '#f7f7f5')
-  }
-  wallQuad(ctx, s, side, g, len, mid - 0.6, mid + 0.6, '#f7f7f5')
+  // 구름 두 조각
+  const d1 = ((t / 11000) % 1) * len
+  wallQuad(ctx, s, side, g + d1 * 0.85, 0.5, high - 8, high - 5.6, 'rgba(255,255,255,0.95)')
+  wallQuad(ctx, s, side, g + d1 * 0.85 + 0.18, 0.28, high - 10, high - 7.6, 'rgba(255,255,255,0.9)')
 
-  // 블라인드(위쪽에 걷어 올린 상태)
-  wallQuad(ctx, s, side, g - 0.1, len + 0.2, high + 1, high + 4, '#e9e4d8')
-  for (let i = 0; i < 3; i++) {
-    ctx.save()
-    ctx.globalAlpha = 0.5
-    wallQuad(ctx, s, side, g - 0.1, len + 0.2, high + 1.4 + i, high + 1.8 + i, '#c9c2b2')
-    ctx.restore()
+  // 창살(세로 2 + 가로 1) — 유리 위에
+  for (let c = 1; c < cols; c++) {
+    wallQuad(ctx, s, side, g + c * cw - 0.05, 0.1, low, high, '#fbfaf7')
   }
+  wallQuad(ctx, s, side, g, len, low + ch - 0.45, low + ch + 0.45, '#fbfaf7')
 
-  // 창턱
-  wallQuad(ctx, s, side, g - 0.24, len + 0.48, low - 3.6, low - 2, '#f0ebdf')
-  wallQuad(ctx, s, side, g - 0.24, len + 0.48, low - 4.4, low - 3.6, '#d8d1c1')
+  // 걷어 올린 블라인드 — 슬랫 4장 + 당김줄
+  wallQuad(ctx, s, side, g - 0.02, len + 0.04, high - 4.6, high + 0.6, '#efe9dc')
+  for (let i = 0; i < 4; i++) {
+    wallQuad(ctx, s, side, g - 0.02, len + 0.04, high - 4.2 + i * 1.15, high - 3.7 + i * 1.15, '#d6cfbe')
+  }
+  wallQuad(ctx, s, side, g + len - 0.35, 0.06, high - 12, high - 4.6, '#cfc7b4')
+
+  // 창턱 — 두 단으로 두께를 준다
+  wallQuad(ctx, s, side, g - 0.28, len + 0.56, low - 3.4, low - 1.8, '#f4efe3')
+  wallQuad(ctx, s, side, g - 0.28, len + 0.56, low - 4.4, low - 3.4, '#cfc7b6')
 }
 
 function drawWhiteboard(ctx, s, side, g) {
@@ -238,27 +256,43 @@ function drawClock(ctx, s, side, g, t) {
 
 // ── 파티션(칸막이) ────────────────────────────────────────────────────────
 // 책상의 북·서쪽에만 세운다. 캐릭터보다 뒤에 있으므로 앞을 가리지 않는다.
-const PART_H = 12
+const PART_H = 11
 
 export function drawPartitions(ctx, s, gx, gy) {
   const panel = (cx, cy, w, d, span) => {
-    drawBox(ctx, s, cx, cy, w, d, PART_H, PART_FABRIC)
     const p = toScreen(cx, cy)
-    // 패브릭 질감 — 1픽셀 점을 성기게 찍는다(단색 면이 플라스틱처럼 보이는 걸 막는다)
+    drawAO(ctx, s, cx, cy, span * 14, 3.5, 0.14)
+
+    // 패널 본체
+    drawBox(ctx, s, cx, cy, w, d, PART_H, PART_FABRIC)
+
+    // 패브릭 짜임 — 가로줄 + 성긴 점. 단색 면이 플라스틱처럼 보이는 걸 막는다.
+    const half = (span * TILE_W) / 4
     ctx.save()
-    ctx.globalAlpha = 0.16
-    for (let i = 0; i < 24; i++) {
-      const u = (((i * 37) % 100) / 100 - 0.5) * span * TILE_W * 0.45
-      const v = 2 + ((i * 5) % (PART_H - 4))
-      px(ctx, s, p.x + u, p.y - PART_H + v, 1, 1, '#5f6d80')
+    ctx.globalAlpha = 0.14
+    for (let i = 1; i < PART_H - 1; i += 2) {
+      px(ctx, s, p.x - half, p.y - i, half * 2, 0.6, '#5f6d80')
+    }
+    ctx.globalAlpha = 0.1
+    for (let i = 0; i < 18; i++) {
+      px(ctx, s, p.x - half + ((i * 13) % (half * 2)), p.y - 2 - ((i * 5) % (PART_H - 4)), 0.8, 0.8, '#46505f')
     }
     ctx.restore()
-    // 상단 알루미늄 레일 + 하이라이트
+
+    // 양 끝 기둥 — 패널이 공중에 뜬 판때기로 보이지 않게 한다
+    for (const e of [-1, 1]) {
+      px(ctx, s, p.x + e * half - 1, p.y - PART_H, 2, PART_H, '#9aa6b6')
+      px(ctx, s, p.x + e * half - 1, p.y - PART_H, 0.8, PART_H, '#c3ccd8')
+      // 받침 발
+      px(ctx, s, p.x + e * half - 2.6, p.y - 1.2, 5.2, 1.4, '#7b8798')
+    }
+
+    // 상단 레일 + 하이라이트
     drawBox(ctx, s, cx, cy, w + 0.05, d + 0.05, 0.9, PART_RAIL, PART_H)
-    px(ctx, s, p.x - (span * TILE_W) / 4.5, p.y - PART_H - 0.7, (span * TILE_W) / 2.2, 0.7, '#f5f8fc')
+    px(ctx, s, p.x - half + 1, p.y - PART_H - 0.7, half * 2 - 2, 0.7, '#f6f9fc')
   }
-  panel(gx - 0.58, gy - 0.04, 0.08, 1.22, 1.22) // 서쪽
-  panel(gx - 0.04, gy - 0.58, 1.22, 0.08, 1.22) // 북쪽
+  panel(gx - 0.55, gy - 0.02, 0.07, 1.1, 1.1) // 서쪽
+  panel(gx - 0.02, gy - 0.55, 1.1, 0.07, 1.1) // 북쪽
 }
 
 // ── 업무 자리 ─────────────────────────────────────────────────────────────
@@ -302,47 +336,57 @@ export function drawWorkstation(ctx, s, gx, gy, screenOn, t) {
 }
 
 export function drawChair(ctx, s, gx, gy) {
-  drawAO(ctx, s, gx, gy, 7.5, 3.8, 0.16)
+  drawAO(ctx, s, gx, gy, 7, 3.5, 0.18)
   const p = toScreen(gx, gy)
-  // 5발 받침
-  ctx.save()
-  ctx.strokeStyle = '#39424f'
-  ctx.lineWidth = Math.max(1, 1.4 * s)
+
+  // 5발 받침 — 선 대신 픽셀 조각으로 찍는다(선으로 그으면 낙서처럼 보인다)
   for (let i = 0; i < 5; i++) {
-    const a = (i / 5) * Math.PI * 2 + 0.45
-    const ex = p.x + Math.cos(a) * 6.2
-    const ey = p.y + Math.sin(a) * 3.1
-    ctx.beginPath()
-    ctx.moveTo(p.x * s, p.y * s)
-    ctx.lineTo(ex * s, ey * s)
-    ctx.stroke()
-    px(ctx, s, ex - 0.9, ey - 0.6, 1.8, 1.2, '#2b3340')
+    const a = (i / 5) * Math.PI * 2 + 0.5
+    const ux = Math.cos(a)
+    const uy = Math.sin(a) * 0.5
+    for (let d = 1.5; d <= 6; d += 1.1) {
+      px(ctx, s, p.x + ux * d - 0.7, p.y + uy * d - 0.5, 1.5, 1.1, '#3c4453')
+    }
+    px(ctx, s, p.x + ux * 6.4 - 1, p.y + uy * 6.4 - 0.7, 2, 1.5, '#2a323e')
   }
-  ctx.restore()
+
   // 가스 실린더
-  px(ctx, s, p.x - 0.9, p.y - 4.6, 1.8, 4.6, '#8d96a5')
-  px(ctx, s, p.x - 0.9, p.y - 4.6, 0.7, 4.6, '#b3bcc9')
-  // 좌판
-  drawBox(ctx, s, gx, gy, 0.38, 0.38, 1.3, CHAIR, 4.6)
-  px(ctx, s, p.x - 6, p.y - 5.9, 12, 0.6, '#7b88a3')
+  px(ctx, s, p.x - 1, p.y - 5, 2, 5, '#7f8998')
+  px(ctx, s, p.x - 1, p.y - 5, 0.8, 5, '#adb6c3')
+
+  // 좌판 — 쿠션 느낌으로 윗면에 밝은 띠
+  drawBox(ctx, s, gx, gy, 0.34, 0.34, 1.5, CHAIR, 5)
+  px(ctx, s, p.x - 5.5, p.y - 6.6, 11, 0.7, '#8593ad')
+  px(ctx, s, p.x - 5.5, p.y - 5.2, 11, 0.6, '#39415240')
 }
 
 export function drawChairBack(ctx, s, gx, gy) {
-  drawBox(ctx, s, gx - 0.18, gy - 0.18, 0.34, 0.09, 8.5, CHAIR_BACK, 5.9)
-  const p = toScreen(gx - 0.18, gy - 0.18)
-  // 메시 등받이 — 점을 격자로
+  const p = toScreen(gx - 0.16, gy - 0.16)
+  const bw = 12
+  const bh = 9
+  const bottom = p.y - 6.6
+
+  // 등받이 프레임
+  px(ctx, s, p.x - bw / 2, bottom - bh, bw, bh, '#3f4a5e')
+  // 메시 — 프레임 안쪽만 밝게 채우고 점을 찍는다
+  px(ctx, s, p.x - bw / 2 + 1.2, bottom - bh + 1.2, bw - 2.4, bh - 2.4, '#5b6a86')
   ctx.save()
-  ctx.globalAlpha = 0.32
+  ctx.globalAlpha = 0.28
   for (let r = 0; r < 5; r++) {
-    for (let c = -3; c <= 3; c++) {
-      px(ctx, s, p.x + c * 1.5 + (r % 2) * 0.75, p.y - 7 - r * 1.3, 0.8, 0.8, '#26303f')
+    for (let c = 0; c < 6; c++) {
+      px(ctx, s, p.x - bw / 2 + 2 + c * 1.5, bottom - bh + 2 + r * 1.3, 0.8, 0.8, '#232c3a')
     }
   }
   ctx.restore()
-  // 팔걸이
-  for (const dx of [-6.2, 6.2]) {
-    px(ctx, s, p.x + dx - 0.8, p.y - 5.2, 1.6, 3.2, '#4a5568')
-    px(ctx, s, p.x + dx - 2.3, p.y - 5.7, 4.6, 1.2, '#5b6981')
+  // 위쪽 헤드레스트와 하이라이트
+  px(ctx, s, p.x - bw / 2 + 1, bottom - bh - 1.4, bw - 2, 1.6, '#4d5a72')
+  px(ctx, s, p.x - bw / 2 + 1, bottom - bh - 1.4, bw - 2, 0.6, '#6f7f9d')
+
+  // 팔걸이 — 세로 지지대 + 가로 패드
+  for (const e of [-1, 1]) {
+    px(ctx, s, p.x + e * 6.4 - 0.7, bottom - 4, 1.4, 4, '#404a5e')
+    px(ctx, s, p.x + e * 6.4 - 2.6, bottom - 4.8, 5.2, 1.4, '#59657e')
+    px(ctx, s, p.x + e * 6.4 - 2.6, bottom - 4.8, 5.2, 0.6, '#75839f')
   }
 }
 
@@ -518,22 +562,59 @@ export function drawCoffeeCorner(ctx, s, gx, gy) {
 }
 
 export function drawPlant(ctx, s, gx, gy) {
-  drawAO(ctx, s, gx, gy, 9, 4.5, 0.16)
-  drawBox(ctx, s, gx, gy, 0.4, 0.4, 6, { top: '#e08a63', left: '#a05a3a', right: '#c9714b' })
-  drawBox(ctx, s, gx, gy, 0.42, 0.42, 0.8, { top: '#c9714b', left: '#8f4f33', right: '#b3643f' }, 6)
+  drawAO(ctx, s, gx, gy, 10, 5, 0.2)
   const p = toScreen(gx, gy)
+
+  // 화분 — 아래로 갈수록 좁아지는 사다리꼴을 픽셀 줄로 쌓는다
+  const potH = 8
+  for (let i = 0; i < potH; i++) {
+    const w = 11 - i * 0.55
+    const y = p.y - potH + i
+    px(ctx, s, p.x - w / 2, y, w, 1.05, i < 2 ? '#d9835c' : '#c9714b')
+    px(ctx, s, p.x - w / 2, y, 1.4, 1.05, '#e79a72') // 빛 받는 왼쪽 모서리
+    px(ctx, s, p.x + w / 2 - 1.4, y, 1.4, 1.05, '#a75a3a') // 그늘진 오른쪽
+  }
+  // 테두리(림)와 흙
+  px(ctx, s, p.x - 6.4, p.y - potH - 1.6, 12.8, 1.8, '#e08a63')
+  px(ctx, s, p.x - 6.4, p.y - potH - 1.6, 12.8, 0.7, '#f0a17b')
+  ctx.fillStyle = '#5a4433'
+  ctx.beginPath()
+  ctx.ellipse(p.x * s, (p.y - potH - 1.2) * s, 5.2 * s, 1.7 * s, 0, 0, Math.PI * 2)
+  ctx.fill()
+
+  // 잎 — 줄기 + 잎사귀를 한 장씩. 잎마다 그늘 쪽을 어둡게 찍는다.
   const leaves = [
-    [0, -14, 6.5, 4.4, '#4f9152'],
-    [-5, -11.5, 5.4, 3.6, '#5aa85d'],
-    [5, -11.5, 5.4, 3.6, '#44814a'],
-    [-2, -18, 4.6, 3.6, '#63b566'],
-    [3, -17, 4.4, 3.2, '#4f9455'],
+    [-6, -6, -1, '#4d8f52'],
+    [6, -7, 1, '#417f48'],
+    [-3.5, -12, -1, '#5aa85d'],
+    [3.5, -13, 1, '#4f9455'],
+    [0, -17, 0, '#63b566'],
+    [-7, -11, -1, '#468649'],
+    [7, -12, 1, '#3d7844'],
   ]
-  for (const [dx, dy, rx, ry, color] of leaves) {
-    ctx.fillStyle = color
+  for (const [dx, dy, dir, color] of leaves) {
+    const bx = p.x
+    const by = p.y - potH - 1.5
+    // 줄기
+    ctx.save()
+    ctx.strokeStyle = '#3f7a45'
+    ctx.lineWidth = Math.max(1, 0.9 * s)
     ctx.beginPath()
-    ctx.ellipse((p.x + dx) * s, (p.y + dy) * s, rx * s, ry * s, 0, 0, Math.PI * 2)
-    ctx.fill()
+    ctx.moveTo(bx * s, by * s)
+    ctx.lineTo((bx + dx * 0.7) * s, (by + dy * 0.8) * s)
+    ctx.stroke()
+    ctx.restore()
+    // 잎사귀 — 위아래로 좁아지는 픽셀 줄 쌓기
+    const lx = bx + dx
+    const ly = by + dy
+    for (let i = 0; i < 7; i++) {
+      const t2 = i / 6
+      const w = Math.sin(t2 * Math.PI) * 6.5 + 1
+      const y = ly - 3.5 + i
+      px(ctx, s, lx - w / 2 + dir * 0.6, y, w, 1.05, color)
+    }
+    // 잎맥
+    px(ctx, s, lx - 0.4 + dir * 0.6, ly - 3.2, 0.8, 6.4, 'rgba(255,255,255,0.22)')
   }
 }
 
