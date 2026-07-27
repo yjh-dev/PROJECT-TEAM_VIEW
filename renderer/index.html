@@ -18,34 +18,37 @@
     </div>
 
     <main>
-      <div id="stage-wrap">
-        <canvas id="stage"></canvas>
-        <!-- 이름표·말풍선은 캔버스가 아니라 DOM으로 올린다.
-             도트 배율(2~4배)에 묶이면 글자가 읽히지 않기 때문이다. -->
-        <div id="overlay"></div>
+      <section id="left">
+        <div id="stage-wrap">
+          <canvas id="stage"></canvas>
+          <!-- 이름표·말풍선은 캔버스가 아니라 DOM으로 올린다.
+               도트 배율(2~4배)에 묶이면 글자가 읽히지 않기 때문이다. -->
+          <div id="overlay"></div>
+        </div>
+      </section>
 
-        <!-- 캐릭터를 클릭하면 열리는 개별 지시 패널 -->
-        <aside id="panel" hidden>
-          <header>
-            <strong id="panel-name">팀원</strong>
-            <button id="panel-close" title="닫기 (Esc)">✕</button>
-          </header>
+      <!-- 채팅: 전체 지시와 팀원별 대화를 한곳에서 -->
+      <aside id="chat">
+        <header>
+          <div id="targets"></div>
+        </header>
+        <div id="messages"></div>
+        <footer>
           <textarea
-            id="panel-input"
-            rows="3"
-            placeholder="이 팀원에게 시킬 일을 적으세요. Enter로 전송, Shift+Enter 줄바꿈."
+            id="chat-input"
+            rows="2"
+            placeholder="지시를 입력하세요. Enter 전송 · Shift+Enter 줄바꿈"
           ></textarea>
-          <div class="row">
-            <label title="켜면 새 Claude Code 프로세스를 띄워 즉시 실행합니다. 끄면 대기열에만 넣습니다.">
-              <input type="checkbox" id="panel-spawn" />
+          <div class="send-row">
+            <label title="켜면 새 Claude Code 프로세스를 띄워 즉시 실행합니다. 끄면 지금 열려 있는 세션이 다음 턴에 받습니다.">
+              <input type="checkbox" id="chat-spawn" />
               새 세션으로 즉시 실행
             </label>
-            <button id="panel-send">보내기</button>
+            <button id="chat-send">보내기</button>
           </div>
-          <p id="panel-hint"></p>
-        </aside>
-      </div>
-      <pre id="log" aria-label="최근 활동"></pre>
+          <p id="chat-hint"></p>
+        </footer>
+      </aside>
     </main>
 
     <script type="module" src="app.js"></script>

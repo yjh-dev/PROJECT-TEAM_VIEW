@@ -201,7 +201,8 @@ export function drawSprite(ctx, frame, palette, x, y, scale, flip = false) {
   const oy = Math.round(y * scale - H * scale)
 
   // 어두운 실루엣을 한 픽셀 밀어 먼저 깔면 바닥·책상과 분리돼 보인다.
-  ctx.fillStyle = 'rgba(8,10,18,0.5)'
+  // 배경이 밝으므로 진하게 깔면 때가 낀 것처럼 보인다 — 옅게.
+  ctx.fillStyle = 'rgba(60,45,30,0.28)'
   for (let row = 0; row < frame.length; row++) {
     const line = frame[row]
     for (let col = 0; col < line.length; col++) {

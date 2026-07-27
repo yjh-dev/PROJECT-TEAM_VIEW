@@ -7,12 +7,14 @@ export const TILE_W = 44
 export const TILE_H = 22
 export const GRID = 9 // 9x9 바닥 — 책상 사이에 통로가 생기도록 넉넉히
 
-export const STAGE_W = 520
-export const STAGE_H = 340
+// 9x9 격자가 딱 들어가는 크기. 여기서 더 키우면 정수 배율이 3에서 2로 떨어져
+// 오히려 작아 보인다(픽셀 아트라 배율은 정수여야 한다).
+export const STAGE_W = 460
+export const STAGE_H = 316
 
 // 격자 원점(0,0)이 놓일 화면 좌표. 위쪽에 벽 공간을 남긴다.
 const ORIGIN_X = STAGE_W / 2
-const ORIGIN_Y = 74
+const ORIGIN_Y = 84
 
 /** 격자 좌표 → 화면 좌표(타일 중심). gx/gy는 소수여도 된다(캐릭터가 부드럽게 움직인다). */
 export function toScreen(gx, gy) {
@@ -111,8 +113,8 @@ export function drawBox(ctx, s, gx, gy, w, d, h, colors, lift = 0) {
 export function drawShadow(ctx, s, gx, gy) {
   const { x, y } = toScreen(gx, gy)
   ctx.save()
-  ctx.globalAlpha = 0.3
-  ctx.fillStyle = '#000'
+  ctx.globalAlpha = 0.22
+  ctx.fillStyle = '#5a4530'
   ctx.beginPath()
   ctx.ellipse(x * s, y * s, 8 * s, 4 * s, 0, 0, Math.PI * 2)
   ctx.fill()

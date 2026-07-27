@@ -130,9 +130,9 @@ function pump(isReplay) {
 
 function createWindow() {
   win = new BrowserWindow({
-    width: 1560,
-    height: 1040,
-    minWidth: 1100,
+    width: 1820,
+    height: 1120,
+    minWidth: 1180,
     minHeight: 760,
     backgroundColor: '#11131a',
     autoHideMenuBar: true,
@@ -195,7 +195,7 @@ function appendJsonl(file, obj) {
   fs.appendFileSync(file, JSON.stringify(obj) + '\n', 'utf8')
 }
 
-ipcMain.handle('command:send', async (_e, { agent, text, spawn: doSpawn }) => {
+ipcMain.handle('command:send', async (_e, { agent, text, spawn: doSpawn, broadcast }) => {
   const projectDir = loadConfig().projectDir
   if (!projectDir) return { ok: false, error: '프로젝트가 선택되지 않았습니다' }
   const body = String(text ?? '').trim()
@@ -210,7 +210,8 @@ ipcMain.handle('command:send', async (_e, { agent, text, spawn: doSpawn }) => {
   try {
     appendJsonl(path.join(claudeDir, 'team-commands.jsonl'), {
       ts,
-      agent,
+      // 전체 지시는 리드가 받아 알아서 팀에 나눈다(특정 서브에이전트를 지정하지 않는다)
+      agent: broadcast ? 'lead' : agent,
       text: body,
       status: 'pending',
     })
