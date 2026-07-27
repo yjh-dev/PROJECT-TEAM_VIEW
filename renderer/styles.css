@@ -16,7 +16,7 @@ body {
   height: 100%;
   background: var(--bg);
   color: var(--text);
-  font: 13px/1.5 "Malgun Gothic", "Segoe UI", system-ui, sans-serif;
+  font: 15px/1.5 "Malgun Gothic", "Segoe UI", system-ui, sans-serif;
   overflow: hidden;
   user-select: none;
 }
@@ -24,8 +24,8 @@ body {
 #bar {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 8px 12px;
+  gap: 14px;
+  padding: 11px 16px;
   background: var(--panel);
   border-bottom: 1px solid var(--line);
 }
@@ -34,8 +34,8 @@ button {
   background: #2b3346;
   color: var(--text);
   border: 1px solid #3a4459;
-  border-radius: 4px;
-  padding: 4px 10px;
+  border-radius: 5px;
+  padding: 7px 14px;
   font: inherit;
   cursor: pointer;
 }
@@ -47,7 +47,7 @@ button:hover {
 #project {
   color: var(--muted);
   font-family: Consolas, monospace;
-  font-size: 12px;
+  font-size: 13px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -55,8 +55,8 @@ button:hover {
 }
 
 #status {
-  font-size: 12px;
-  padding: 2px 8px;
+  font-size: 13px;
+  padding: 4px 12px;
   border-radius: 999px;
 }
 
@@ -82,6 +82,63 @@ main {
 
 #stage-wrap {
   position: relative;
+}
+
+#overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* 이름표 — 캐릭터 발밑에 붙는다 */
+.tag {
+  position: absolute;
+  transform: translate(-50%, 0);
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 3px 7px;
+  border-radius: 4px;
+  background: rgba(12, 15, 22, 0.82);
+  border: 1px solid #333c52;
+  color: #8e97ad;
+}
+
+.tag.on {
+  color: #eaf2ff;
+  border-color: #5d7bb5;
+  background: rgba(26, 38, 62, 0.92);
+}
+
+.tag .role {
+  font-size: 11px;
+  font-weight: 400;
+  opacity: 0.72;
+  margin-left: 5px;
+}
+
+/* 말풍선 — 캐릭터 머리 위 */
+.bubble {
+  position: absolute;
+  transform: translate(-50%, -100%);
+  max-width: 260px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 13px;
+  line-height: 1.2;
+  padding: 5px 9px;
+  border-radius: 6px;
+  background: rgba(18, 23, 34, 0.95);
+  border: 1px solid #465270;
+  color: #dfe6f5;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.4);
+}
+
+.bubble.queued {
+  color: #ffd79a;
+  border-color: #7a6134;
 }
 
 #panel {
@@ -158,15 +215,16 @@ canvas {
 #log {
   margin: 0;
   width: 100%;
-  max-width: 960px;
-  height: 8.5em;
+  max-width: 1200px;
+  height: 8em;
   overflow: hidden;
-  color: var(--muted);
+  color: #9aa3ba;
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 4px;
-  padding: 8px 10px;
+  border-radius: 6px;
+  padding: 10px 14px;
   font-family: Consolas, monospace;
-  font-size: 12px;
+  font-size: 14px;
+  line-height: 1.45;
   white-space: pre;
 }

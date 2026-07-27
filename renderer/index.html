@@ -20,6 +20,9 @@
     <main>
       <div id="stage-wrap">
         <canvas id="stage"></canvas>
+        <!-- 이름표·말풍선은 캔버스가 아니라 DOM으로 올린다.
+             도트 배율(2~4배)에 묶이면 글자가 읽히지 않기 때문이다. -->
+        <div id="overlay"></div>
 
         <!-- 캐릭터를 클릭하면 열리는 개별 지시 패널 -->
         <aside id="panel" hidden>

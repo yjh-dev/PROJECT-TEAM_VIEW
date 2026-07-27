@@ -159,23 +159,54 @@ function frameIndex(pose, t) {
 
 // ---------- 그리기 ----------
 
-function drawBubble(a, text, tone = '#dfe6f5') {
-  const { x, y } = toScreen(a.gx, a.gy)
-  const px = 4
-  ctx.font = `${px * scale}px Consolas, monospace`
-  const w = Math.min(ctx.measureText(text).width / scale + 6, 96)
-  const h = 9
-  const bx = Math.round(x - w / 2)
-  const by = Math.round(y - 30 - h)
+// 이름표·말풍선은 DOM 노드로 관리한다. 캐릭터마다 한 번 만들고 위치만 갱신한다.
+const overlay = document.getElementById('overlay')
+const nodes = new Map() // id -> { tag, bubble }
 
-  ctx.fillStyle = 'rgba(12,15,22,0.92)'
-  ctx.fillRect(bx * scale, by * scale, w * scale, h * scale)
-  ctx.fillStyle = '#39415a'
-  ctx.fillRect(bx * scale, by * scale, w * scale, scale)
-  ctx.fillRect(bx * scale, (by + h - 1) * scale, w * scale, scale)
-  ctx.fillStyle = tone
-  ctx.textBaseline = 'top'
-  ctx.fillText(text, (bx + 3) * scale, (by + 2) * scale)
+function nodesFor(a) {
+  let n = nodes.get(a.id)
+  if (n) return n
+  const tag = document.createElement('div')
+  tag.className = 'tag'
+  tag.innerHTML = `<span class="name"></span><span class="role"></span>`
+  const bubble = document.createElement('div')
+  bubble.className = 'bubble'
+  bubble.hidden = true
+  overlay.append(tag, bubble)
+  n = { tag, bubble }
+  nodes.set(a.id, n)
+  return n
+}
+
+function syncOverlay(now) {
+  for (const a of agents.values()) {
+    const { tag, bubble } = nodesFor(a)
+    const { x, y } = toScreen(a.gx, a.gy)
+
+    tag.style.left = `${x * scale}px`
+    tag.style.top = `${(y + 6) * scale}px`
+    tag.classList.toggle('on', a.active)
+    tag.querySelector('.name').textContent = a.label
+    tag.querySelector('.role').textContent = a.id === a.label ? '' : a.id
+
+    let text = null
+    let queued = false
+    if (a.queued > 0) {
+      text = `지시 ${a.queued}건 대기`
+      queued = true
+    } else if (a.active && now - a.lastEventAt < 6000 && a.task) {
+      text = a.task
+    }
+    if (text) {
+      bubble.hidden = false
+      bubble.textContent = text
+      bubble.classList.toggle('queued', queued)
+      bubble.style.left = `${x * scale}px`
+      bubble.style.top = `${(y - 26) * scale}px`
+    } else {
+      bubble.hidden = true
+    }
+  }
 }
 
 function draw(t) {
@@ -209,24 +240,11 @@ function draw(t) {
     // 선택 표시
     if (selected === a.id) {
       ctx.strokeStyle = '#7dcfff'
-      ctx.lineWidth = Math.max(1, scale / 2)
+      ctx.lineWidth = Math.max(2, scale / 2)
       ctx.beginPath()
-      ctx.ellipse(x * scale, y * scale, 8 * scale, 4 * scale, 0, 0, Math.PI * 2)
+      ctx.ellipse(x * scale, y * scale, 11 * scale, 5.5 * scale, 0, 0, Math.PI * 2)
       ctx.stroke()
     }
-
-    // 이름표
-    ctx.font = `${3 * scale}px Consolas, monospace`
-    ctx.fillStyle = a.active ? '#cfe3ff' : '#79809a'
-    ctx.textBaseline = 'top'
-    const tw = ctx.measureText(a.label).width
-    ctx.fillText(a.label, Math.round(x * scale - tw / 2), Math.round((y + 3) * scale))
-  }
-
-  // 말풍선은 항상 맨 위
-  for (const a of agents.values()) {
-    if (a.queued > 0) drawBubble(a, `지시 ${a.queued}건 대기`, '#ffd79a')
-    else if (a.active && performance.now() - a.lastEventAt < 6000 && a.task) drawBubble(a, a.task)
   }
 }
 
@@ -235,6 +253,7 @@ function loop(now) {
   lastFrame = now
   update(dt, now)
   draw(now)
+  syncOverlay(now)
   requestAnimationFrame(loop)
 }
 
@@ -248,7 +267,7 @@ function hitTest(px, py) {
   let bestD = Infinity
   for (const a of agents.values()) {
     const { x, y } = toScreen(a.gx, a.gy)
-    if (lx < x - 7 || lx > x + 7 || ly < y - 17 || ly > y + 4) continue
+    if (lx < x - 9 || lx > x + 9 || ly < y - 24 || ly > y + 5) continue
     const d = Math.abs(lx - x) + Math.abs(ly - y)
     if (d < bestD) {
       bestD = d
@@ -320,6 +339,8 @@ panelInput.addEventListener('keydown', (e) => {
 window.teamView.onEvents((events) => events.forEach(applyEvent))
 window.teamView.onReset(() => {
   agents = buildAgents()
+  nodes.clear()
+  overlay.replaceChildren()
   logLines.length = 0
   logEl.textContent = ''
 })

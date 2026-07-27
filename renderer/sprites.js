@@ -1,129 +1,153 @@
-// 도트 캐릭터를 코드로 찍는다. 외부 이미지 에셋이 없으므로 라이선스·경로 문제가 없고,
-// 팀원이 늘어나면 팔레트만 추가하면 된다.
+// 쿼터뷰(아이소메트릭) 도트 캐릭터. 16x24 그리드를 코드로 찍는다.
 //
-// 각 프레임은 12x16 문자 그리드다:
-//   . 투명   H 머리   F 얼굴   E 눈   S 셔츠   A 팔(피부)   P 바지   B 신발   K 포인트색
+// 3D처럼 보이게 하는 핵심은 **한 색을 두 단계로 쓰는 것**이다. 광원을 왼쪽 위에 두고
+// 대문자는 밝은 면, 소문자는 그늘진 면으로 칠한다. 그래서 팔레트 키가 쌍으로 있다.
+//
+//   H/h 머리   F/f 얼굴·피부   E 눈   S/s 상의   A/a 팔   P/p 하의   B/b 신발   K 포인트
+//   . 투명
+//
+// 캐릭터는 화면 오른쪽 아래(남동)를 바라본다. 왼쪽으로 갈 때는 좌우 반전해서 남서를 본다.
 
-const W = 12
-const H = 16
+const W = 16
+const H = 24
 
-// 기본 자세(정면, 서 있음)
 const IDLE_A = [
-  '....HHHH....',
-  '...HHHHHH...',
-  '..HHHHHHHH..',
-  '..HFFFFFFH..',
-  '..FEFFFFEF..',
-  '..FFFFFFFF..',
-  '...FFFFFF...',
-  '....FFFF....',
-  '..KSSSSSSK..',
-  '.ASSSSSSSSA.',
-  '.ASSSSSSSSA.',
-  '.A.SSSSSS.A.',
-  '...PPPPPP...',
-  '...PP..PP...',
-  '...PP..PP...',
-  '..BBB..BBB..',
+  '......HHHH......',
+  '....HHHHHHHh....',
+  '...HHHHHHHHhh...',
+  '..HHHFFFFFFhh...',
+  '..HHFFFFFFFfh...',
+  '..HhFFEFFEFff...',
+  '...hFFFFFFFff...',
+  '...hFFFFFFff....',
+  '....fFFFFff.....',
+  '.....KKKKK......',
+  '...SSSSSSSSs....',
+  '..SSSSSSSSSss...',
+  '..SSSSSSSSSss...',
+  '.ASSSSSSSSSssA..',
+  '.ASSSSSSSSSssA..',
+  '.aSSSSSSSSSssa..',
+  '...SSSSSSSss....',
+  '...PPPPPPPpp....',
+  '...PPPP.Ppp.....',
+  '...PPP..Ppp.....',
+  '...PPP..Ppp.....',
+  '..BBBB..BBbb....',
+  '.BBBBB..BBBbb...',
+  '................',
 ]
 
-// 살짝 숨쉬는 프레임(1px 내려앉음)
-const IDLE_B = [
-  '............',
-  '....HHHH....',
-  '...HHHHHH...',
-  '..HHHHHHHH..',
-  '..HFFFFFFH..',
-  '..FEFFFFEF..',
-  '..FFFFFFFF..',
-  '...FFFFFF...',
-  '....FFFF....',
-  '..KSSSSSSK..',
-  '.ASSSSSSSSA.',
-  '.ASSSSSSSSA.',
-  '...SSSSSS...',
-  '...PPPPPP...',
-  '...PP..PP...',
-  '..BBB..BBB..',
-]
+// 숨쉬기 — 한 픽셀 내려앉는다
+const IDLE_B = ['................', ...IDLE_A.slice(0, 23)]
 
-// 걷기 1 — 왼발 앞
 const WALK_A = [
-  '....HHHH....',
-  '...HHHHHH...',
-  '..HHHHHHHH..',
-  '..HFFFFFFH..',
-  '..FEFFFFEF..',
-  '..FFFFFFFF..',
-  '...FFFFFF...',
-  '....FFFF....',
-  '..KSSSSSSK..',
-  'ASSSSSSSSS..',
-  'ASSSSSSSSSA.',
-  '..SSSSSSS.A.',
-  '..PPPPPPP...',
-  '..PP...PPP..',
-  '.PP.....PP..',
-  'BBB.....BBB.',
+  '......HHHH......',
+  '....HHHHHHHh....',
+  '...HHHHHHHHhh...',
+  '..HHHFFFFFFhh...',
+  '..HHFFFFFFFfh...',
+  '..HhFFEFFEFff...',
+  '...hFFFFFFFff...',
+  '...hFFFFFFff....',
+  '....fFFFFff.....',
+  '.....KKKKK......',
+  '...SSSSSSSSs....',
+  '..SSSSSSSSSss...',
+  'A.SSSSSSSSSss...',
+  'ASSSSSSSSSSssA..',
+  'aSSSSSSSSSSssA..',
+  '..SSSSSSSSSssa..',
+  '...SSSSSSSss....',
+  '...PPPPPPPpp....',
+  '..PPPP..Ppp.....',
+  '..PPP...Pppp....',
+  '.PPP.....Ppp....',
+  '.BBBB....BBbb...',
+  'BBBBB.....BBbb..',
+  '................',
 ]
 
-// 걷기 2 — 오른발 앞
 const WALK_B = [
-  '....HHHH....',
-  '...HHHHHH...',
-  '..HHHHHHHH..',
-  '..HFFFFFFH..',
-  '..FEFFFFEF..',
-  '..FFFFFFFF..',
-  '...FFFFFF...',
-  '....FFFF....',
-  '..KSSSSSSK..',
-  '..SSSSSSSSA.',
-  '.ASSSSSSSSA.',
-  '.A.SSSSSSS..',
-  '...PPPPPPP..',
-  '..PPP...PP..',
-  '..PP.....PP.',
-  '.BBB.....BBB',
+  '......HHHH......',
+  '....HHHHHHHh....',
+  '...HHHHHHHHhh...',
+  '..HHHFFFFFFhh...',
+  '..HHFFFFFFFfh...',
+  '..HhFFEFFEFff...',
+  '...hFFFFFFFff...',
+  '...hFFFFFFff....',
+  '....fFFFFff.....',
+  '.....KKKKK......',
+  '...SSSSSSSSs....',
+  '..SSSSSSSSSss...',
+  '..SSSSSSSSSssA..',
+  '.ASSSSSSSSSssA..',
+  '.ASSSSSSSSSssa..',
+  '.a.SSSSSSSss....',
+  '...SSSSSSSss....',
+  '...PPPPPPPpp....',
+  '...PPPPPpp......',
+  '...PPPPpp.......',
+  '...PPPpp........',
+  '..BBBBbb........',
+  '.BBBBBbb........',
+  '................',
 ]
 
-// 타이핑 — 앉아서 팔을 앞으로. 아래쪽은 책상에 가려지므로 다리를 그리지 않는다.
+// 앉아서 타이핑. 하반신은 책상에 가려지므로 그리지 않는다.
 const TYPE_A = [
-  '....HHHH....',
-  '...HHHHHH...',
-  '..HHHHHHHH..',
-  '..HFFFFFFH..',
-  '..FEFFFFEF..',
-  '..FFFFFFFF..',
-  '...FFFFFF...',
-  '....FFFF....',
-  '..KSSSSSSK..',
-  '.SSSSSSSSSS.',
-  'ASSSSSSSSSSA',
-  '.AA......AA.',
-  '............',
-  '............',
-  '............',
-  '............',
+  '................',
+  '................',
+  '......HHHH......',
+  '....HHHHHHHh....',
+  '...HHHHHHHHhh...',
+  '..HHHFFFFFFhh...',
+  '..HHFFFFFFFfh...',
+  '..HhFFEFFEFff...',
+  '...hFFFFFFFff...',
+  '...hFFFFFFff....',
+  '....fFFFFff.....',
+  '.....KKKKK......',
+  '...SSSSSSSSs....',
+  '..SSSSSSSSSss...',
+  '.ASSSSSSSSSssA..',
+  '.AASSSSSSSssAA..',
+  '..aa.....aaa....',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
 ]
 
 const TYPE_B = [
-  '....HHHH....',
-  '...HHHHHH...',
-  '..HHHHHHHH..',
-  '..HFFFFFFH..',
-  '..FEFFFFEF..',
-  '..FFFFFFFF..',
-  '...FFFFFF...',
-  '....FFFF....',
-  '..KSSSSSSK..',
-  '.SSSSSSSSSS.',
-  'ASSSSSSSSSSA',
-  '..AA....AA..',
-  '............',
-  '............',
-  '............',
-  '............',
+  '................',
+  '................',
+  '......HHHH......',
+  '....HHHHHHHh....',
+  '...HHHHHHHHhh...',
+  '..HHHFFFFFFhh...',
+  '..HHFFFFFFFfh...',
+  '..HhFFEFFEFff...',
+  '...hFFFFFFFff...',
+  '...hFFFFFFff....',
+  '....fFFFFff.....',
+  '.....KKKKK......',
+  '...SSSSSSSSs....',
+  '..SSSSSSSSSss...',
+  '.ASSSSSSSSSssA..',
+  '..AASSSSSSSaA...',
+  '...aa...aaa.....',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
 ]
 
 export const POSES = {
@@ -135,19 +159,49 @@ export const POSES = {
 export const SPRITE_W = W
 export const SPRITE_H = H
 
+/** hex 색을 비율만큼 어둡게(또는 밝게) 만든다. 그늘 색을 손으로 고르지 않기 위해서. */
+function shade(hex, k) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex)
+  if (!m) return hex
+  const n = parseInt(m[1], 16)
+  const c = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((v) =>
+    Math.max(0, Math.min(255, Math.round(v * k))),
+  )
+  return `#${c.map((v) => v.toString(16).padStart(2, '0')).join('')}`
+}
+
+/** 역할별 팔레트. 밝은 면/그늘 면을 자동으로 짝지어 만든다. */
+export function makePalette({ hair, shirt, accent, skin = '#f2caa4' }) {
+  const pants = '#414a63'
+  const shoes = '#22262f'
+  return {
+    H: hair,
+    h: shade(hair, 0.68),
+    F: skin,
+    f: shade(skin, 0.74),
+    E: '#2a2233',
+    S: shirt,
+    s: shade(shirt, 0.7),
+    A: skin,
+    a: shade(skin, 0.74),
+    P: pants,
+    p: shade(pants, 0.7),
+    B: shoes,
+    b: shade(shoes, 0.7),
+    K: accent,
+  }
+}
+
 /**
- * 한 프레임을 그린다. (x, y)는 **논리 좌표**(320x200 기준)의 발밑 중앙이며,
- * 배경·책상과 같은 배율로 확대된다. 여기서 scale을 곱하지 않으면 캐릭터만
- * 1배로 그려져 책상과 어긋난다.
- * flip=true면 좌우 반전(왼쪽으로 걸을 때).
+ * 한 프레임을 그린다. (x, y)는 **논리 좌표**의 발밑 중앙이며 배경과 같은 배율로 확대된다.
+ * flip=true면 좌우 반전(남서를 바라본다).
  */
 export function drawSprite(ctx, frame, palette, x, y, scale, flip = false) {
   const ox = Math.round(x * scale - (W * scale) / 2)
   const oy = Math.round(y * scale - H * scale)
 
-  // 1) 실루엣을 어두운 색으로 한 픽셀 밀어 먼저 깔면 캐릭터가 배경에서 떠오른다.
-  //    아이소메트릭 화면에서 평면 스프라이트가 납작해 보이지 않게 하는 값싼 방법이다.
-  ctx.fillStyle = 'rgba(10,12,20,0.55)'
+  // 어두운 실루엣을 한 픽셀 밀어 먼저 깔면 바닥·책상과 분리돼 보인다.
+  ctx.fillStyle = 'rgba(8,10,18,0.5)'
   for (let row = 0; row < frame.length; row++) {
     const line = frame[row]
     for (let col = 0; col < line.length; col++) {
@@ -157,7 +211,6 @@ export function drawSprite(ctx, frame, palette, x, y, scale, flip = false) {
     }
   }
 
-  // 2) 본체
   for (let row = 0; row < frame.length; row++) {
     const line = frame[row]
     for (let col = 0; col < line.length; col++) {
@@ -169,33 +222,5 @@ export function drawSprite(ctx, frame, palette, x, y, scale, flip = false) {
       ctx.fillStyle = color
       ctx.fillRect(ox + cx * scale, oy + row * scale, scale, scale)
     }
-  }
-
-  // 3) 오른쪽 절반에 옅은 그늘 — 광원이 왼쪽 위에 있다고 가정한다
-  ctx.save()
-  ctx.globalAlpha = 0.14
-  ctx.fillStyle = '#0a0e18'
-  for (let row = 0; row < frame.length; row++) {
-    const line = frame[row]
-    for (let col = Math.floor(W * 0.62); col < line.length; col++) {
-      if (line[col] === '.') continue
-      const cx = flip ? W - 1 - col : col
-      ctx.fillRect(ox + cx * scale, oy + row * scale, scale, scale)
-    }
-  }
-  ctx.restore()
-}
-
-/** 역할별 팔레트. H=머리, S=셔츠, K=포인트가 캐릭터를 구분하는 축이다. */
-export function makePalette({ hair, shirt, accent, skin = '#f0c8a0' }) {
-  return {
-    H: hair,
-    F: skin,
-    A: skin,
-    E: '#2b2233',
-    S: shirt,
-    K: accent,
-    P: '#3b4257',
-    B: '#23262f',
   }
 }

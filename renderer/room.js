@@ -17,20 +17,21 @@ export function drawFloor(ctx, s) {
 
 /** 뒤쪽 두 벽. 바닥보다 먼저 그려 뒤에 놓는다. */
 export function drawWalls(ctx, s, t) {
-  const H = 30
+  const H = 42
 
-  // 북서쪽 벽 (gx = -0.5 라인)
+  // 북서쪽 벽
   for (let gy = 0; gy < GRID; gy++) {
     drawWallPanel(ctx, s, -1, gy, H, '#262c3e', '#1d2231')
   }
-  // 북동쪽 벽 (gy = -0.5 라인)
+  // 북동쪽 벽
   for (let gx = 0; gx < GRID; gx++) {
     drawWallPanel(ctx, s, gx, -1, H, '#2c3346', null)
   }
 
-  // 창문 두 개 — 밤하늘이 살짝 반짝인다
-  drawWindow(ctx, s, 1, -1, t)
-  drawWindow(ctx, s, 4, -1, t)
+  // 창문 — 밤하늘이 살짝 반짝인다
+  drawWindow(ctx, s, 2, -1, t)
+  drawWindow(ctx, s, 6, -1, t)
+  drawWindow(ctx, s, -1, 3, t)
 }
 
 function drawWallPanel(ctx, s, gx, gy, h, face, edge) {
@@ -55,10 +56,10 @@ function drawWallPanel(ctx, s, gx, gy, h, face, edge) {
 
 function drawWindow(ctx, s, gx, gy, t) {
   const { x, y } = toScreen(gx, gy)
-  const w = 20
-  const h = 14
+  const w = 28
+  const h = 20
   const cx = x
-  const cy = y - 20
+  const cy = y - 26
 
   ctx.fillStyle = '#141a2a'
   ctx.fillRect((cx - w / 2) * s, (cy - h / 2) * s, w * s, h * s)
@@ -78,25 +79,28 @@ function drawWindow(ctx, s, gx, gy, t) {
 
 /** 책상 + 모니터. 책상 칸(gx, gy)에 놓는다. */
 export function drawDesk(ctx, s, gx, gy, screenOn, t) {
-  drawBox(ctx, s, gx, gy, 0.92, 0.92, 7, DESK)
+  const DESK_H = 10
+  drawBox(ctx, s, gx, gy, 1.05, 1.05, DESK_H, DESK)
 
   // 모니터는 책상 위(뒤쪽)에 세운다
-  drawBox(ctx, s, gx - 0.15, gy - 0.15, 0.42, 0.42, 9, SCREEN_FRAME, 7)
+  drawBox(ctx, s, gx - 0.18, gy - 0.18, 0.5, 0.5, 13, SCREEN_FRAME, DESK_H)
 
-  const { x, y } = toScreen(gx - 0.15, gy - 0.15)
-  const sx = x - 5
-  const sy = y - 7 - 14
+  const { x, y } = toScreen(gx - 0.18, gy - 0.18)
+  const w = 15
+  const h = 10
+  const sx = x - w / 2
+  const sy = y - DESK_H - 20
   if (screenOn) {
     ctx.fillStyle = '#2f7f9e'
-    ctx.fillRect(sx * s, sy * s, 10 * s, 7 * s)
-    ctx.fillStyle = 'rgba(180,240,255,0.75)'
-    for (let i = 0; i < 4; i++) {
-      const ly = sy + 1 + ((i * 2 + Math.floor(t / 150)) % 6)
-      ctx.fillRect((sx + 1) * s, ly * s, (2 + ((i * 3) % 6)) * s, s)
+    ctx.fillRect(sx * s, sy * s, w * s, h * s)
+    ctx.fillStyle = 'rgba(185,242,255,0.8)'
+    for (let i = 0; i < 5; i++) {
+      const ly = sy + 1 + ((i * 2 + Math.floor(t / 150)) % (h - 2))
+      ctx.fillRect((sx + 2) * s, ly * s, (3 + ((i * 4) % 9)) * s, s)
     }
   } else {
     ctx.fillStyle = '#1a1f2b'
-    ctx.fillRect(sx * s, sy * s, 10 * s, 7 * s)
+    ctx.fillRect(sx * s, sy * s, w * s, h * s)
   }
 }
 

@@ -21,21 +21,22 @@ export const ROSTER = [
 
 const UNKNOWN = { hair: '#5a5a68', shirt: '#8a8a99', accent: '#c8c8d4' }
 
-// 책상이 놓인 격자 칸. 캐릭터는 책상의 **북쪽 한 칸 앞**에 서서 일한다.
+// 책상이 놓인 격자 칸. 3칸 간격으로 벌려 사이에 통로를 둔다.
+// 캐릭터는 책상의 **북쪽 한 칸 앞**에 서서 일한다.
 const DESK_CELLS = [
-  { gx: 1, gy: 1 },
-  { gx: 3, gy: 1 },
-  { gx: 5, gy: 1 },
-  { gx: 1, gy: 3 },
-  { gx: 3, gy: 3 },
-  { gx: 5, gy: 3 },
+  { gx: 1, gy: 2 },
+  { gx: 4, gy: 2 },
+  { gx: 7, gy: 2 },
   { gx: 1, gy: 5 },
-  { gx: 3, gy: 5 },
-  { gx: 5, gy: 5 },
+  { gx: 4, gy: 5 },
+  { gx: 7, gy: 5 },
+  { gx: 1, gy: 8 },
+  { gx: 4, gy: 8 },
+  { gx: 7, gy: 8 },
 ]
 
 // 리드는 팀을 마주보는 상석
-const LEAD_DESK = { gx: 3, gy: -0.2 }
+const LEAD_DESK = { gx: 4, gy: -0.6 }
 
 export function buildAgents() {
   const agents = new Map()
@@ -47,8 +48,8 @@ export function buildAgents() {
 }
 
 export function makeAgent(role, desk) {
-  const work = { gx: desk.gx, gy: desk.gy - 0.75 } // 책상 앞(일하는 자리)
-  const rest = { gx: desk.gx - 0.55, gy: desk.gy + 0.85 } // 자리 옆(쉬는 자리)
+  const work = { gx: desk.gx, gy: desk.gy - 0.85 } // 책상 앞(일하는 자리)
+  const rest = { gx: desk.gx - 1.1, gy: desk.gy + 1.2 } // 통로 쪽(쉬는 자리)
   return {
     id: role.id,
     label: role.label ?? role.id,
@@ -71,7 +72,7 @@ export function makeAgent(role, desk) {
 export function agentOrCreate(agents, id) {
   if (agents.has(id)) return agents.get(id)
   const idx = agents.size - 1
-  const desk = { gx: 6.4, gy: (idx % 6) * 1.1 }
+  const desk = { gx: 10, gy: (idx % 6) * 1.6 } // 격자 밖 임시 자리
   const a = makeAgent({ id, label: id, ...UNKNOWN }, desk)
   agents.set(id, a)
   return a

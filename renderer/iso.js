@@ -3,16 +3,16 @@
 // 타일은 2:1 마름모(32x16)다. 고전 도트 게임에서 쓰는 비율이고, 정수 배율로 확대해도
 // 픽셀이 뭉개지지 않는다.
 
-export const TILE_W = 32
-export const TILE_H = 16
-export const GRID = 7 // 7x7 바닥
+export const TILE_W = 44
+export const TILE_H = 22
+export const GRID = 9 // 9x9 바닥 — 책상 사이에 통로가 생기도록 넉넉히
 
-export const STAGE_W = 360
-export const STAGE_H = 250
+export const STAGE_W = 520
+export const STAGE_H = 340
 
 // 격자 원점(0,0)이 놓일 화면 좌표. 위쪽에 벽 공간을 남긴다.
 const ORIGIN_X = STAGE_W / 2
-const ORIGIN_Y = 62
+const ORIGIN_Y = 74
 
 /** 격자 좌표 → 화면 좌표(타일 중심). gx/gy는 소수여도 된다(캐릭터가 부드럽게 움직인다). */
 export function toScreen(gx, gy) {
@@ -54,7 +54,7 @@ export function fillTile(ctx, s, gx, gy, top, side) {
 
   if (side) {
     // 타일 두께 — 바닥이 판때기가 아니라 블록처럼 보이게 한다
-    const t = 2
+    const t = 3
     ctx.beginPath()
     ctx.moveTo((x - hw) * s, y * s)
     ctx.lineTo(x * s, (y + hh) * s)
@@ -111,10 +111,10 @@ export function drawBox(ctx, s, gx, gy, w, d, h, colors, lift = 0) {
 export function drawShadow(ctx, s, gx, gy) {
   const { x, y } = toScreen(gx, gy)
   ctx.save()
-  ctx.globalAlpha = 0.28
+  ctx.globalAlpha = 0.3
   ctx.fillStyle = '#000'
   ctx.beginPath()
-  ctx.ellipse(x * s, y * s, 6 * s, 3 * s, 0, 0, Math.PI * 2)
+  ctx.ellipse(x * s, y * s, 8 * s, 4 * s, 0, 0, Math.PI * 2)
   ctx.fill()
   ctx.restore()
 }

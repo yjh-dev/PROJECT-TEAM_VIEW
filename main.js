@@ -130,10 +130,10 @@ function pump(isReplay) {
 
 function createWindow() {
   win = new BrowserWindow({
-    width: 1024,
-    height: 720,
-    minWidth: 720,
-    minHeight: 520,
+    width: 1560,
+    height: 1040,
+    minWidth: 1100,
+    minHeight: 760,
     backgroundColor: '#11131a',
     autoHideMenuBar: true,
     title: 'Team View — 우리 팀 사무실',
