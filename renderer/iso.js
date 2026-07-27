@@ -115,8 +115,10 @@ export function drawBox(ctx, s, gx, gy, w, d, h, colors, lift = 0) {
 //
 // side='nw' → gx=-1 벽(오른쪽 아래로 내려가는 면), side='ne' → gy=-1 벽(오른쪽 위로)
 
+// 벽은 **바닥의 가장자리 선**(gx=-0.5 / gy=-0.5)에 서야 한다.
+// 타일 중심(-1)에 세우면 바닥에서 반 타일 떨어져 틈이 생긴다.
 export function wallBase(side, g) {
-  return side === 'nw' ? toScreen(-1, g) : toScreen(g, -1)
+  return side === 'nw' ? toScreen(-0.5, g - 0.5) : toScreen(g - 0.5, -0.5)
 }
 
 export function wallStep(side) {

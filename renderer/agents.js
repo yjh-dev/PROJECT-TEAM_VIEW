@@ -3,6 +3,7 @@
 // 명단에 없는 이름이 이벤트로 들어와도 무시하지 않고 회색 캐릭터로 자리를 만든다.
 
 import { makePalette } from './sprites.js'
+import { GRID } from './iso.js'
 
 export const LEAD_ID = 'lead'
 
@@ -48,10 +49,15 @@ export function buildAgents() {
   return agents
 }
 
+// 바닥은 0..GRID-1 칸이고 타일이 ±0.5씩 덮는다. 가장자리에 딱 붙으면 발이
+// 반쯤 걸치므로 여유를 두고 **항상 바닥 안**으로 잘라낸다.
+const clampCell = (v) => Math.max(0, Math.min(GRID - 1, v))
+const onFloor = (p) => ({ gx: clampCell(p.gx), gy: clampCell(p.gy) })
+
 export function makeAgent(role, desk) {
   // 의자 칸 = 일하는 자리(여기 앉는다). 쉴 때는 책상 옆 통로로 물러난다.
-  const chair = { gx: desk.gx, gy: desk.gy + 0.95 }
-  const rest = { gx: desk.gx + 0.9, gy: desk.gy + 1.7 }
+  const chair = onFloor({ gx: desk.gx, gy: desk.gy + 0.95 })
+  const rest = onFloor({ gx: desk.gx + 0.8, gy: desk.gy + 1.6 })
   return {
     chair,
     id: role.id,

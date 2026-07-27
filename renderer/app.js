@@ -14,6 +14,7 @@ import {
   drawWorkstation,
   drawChair,
   drawChairBack,
+  drawPartitions,
   PROPS,
 } from './room.js'
 
@@ -343,6 +344,7 @@ function draw(t) {
     }
     const a = it.a
     if (it.kind === 'desk') {
+      drawPartitions(ctx, scale, a.desk.gx, a.desk.gy)
       drawWorkstation(ctx, scale, a.desk.gx, a.desk.gy, a.pose === 'sit', t)
       // 의자는 캐릭터보다 뒤에 있어야 앉은 것처럼 보인다(등받이는 캐릭터 뒤)
       drawChair(ctx, scale, a.chair.gx, a.chair.gy)
