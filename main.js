@@ -1,0 +1,180 @@
+// Electron 메인 프로세스.
+// 하는 일은 두 가지뿐이다: (1) 창 띄우기, (2) 감시 대상 프로젝트의
+// `.claude/team-events.jsonl`을 tail 해서 새 줄을 렌더러로 보내기.
+//
+// 파일 감시는 fs.watch가 아니라 **폴링**이다. Windows에서 fs.watch는 "덧붙이기"를
+// 놓치거나 중복 이벤트를 주는 일이 잦고, 우리가 읽는 건 append-only 로그라
+// 크기 비교가 훨씬 단순하고 정확하다.
+
+const { app, BrowserWindow, ipcMain, dialog } = require('electron')
+const fs = require('fs')
+const path = require('path')
+
+const POLL_MS = 300
+const CONFIG_NAME = 'config.json'
+
+let win = null
+let watch = null // { file, offset, timer, tail }
+
+function configPath() {
+  return path.join(app.getPath('userData'), CONFIG_NAME)
+}
+
+function loadConfig() {
+  try {
+    return JSON.parse(fs.readFileSync(configPath(), 'utf8'))
+  } catch {
+    return {}
+  }
+}
+
+function saveConfig(cfg) {
+  try {
+    fs.mkdirSync(path.dirname(configPath()), { recursive: true })
+    fs.writeFileSync(configPath(), JSON.stringify(cfg, null, 2))
+  } catch (e) {
+    console.error('설정 저장 실패:', e.message)
+  }
+}
+
+function send(channel, payload) {
+  if (win && !win.isDestroyed()) win.webContents.send(channel, payload)
+}
+
+function eventsFileFor(projectDir) {
+  return path.join(projectDir, '.claude', 'team-events.jsonl')
+}
+
+function stopWatching() {
+  if (watch?.timer) clearInterval(watch.timer)
+  watch = null
+}
+
+/**
+ * 프로젝트 폴더를 감시한다. 파일이 아직 없어도 실패가 아니다 —
+ * 훅이 첫 이벤트를 쓰는 순간부터 따라간다.
+ */
+function startWatching(projectDir, { replay = true } = {}) {
+  stopWatching()
+  if (!projectDir) return
+
+  const file = eventsFileFor(projectDir)
+  watch = { file, offset: 0, tail: '', timer: null }
+
+  // 앱을 나중에 켰어도 최근 활동은 보여준다. 처음부터 읽되, 렌더러가
+  // "지난 것"으로 취급하도록 replay 플래그를 붙인다.
+  if (!replay) {
+    try {
+      watch.offset = fs.statSync(file).size
+    } catch {
+      /* 파일이 없으면 0에서 시작 */
+    }
+  }
+
+  send('watch:status', { projectDir, file, exists: fs.existsSync(file) })
+
+  watch.timer = setInterval(() => pump(replay), POLL_MS)
+  pump(replay)
+  replay = false
+}
+
+function pump(isReplay) {
+  if (!watch) return
+  let size
+  try {
+    size = fs.statSync(watch.file).size
+  } catch {
+    return // 아직 파일 없음 — 조용히 기다린다
+  }
+
+  if (size < watch.offset) {
+    // 파일이 잘렸다(새 세션이 로그를 비웠거나 회전). 처음부터 다시 읽는다.
+    watch.offset = 0
+    watch.tail = ''
+    send('events:reset', null)
+  }
+  if (size === watch.offset) return
+
+  let chunk = ''
+  try {
+    const fd = fs.openSync(watch.file, 'r')
+    const len = size - watch.offset
+    const buf = Buffer.alloc(len)
+    fs.readSync(fd, buf, 0, len, watch.offset)
+    fs.closeSync(fd)
+    chunk = buf.toString('utf8')
+    watch.offset = size
+  } catch (e) {
+    return
+  }
+
+  // 훅이 줄을 쓰는 도중에 읽었을 수 있다. 마지막 조각은 다음 턴으로 넘긴다.
+  const text = watch.tail + chunk
+  const lines = text.split('\n')
+  watch.tail = lines.pop() ?? ''
+
+  const events = []
+  for (const line of lines) {
+    const s = line.trim()
+    if (!s) continue
+    try {
+      const ev = JSON.parse(s)
+      ev._replay = Boolean(isReplay)
+      events.push(ev)
+    } catch {
+      // 깨진 줄 하나 때문에 멈추지 않는다
+    }
+  }
+  if (events.length) send('events:new', events)
+}
+
+function createWindow() {
+  win = new BrowserWindow({
+    width: 1024,
+    height: 720,
+    minWidth: 720,
+    minHeight: 520,
+    backgroundColor: '#11131a',
+    autoHideMenuBar: true,
+    title: 'Team View — 우리 팀 사무실',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  })
+  win.loadFile(path.join(__dirname, 'renderer', 'index.html'))
+}
+
+app.whenReady().then(() => {
+  createWindow()
+
+  const cfg = loadConfig()
+  win.webContents.once('did-finish-load', () => {
+    if (cfg.projectDir) startWatching(cfg.projectDir)
+    else send('watch:status', { projectDir: null, file: null, exists: false })
+  })
+
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+  })
+})
+
+app.on('window-all-closed', () => {
+  stopWatching()
+  if (process.platform !== 'darwin') app.quit()
+})
+
+ipcMain.handle('project:pick', async () => {
+  const res = await dialog.showOpenDialog(win, {
+    title: '감시할 프로젝트 폴더 선택',
+    properties: ['openDirectory'],
+  })
+  if (res.canceled || !res.filePaths[0]) return null
+  const projectDir = res.filePaths[0]
+  saveConfig({ ...loadConfig(), projectDir })
+  startWatching(projectDir)
+  return projectDir
+})
+
+ipcMain.handle('project:current', () => loadConfig().projectDir ?? null)

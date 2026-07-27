@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <!-- 외부 리소스를 일절 쓰지 않는다. 전부 로컬 파일 + 코드로 그린 도트. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:"
+    />
+    <title>Team View</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div id="bar">
+      <button id="pick">프로젝트 선택</button>
+      <span id="project">(선택 안 됨)</span>
+      <span id="status" class="warn">시작 중…</span>
+    </div>
+    <main>
+      <canvas id="stage"></canvas>
+      <pre id="log" aria-label="최근 활동"></pre>
+    </main>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

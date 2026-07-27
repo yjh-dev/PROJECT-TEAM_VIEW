@@ -1,0 +1,4 @@
+# electron은 postinstall에서 실제 실행파일(약 100MB)을 내려받는다.
+# pnpm 10은 기본적으로 빌드 스크립트를 막으므로 여기서 허용해야 앱이 뜬다.
+allowBuilds:
+  electron: true

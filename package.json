@@ -1,0 +1,19 @@
+{
+  "name": "team-view",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Claude Code 팀 에이전트의 실제 활동을 도트 캐릭터로 보여주는 윈도우 앱",
+  "main": "main.js",
+  "scripts": {
+    "dev": "electron .",
+    "start": "electron .",
+    "demo": "node tools/emit-demo-events.js"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0"
+  },
+  "pnpm": {
+    "//": "electron은 postinstall에서 실제 실행파일을 내려받는다. 막으면 앱이 뜨지 않는다.",
+    "onlyBuiltDependencies": ["electron"]
+  }
+}

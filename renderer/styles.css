@@ -1,0 +1,104 @@
+:root {
+  --bg: #11131a;
+  --panel: #171a23;
+  --line: #262b38;
+  --text: #dfe6f5;
+  --muted: #7b8399;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.5 "Malgun Gothic", "Segoe UI", system-ui, sans-serif;
+  overflow: hidden;
+  user-select: none;
+}
+
+#bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+button {
+  background: #2b3346;
+  color: var(--text);
+  border: 1px solid #3a4459;
+  border-radius: 4px;
+  padding: 4px 10px;
+  font: inherit;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #37415a;
+}
+
+#project {
+  color: var(--muted);
+  font-family: Consolas, monospace;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+#status {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+#status.ok {
+  color: #9ece6a;
+  background: rgba(158, 206, 106, 0.12);
+}
+
+#status.warn {
+  color: #e0af68;
+  background: rgba(224, 175, 104, 0.12);
+}
+
+main {
+  height: calc(100% - 41px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 12px;
+}
+
+canvas {
+  image-rendering: pixelated;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+}
+
+#log {
+  margin: 0;
+  width: 100%;
+  max-width: 960px;
+  height: 8.5em;
+  overflow: hidden;
+  color: var(--muted);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-family: Consolas, monospace;
+  font-size: 12px;
+  white-space: pre;
+}
