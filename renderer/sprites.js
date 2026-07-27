@@ -174,30 +174,47 @@ export function makePalette({ hair, shirt, accent, skin = '#f2caa4' }) {
  * yOffset은 앉을 때처럼 살짝 내려 그릴 때 쓴다.
  */
 export function drawSprite(ctx, frame, palette, x, y, scale, flip = false, yOffset = 0) {
-  const ox = Math.round(x * scale - (W * scale) / 2)
-  const oy = Math.round((y + yOffset) * scale - H * scale)
+  const ox = x * scale - (W * scale) / 2
+  const oy = (y + yOffset) * scale - H * scale
 
-  // 옅은 외곽 — 밝은 바닥 위에서 실루엣이 묻히지 않게 한다
-  ctx.fillStyle = 'rgba(70,52,34,0.22)'
-  for (let row = 0; row < frame.length; row++) {
-    const line = frame[row]
-    for (let col = 0; col < line.length; col++) {
-      if (line[col] === '.') continue
-      const cx = flip ? W - 1 - col : col
-      ctx.fillRect(ox + cx * scale + scale, oy + row * scale + scale, scale, scale)
+  // 소수 배율에서도 도트가 흐려지지 않게 각 픽셀의 시작·끝을 반올림해서 채운다.
+  const px = (i) => Math.round(ox + i * scale)
+  const py = (i) => Math.round(oy + i * scale)
+
+  const paint = (color, dx, dy) => {
+    ctx.fillStyle = color
+    for (let row = 0; row < frame.length; row++) {
+      const line = frame[row]
+      const y0 = py(row + dy)
+      const y1 = py(row + dy + 1)
+      for (let col = 0; col < line.length; col++) {
+        if (line[col] === '.') continue
+        if (color === null) continue
+        const cx = flip ? W - 1 - col : col
+        const x0 = px(cx + dx)
+        const x1 = px(cx + dx + 1)
+        ctx.fillRect(x0, y0, x1 - x0, y1 - y0)
+      }
     }
   }
 
+  // 옅은 외곽 — 밝은 바닥 위에서 실루엣이 묻히지 않게 한다
+  paint('rgba(70,52,34,0.22)', 0.5, 0.5)
+
   for (let row = 0; row < frame.length; row++) {
     const line = frame[row]
+    const y0 = py(row)
+    const y1 = py(row + 1)
     for (let col = 0; col < line.length; col++) {
       const ch = line[col]
       if (ch === '.') continue
       const color = palette[ch]
       if (!color) continue
       const cx = flip ? W - 1 - col : col
+      const x0 = px(cx)
+      const x1 = px(cx + 1)
       ctx.fillStyle = color
-      ctx.fillRect(ox + cx * scale, oy + row * scale, scale, scale)
+      ctx.fillRect(x0, y0, x1 - x0, y1 - y0)
     }
   }
 }

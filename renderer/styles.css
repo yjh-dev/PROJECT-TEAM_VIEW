@@ -234,32 +234,34 @@ main {
   pointer-events: none;
 }
 
-/* 이름표 — 캐릭터 발밑에 붙는다 */
+/* 이름표 — 캐릭터 **머리 위**에 뜬다 */
 .tag {
   position: absolute;
-  transform: translate(-50%, 0);
+  transform: translate(-50%, -100%);
   white-space: nowrap;
   font-size: 13px;
   font-weight: 700;
   line-height: 1;
-  padding: 3px 7px;
-  border-radius: 4px;
-  background: rgba(12, 15, 22, 0.82);
-  border: 1px solid #333c52;
-  color: #8e97ad;
+  padding: 3px 8px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(90, 80, 60, 0.35);
+  color: #4a5163;
+  box-shadow: 0 1px 3px rgba(60, 45, 25, 0.25);
 }
 
 .tag.on {
-  color: #eaf2ff;
-  border-color: #5d7bb5;
-  background: rgba(26, 38, 62, 0.92);
+  color: #12294a;
+  background: #cfe4ff;
+  border-color: #6f9fdc;
 }
 
-.tag .role {
-  font-size: 11px;
-  font-weight: 400;
-  opacity: 0.72;
-  margin-left: 5px;
+/* 클릭해서 대화 상대로 고른 팀원 */
+.tag.sel {
+  color: #ffffff;
+  background: #3b6fb8;
+  border-color: #8fbcf0;
+  box-shadow: 0 0 0 2px rgba(143, 188, 240, 0.5);
 }
 
 /* 말풍선 — 캐릭터 머리 위 */
@@ -285,90 +287,19 @@ main {
   border-color: #7a6134;
 }
 
-#panel {
-  position: absolute;
-  right: 8px;
-  top: 8px;
-  width: 260px;
-  background: rgba(20, 24, 34, 0.97);
-  border: 1px solid #3a4459;
-  border-radius: 6px;
-  padding: 10px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
-}
-
-#panel header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 8px;
-}
-
-#panel header strong {
+/* 잡담 — 실제 작업이 아니라는 걸 눈에 띄게 구분한다 */
+.bubble.small {
   font-size: 12px;
-  color: #cfe3ff;
-}
-
-#panel-close {
-  padding: 0 6px;
-  line-height: 20px;
-}
-
-#panel textarea {
-  width: 100%;
-  resize: none;
-  background: #10141d;
-  color: var(--text);
-  border: 1px solid #2f374a;
-  border-radius: 4px;
-  padding: 6px;
-  font: 12px/1.45 Consolas, monospace;
-}
-
-#panel .row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-top: 8px;
-}
-
-#panel label {
-  font-size: 11px;
-  color: var(--muted);
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  cursor: pointer;
-}
-
-#panel-hint {
-  margin: 8px 0 0;
-  min-height: 1.2em;
-  font-size: 11px;
-  color: #e0af68;
+  font-style: italic;
+  padding: 3px 8px;
+  background: rgba(255, 255, 255, 0.9);
+  border-color: rgba(90, 80, 60, 0.3);
+  color: #5c6577;
+  box-shadow: 0 1px 3px rgba(60, 45, 25, 0.2);
 }
 
 canvas {
   image-rendering: pixelated;
-  border: 1px solid var(--line);
-  border-radius: 2px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  display: block;
 }
 
-#log {
-  margin: 0;
-  width: 100%;
-  max-width: 1200px;
-  height: 8em;
-  overflow: hidden;
-  color: #9aa3ba;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 10px 14px;
-  font-family: Consolas, monospace;
-  font-size: 14px;
-  line-height: 1.45;
-  white-space: pre;
-}

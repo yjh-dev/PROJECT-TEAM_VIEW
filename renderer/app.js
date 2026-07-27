@@ -44,9 +44,11 @@ const lastChatAt = new Map() // 도구 이벤트가 채팅을 도배하지 않�
 
 function resize() {
   const wrap = document.getElementById('left')
-  const availW = wrap.clientWidth - 8
-  const availH = wrap.clientHeight - 8
-  scale = Math.max(1, Math.floor(Math.min(availW / STAGE_W, availH / STAGE_H)))
+  const availW = wrap.clientWidth - 4
+  const availH = wrap.clientHeight - 4
+  // 정수 배율을 고집하면 창의 절반이 빈 여백으로 남는다. 소수 배율을 쓰되
+  // 스프라이트는 픽셀 좌표를 반올림해 찍으므로 도트가 흐려지지 않는다.
+  scale = Math.max(1, Math.min(availW / STAGE_W, availH / STAGE_H))
   canvas.width = STAGE_W * scale
   canvas.height = STAGE_H * scale
   canvas.style.width = `${STAGE_W * scale}px`
@@ -229,6 +231,79 @@ inputEl.addEventListener('keydown', (e) => {
   }
 })
 
+// ---------- 유휴 상호작용 ----------
+//
+// 아무 작업도 없을 때 팀원들이 커피를 마시러 가거나 잡담을 한다.
+// **이건 실제 작업이 아니다.** 그래서 채팅 로그에는 남기지 않고, 말풍선도
+// 회색 작은 스타일(.small)로 구분한다. 진짜 활동은 이벤트에서만 나온다.
+
+const COFFEE = { gx: 5.5, gy: 3.7 }
+const MEETING = [
+  { gx: 1.3, gy: 5.5 },
+  { gx: 3.7, gy: 5.5 },
+  { gx: 2.5, gy: 6.7 },
+]
+const SMALL_TALK = [
+  '커피 한 잔 하고 올게요',
+  '잠깐 스트레칭…',
+  '이번 스프린트 일정 어떻게 돼요?',
+  '점심 뭐 드셨어요?',
+  '그 버그 결국 캐시 문제였대요',
+  '리팩터링 한번 해야 하는데',
+  '오늘 배포 있나요?',
+  '창밖 날씨 좋네요',
+  '리뷰 남은 거 있으면 주세요',
+  '새 디자인 시안 봤어요?',
+]
+
+const pick = (arr) => arr[Math.floor(Math.random() * arr.length)]
+
+let nextIdleAt = 0
+
+function scheduleIdle(now) {
+  if (now < nextIdleAt) return
+  nextIdleAt = now + 3500 + Math.random() * 4000
+
+  const free = [...agents.values()].filter(
+    (a) => !a.active && !(a.plan && now < a.plan.until) && a.queued === 0,
+  )
+  if (free.length < 2) return
+  // 절반쯤은 아무 일도 일어나지 않는다. 계속 북적이면 오히려 가짜처럼 보인다.
+  if (Math.random() < 0.45) return
+
+  const roll = Math.random()
+  if (roll < 0.3) {
+    // 커피
+    const a = pick(free)
+    a.plan = { dest: COFFEE, until: now + 7000, bubble: '커피 한 잔 하고 올게요' }
+  } else if (roll < 0.72) {
+    // 둘이 마주보고 잡담
+    const a = pick(free)
+    const b = pick(free.filter((x) => x !== a))
+    if (!b) return
+    const mid = { gx: (a.rest.gx + b.rest.gx) / 2, gy: (a.rest.gy + b.rest.gy) / 2 }
+    const talk = pick(SMALL_TALK)
+    a.plan = { dest: { gx: mid.gx - 0.35, gy: mid.gy }, until: now + 8000, bubble: talk, faceId: b.id }
+    b.plan = { dest: { gx: mid.gx + 0.35, gy: mid.gy }, until: now + 8000, bubble: null, faceId: a.id }
+    // 상대는 잠시 뒤에 대답한다
+    setTimeout(() => {
+      if (b.plan && performance.now() < b.plan.until) b.plan.bubble = pick(SMALL_TALK)
+    }, 2600)
+  } else {
+    // 회의 테이블에 두세 명이 모인다
+    const n = 2 + (Math.random() < 0.4 ? 1 : 0)
+    const chosen = free.slice().sort(() => Math.random() - 0.5).slice(0, n)
+    chosen.forEach((a, i) => {
+      a.plan = {
+        dest: MEETING[i % MEETING.length],
+        until: now + 11000,
+        bubble: i === 0 ? '잠깐 모여서 정리할까요?' : null,
+        faceId: chosen[(i + 1) % chosen.length]?.id,
+      }
+    })
+  }
+}
+
 // ---------- 움직임 ----------
 
 function facingFlip(a, other) {
@@ -238,10 +313,15 @@ function facingFlip(a, other) {
 }
 
 function update(dt, now) {
+  scheduleIdle(now)
+
   for (const a of agents.values()) {
     const working = a.active && now < a.busyUntil
     const quiet = now - a.lastEventAt > IDLE_LEAVE_MS
-    const dest = working || (a.active && !quiet) ? a.work : a.rest
+    if (a.plan && (now >= a.plan.until || working)) a.plan = null
+
+    const dest =
+      working || (a.active && !quiet) ? a.work : a.plan ? a.plan.dest : a.rest
 
     const dx = dest.gx - a.gx
     const dy = dest.gy - a.gy
@@ -259,9 +339,10 @@ function update(dt, now) {
       a.gx = dest.gx
       a.gy = dest.gy
       a.pose = working ? 'sit' : 'idle'
-      // 대화 중이면 상대를 바라본다
-      if (a.faceTarget && now < (a.talkUntil ?? 0)) {
-        const other = agents.get(a.faceTarget)
+      // 대화 중이면 상대를 바라본다 (리드의 호출 연출 또는 유휴 잡담)
+      const faceId = (now < (a.talkUntil ?? 0) && a.faceTarget) || a.plan?.faceId
+      if (faceId) {
+        const other = agents.get(faceId)
         if (other) a.flip = facingFlip(a, other)
       }
     }
@@ -280,7 +361,7 @@ function nodesFor(a) {
   if (n) return n
   const tag = document.createElement('div')
   tag.className = 'tag'
-  tag.innerHTML = '<span class="name"></span><span class="role"></span>'
+  tag.textContent = a.label // 한글 역할명만. 영문 id는 채팅 쪽에서 확인한다.
   const bubble = document.createElement('div')
   bubble.className = 'bubble'
   bubble.hidden = true
@@ -295,26 +376,30 @@ function syncOverlay(now) {
     const { tag, bubble } = nodesFor(a)
     const { x, y } = toScreen(a.gx, a.gy)
 
+    // 이름표는 **머리 위**에. 앉으면 머리가 내려가므로 그만큼 함께 내린다.
+    const headY = y - (a.pose === 'sit' ? 19 : 21)
     tag.style.left = `${x * scale}px`
-    tag.style.top = `${(y + 7) * scale}px`
+    tag.style.top = `${headY * scale}px`
     tag.classList.toggle('on', a.active)
-    tag.querySelector('.name').textContent = a.label
-    tag.querySelector('.role').textContent = a.id === a.label ? '' : a.id
+    tag.classList.toggle('sel', target === a.id)
 
     let text = null
-    let queued = false
+    let kind = ''
     if (a.queued > 0) {
       text = `지시 ${a.queued}건 대기`
-      queued = true
+      kind = 'queued'
     } else if (a.task && (now - a.lastEventAt < 6000 || now < (a.talkUntil ?? 0))) {
       text = a.task
+    } else if (a.plan?.bubble && now < a.plan.until) {
+      text = a.plan.bubble
+      kind = 'small' // 잡담: 실제 작업이 아니라는 걸 눈에 띄게 구분한다
     }
     if (text) {
       bubble.hidden = false
       bubble.textContent = text
-      bubble.classList.toggle('queued', queued)
+      bubble.className = `bubble${kind ? ' ' + kind : ''}`
       bubble.style.left = `${x * scale}px`
-      bubble.style.top = `${(y - 28) * scale}px`
+      bubble.style.top = `${(headY - 9) * scale}px`
     } else {
       bubble.hidden = true
     }

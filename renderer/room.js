@@ -236,15 +236,17 @@ function drawClock(ctx, s, side, g, t) {
 
 // ── 파티션(칸막이) ────────────────────────────────────────────────────────
 // 책상의 북·서쪽에만 세운다. 캐릭터보다 뒤에 있으므로 앞을 가리지 않는다.
-const PART_H = 16
+// 책상(약 1칸)보다 조금 큰 정도로만. 이전엔 1.9칸 길이에 높이 16이라
+// 책상보다 커 보여서 큐비클이 아니라 벽처럼 읽혔다.
+const PART_H = 12
 
 export function drawPartitions(ctx, s, gx, gy) {
-  // 서쪽(왼쪽) 칸막이
-  drawBox(ctx, s, gx - 0.85, gy + 0.1, 0.14, 1.9, PART_H, PART_FABRIC)
-  drawBox(ctx, s, gx - 0.85, gy + 0.1, 0.18, 1.94, 1.2, PART_RAIL, PART_H)
-  // 북쪽(위쪽) 칸막이
-  drawBox(ctx, s, gx + 0.1, gy - 0.85, 1.9, 0.14, PART_H, PART_FABRIC)
-  drawBox(ctx, s, gx + 0.1, gy - 0.85, 1.94, 0.18, 1.2, PART_RAIL, PART_H)
+  // 서쪽 칸막이
+  drawBox(ctx, s, gx - 0.62, gy - 0.05, 0.1, 1.3, PART_H, PART_FABRIC)
+  drawBox(ctx, s, gx - 0.62, gy - 0.05, 0.14, 1.34, 0.9, PART_RAIL, PART_H)
+  // 북쪽 칸막이
+  drawBox(ctx, s, gx - 0.05, gy - 0.62, 1.3, 0.1, PART_H, PART_FABRIC)
+  drawBox(ctx, s, gx - 0.05, gy - 0.62, 1.34, 0.14, 0.9, PART_RAIL, PART_H)
 }
 
 // ── 업무 자리 ─────────────────────────────────────────────────────────────
