@@ -190,6 +190,86 @@ export function topSeam(ctx, s, gx, gy, lift, from, to, color, thick = 0.8) {
   ctx.stroke()
 }
 
+// ── 픽셀로 찍는 아이소 프리미티브 ────────────────────────────────────────
+//
+// 지금까지 가구는 ctx.fill()로 다각형을 칠했다. 캐릭터는 도트로 찍는데 가구만
+// 매끈한 벡터라 서로 따로 놀았고, 얇은 상자는 지느러미처럼 뭉개졌다.
+// 여기서는 면을 **1픽셀 줄로 쌓아** 캐릭터와 같은 질감으로 만든다.
+
+/** 마름모 윗면을 1픽셀 가로줄로 쌓는다. */
+export function pxDiamond(ctx, s, cx, cy, w, d, color, lit) {
+  const hw = (TILE_W / 2) * w
+  const hh = (TILE_H / 2) * d
+  const rows = Math.max(1, Math.round(hh))
+  for (let i = -rows; i <= rows; i++) {
+    const f = 1 - Math.abs(i) / (rows + 0.0001)
+    const half = Math.max(0.5, hw * f)
+    px(ctx, s, cx - half, cy + i, half * 2, 1, i <= -rows + 1 && lit ? lit : color)
+  }
+}
+
+/**
+ * 아이소 상자를 픽셀로 찍는다. 윗면은 가로줄, 옆면은 세로줄로 쌓고
+ * 실루엣에 1픽셀 외곽선을 둘러 도트처럼 보이게 한다.
+ *
+ * pal = { top, lit, left, right, edge }
+ */
+export function pxBox(ctx, s, gx, gy, w, d, h, pal, lift = 0) {
+  const c = toScreen(gx, gy)
+  const cx = c.x
+  const cy = c.y - lift
+  const hw = (TILE_W / 2) * w
+  const hh = (TILE_H / 2) * d
+  const cols = Math.max(1, Math.round(hw))
+
+  // 옆면 — 왼쪽/오른쪽을 세로 1픽셀 줄로
+  for (let i = 0; i <= cols; i++) {
+    const f = i / cols
+    const yEdge = cy + hh * (1 - f) // 아래 모서리를 따라 내려간다
+    const xL = cx - hw * f
+    const xR = cx + hw * f
+    px(ctx, s, xL, yEdge - h, 1, h, pal.left)
+    px(ctx, s, xR - 1, yEdge - h, 1, h, pal.right)
+  }
+  // 앞쪽 꼭짓점 아래 기둥(두 면이 만나는 모서리)
+  px(ctx, s, cx - 1, cy + hh - h, 2, h, pal.edge ?? pal.left)
+
+  // 윗면
+  pxDiamond(ctx, s, cx, cy - h, w, d, pal.top, pal.lit)
+
+  // 실루엣 외곽선 — 아래쪽 두 변만 살짝
+  if (pal.edge) {
+    for (let i = 0; i <= cols; i++) {
+      const f = i / cols
+      const yEdge = cy + hh * (1 - f)
+      px(ctx, s, cx - hw * f, yEdge - 1, 1, 1, pal.edge)
+      px(ctx, s, cx + hw * f - 1, yEdge - 1, 1, 1, pal.edge)
+    }
+  }
+}
+
+/** 색을 밝게/어둡게 — 팔레트를 손으로 다 고르지 않기 위해. */
+export function tint(hex, k) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex)
+  if (!m) return hex
+  const n = parseInt(m[1], 16)
+  const c = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((v) =>
+    Math.max(0, Math.min(255, Math.round(v * k))),
+  )
+  return `#${c.map((v) => v.toString(16).padStart(2, '0')).join('')}`
+}
+
+/** 한 가지 색에서 상자용 팔레트를 만든다(윗면 밝게, 왼면 어둡게). */
+export function boxPal(base) {
+  return {
+    top: tint(base, 1.12),
+    lit: tint(base, 1.24),
+    left: tint(base, 0.72),
+    right: tint(base, 0.92),
+    edge: tint(base, 0.55),
+  }
+}
+
 /** 가구 밑 그늘. 바닥에 놓여 있다는 느낌을 준다(입체감의 절반은 이것에서 나온다). */
 export function drawAO(ctx, s, gx, gy, rx = 16, ry = 8, alpha = 0.18) {
   const { x, y } = toScreen(gx, gy)
