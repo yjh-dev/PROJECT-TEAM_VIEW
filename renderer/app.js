@@ -414,13 +414,21 @@ function draw(t) {
   drawFloor(ctx, scale)
   drawRug(ctx, scale, 1.5, 4.5, 3, 3) // 회의 구역
 
+  // 깊이 정렬. **각 물건을 자기 위치의 깊이로** 넣는다 — 파티션·의자를 책상과
+  // 같은 깊이로 묶으면(예전 방식) 파티션 앞을 지나가는 캐릭터가 파티션에 가린다.
+  // 깊이가 같을 때는 rank로 순서를 고정한다: 파티션 → 책상 → 의자 → 사람.
+  const RANK = { partition: 0, prop: 1, desk: 2, chair: 3, agent: 4 }
   const items = []
   for (const a of agents.values()) {
-    items.push({ kind: 'desk', d: depth(a.desk.gx, a.desk.gy), a })
+    const d = a.desk
+    // 두 패널 모두 실제로는 책상보다 0.55만큼 뒤에 있다(서쪽/북쪽으로 각각 0.55).
+    items.push({ kind: 'partition', d: depth(d.gx, d.gy) - 0.55, a })
+    items.push({ kind: 'desk', d: depth(d.gx, d.gy), a })
+    items.push({ kind: 'chair', d: depth(a.chair.gx, a.chair.gy), a })
     items.push({ kind: 'agent', d: depth(a.gx, a.gy), a })
   }
   for (const p of PROPS) items.push({ kind: 'prop', d: depth(p.gx, p.gy), p })
-  items.sort((p, q) => p.d - q.d)
+  items.sort((p, q) => p.d - q.d || RANK[p.kind] - RANK[q.kind])
 
   for (const it of items) {
     if (it.kind === 'prop') {
@@ -428,10 +436,16 @@ function draw(t) {
       continue
     }
     const a = it.a
-    if (it.kind === 'desk') {
+    if (it.kind === 'partition') {
       drawPartitions(ctx, scale, a.desk.gx, a.desk.gy)
+      continue
+    }
+    if (it.kind === 'desk') {
       drawWorkstation(ctx, scale, a.desk.gx, a.desk.gy, a.pose === 'sit', t)
-      // 의자는 캐릭터보다 뒤에 있어야 앉은 것처럼 보인다(등받이는 캐릭터 뒤)
+      continue
+    }
+    if (it.kind === 'chair') {
+      // 좌판과 등받이는 앉은 캐릭터보다 **먼저** 그린다(같은 깊이면 rank가 보장).
       drawChair(ctx, scale, a.chair.gx, a.chair.gy)
       drawChairBack(ctx, scale, a.chair.gx, a.chair.gy)
       continue

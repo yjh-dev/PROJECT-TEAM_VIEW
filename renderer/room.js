@@ -532,14 +532,14 @@ export function drawMeetingTable(ctx, s, gx, gy) {
   }
   drawBox(ctx, s, gx, gy + 0.45, 0.09, 0.09, 3.2, { top: '#ffffff', left: '#ccd4de', right: '#edf1f6' }, H)
 
-  for (const [ox, oy] of [
-    [-1.1, 0],
-    [1.1, 0],
-    [0, 1.1],
-  ]) {
-    drawChair(ctx, s, gx + ox, gy + oy)
-    drawChairBack(ctx, s, gx + ox, gy + oy)
-  }
+  // 의자는 테이블과 깊이가 달라서 **PROPS에 따로** 넣는다. 여기서 같이 그리면
+  // 테이블 앞 의자가 테이블 깊이로 정렬돼, 그 사이를 지나는 캐릭터와 앞뒤가 뒤집힌다.
+}
+
+/** 회의 의자 하나(정렬용으로 분리). */
+export function drawMeetingChair(ctx, s, gx, gy) {
+  drawChair(ctx, s, gx, gy)
+  drawChairBack(ctx, s, gx, gy)
 }
 
 export function drawCoffeeCorner(ctx, s, gx, gy) {
@@ -620,6 +620,9 @@ export function drawPlant(ctx, s, gx, gy) {
 
 export const PROPS = [
   { gx: 2.5, gy: 5.5, draw: drawMeetingTable },
+  { gx: 1.4, gy: 5.5, draw: drawMeetingChair },
+  { gx: 3.6, gy: 5.5, draw: drawMeetingChair },
+  { gx: 2.5, gy: 6.6, draw: drawMeetingChair },
   { gx: 5.5, gy: 2.5, draw: drawCoffeeCorner },
   { gx: 8.7, gy: 5.6, draw: drawPlant },
   { gx: 5.6, gy: 8.7, draw: drawPlant },
