@@ -178,3 +178,72 @@ ipcMain.handle('project:pick', async () => {
 })
 
 ipcMain.handle('project:current', () => loadConfig().projectDir ?? null)
+
+// ---------------------------------------------------------------------------
+// 개별 지시 전달
+//
+// 기본 동작은 **대기열에 넣기**다: `.claude/team-commands.jsonl`에 한 줄 쓰고,
+// 그 프로젝트에 설치된 team_events.py 훅이 세션이 한 턴을 끝낼 때(Stop) 집어간다.
+// 즉 지금 돌고 있는 세션에 끼워 넣는 방식이라 새 프로세스가 뜨지 않는다.
+//
+// spawn=true면 `claude -p`로 **새 프로세스를 띄워 즉시** 실행한다. 자율적으로 파일을
+// 고칠 수 있는 동작이라 기본값은 꺼져 있고, 사용자가 체크박스로 켤 때만 실행한다.
+// ---------------------------------------------------------------------------
+
+function appendJsonl(file, obj) {
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.appendFileSync(file, JSON.stringify(obj) + '\n', 'utf8')
+}
+
+ipcMain.handle('command:send', async (_e, { agent, text, spawn: doSpawn }) => {
+  const projectDir = loadConfig().projectDir
+  if (!projectDir) return { ok: false, error: '프로젝트가 선택되지 않았습니다' }
+  const body = String(text ?? '').trim()
+  if (!body) return { ok: false, error: '내용이 비어 있습니다' }
+
+  const claudeDir = path.join(projectDir, '.claude')
+  if (!fs.existsSync(claudeDir)) {
+    return { ok: false, error: `.claude 폴더가 없습니다: ${claudeDir}` }
+  }
+
+  const ts = Date.now() / 1000
+  try {
+    appendJsonl(path.join(claudeDir, 'team-commands.jsonl'), {
+      ts,
+      agent,
+      text: body,
+      status: 'pending',
+    })
+    // 화면에도 즉시 반영한다. 이건 실제로 일어난 일(지시 전달)이므로 가짜 활동이 아니다.
+    appendJsonl(eventsFileFor(projectDir), {
+      ts,
+      type: 'command',
+      agent,
+      detail: body.slice(0, 60),
+    })
+  } catch (err) {
+    return { ok: false, error: `기록 실패: ${err.message}` }
+  }
+
+  if (!doSpawn) return { ok: true, spawned: false }
+
+  // 새 Claude Code 프로세스로 즉시 실행
+  const prompt =
+    agent && agent !== 'lead'
+      ? `${agent} 서브에이전트를 사용해서 다음을 처리해줘: ${body}`
+      : body
+  try {
+    const { spawn } = require('child_process')
+    const child = spawn('claude', ['-p', prompt], {
+      cwd: projectDir,
+      shell: true, // Windows에서 claude는 .cmd 래퍼다
+      detached: true,
+      stdio: 'ignore',
+    })
+    child.on('error', (err) => console.error('claude 실행 실패:', err.message))
+    child.unref()
+    return { ok: true, spawned: true }
+  } catch (err) {
+    return { ok: false, error: `claude 실행 실패: ${err.message}` }
+  }
+})

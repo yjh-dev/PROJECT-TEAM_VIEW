@@ -23,8 +23,18 @@ import re
 import sys
 import time
 
+# Windows 파이썬의 기본 stdout 인코딩은 ANSI 코드페이지(한국어면 cp949)다.
+# 그런데 이 출력을 읽는 Claude Code는 UTF-8로 해석하므로 지시문의 한글이 깨진다.
+# 지시가 깨져서 전달되면 기능 자체가 무의미해지므로 UTF-8로 고정한다.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 STATE_NAME = "team-events.state.json"
 LOG_NAME = "team-events.jsonl"
+COMMANDS_NAME = "team-commands.jsonl"
 MAX_LOG_BYTES = 512 * 1024  # 넘으면 새로 시작한다(앱이 잘림을 감지해 리셋한다)
 
 # 명령 문자열에 이런 게 보이면 아예 기록하지 않는다(로그가 시크릿 유출 경로가 되지 않게).
@@ -53,6 +63,44 @@ def save_state(path, state):
     try:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(state, f)
+    except Exception:
+        pass
+
+
+def take_pending_commands(claude_dir):
+    """대기 중인 지시를 모두 가져오고 파일을 비운다(같은 지시를 두 번 실행하지 않도록)."""
+    path_ = os.path.join(claude_dir, COMMANDS_NAME)
+    if not os.path.exists(path_):
+        return []
+    out = []
+    try:
+        with open(path_, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    c = json.loads(line)
+                except Exception:
+                    continue
+                if c.get("status") == "pending":
+                    out.append(c)
+    except Exception:
+        return []
+    if out:
+        try:
+            os.remove(path_)
+        except Exception:
+            pass
+    return out
+
+
+def write_events(log_path, events):
+    try:
+        with open(log_path, "a", encoding="utf-8") as f:
+            for ev in events:
+                ev.setdefault("ts", time.time())
+                f.write(json.dumps(ev, ensure_ascii=False) + "\n")
     except Exception:
         pass
 
@@ -100,6 +148,28 @@ def main():
         events.append({"type": "session", "state": "start", "agent": "lead"})
     elif kind == "stop":
         active = []
+        # 앱에서 보낸 지시가 쌓여 있으면 여기서 **현재 세션에 밀어 넣는다.**
+        # Stop 훅이 decision=block을 반환하면 세션이 멈추지 않고 reason을 받아 이어간다.
+        pending = take_pending_commands(claude_dir)
+        if pending:
+            write_events(log_path, [
+                {"type": "agent_start", "agent": c.get("agent") or "lead"} for c in pending
+            ])
+            save_state(state_path, {"active": [c.get("agent") for c in pending if c.get("agent")]})
+            lines = []
+            for c in pending:
+                who = c.get("agent") or "lead"
+                body = c.get("text", "")
+                if who and who != "lead":
+                    lines.append(f"- `{who}` 서브에이전트로: {body}")
+                else:
+                    lines.append(f"- {body}")
+            reason = (
+                "Team View 앱에서 전달된 지시가 있습니다. 아래를 처리하세요.\n"
+                + "\n".join(lines)
+            )
+            print(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False))
+            sys.exit(0)
         events.append({"type": "session", "state": "idle", "agent": "lead"})
     elif kind == "prompt":
         events.append({"type": "prompt", "agent": "lead"})

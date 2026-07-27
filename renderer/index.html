@@ -16,10 +16,35 @@
       <span id="project">(선택 안 됨)</span>
       <span id="status" class="warn">시작 중…</span>
     </div>
+
     <main>
-      <canvas id="stage"></canvas>
+      <div id="stage-wrap">
+        <canvas id="stage"></canvas>
+
+        <!-- 캐릭터를 클릭하면 열리는 개별 지시 패널 -->
+        <aside id="panel" hidden>
+          <header>
+            <strong id="panel-name">팀원</strong>
+            <button id="panel-close" title="닫기 (Esc)">✕</button>
+          </header>
+          <textarea
+            id="panel-input"
+            rows="3"
+            placeholder="이 팀원에게 시킬 일을 적으세요. Enter로 전송, Shift+Enter 줄바꿈."
+          ></textarea>
+          <div class="row">
+            <label title="켜면 새 Claude Code 프로세스를 띄워 즉시 실행합니다. 끄면 대기열에만 넣습니다.">
+              <input type="checkbox" id="panel-spawn" />
+              새 세션으로 즉시 실행
+            </label>
+            <button id="panel-send">보내기</button>
+          </div>
+          <p id="panel-hint"></p>
+        </aside>
+      </div>
       <pre id="log" aria-label="최근 활동"></pre>
     </main>
+
     <script type="module" src="app.js"></script>
   </body>
 </html>

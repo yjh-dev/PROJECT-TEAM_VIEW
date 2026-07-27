@@ -1,5 +1,6 @@
-// 팀 명단과 자리 배치. 이름은 PROJECT-TEMPLATE의 `.claude/agents/*.md`와 맞춘다.
-// 여기 없는 이름이 이벤트로 들어오면 임시 자리에 앉힌 뒤 회색으로 그린다(무시하지 않는다).
+// 팀 명단과 자리 배치(아이소메트릭 격자 좌표).
+// 이름은 PROJECT-TEMPLATE의 `.claude/agents/*.md`와 맞춘다.
+// 명단에 없는 이름이 이벤트로 들어와도 무시하지 않고 회색 캐릭터로 자리를 만든다.
 
 import { makePalette } from './sprites.js'
 
@@ -20,58 +21,58 @@ export const ROSTER = [
 
 const UNKNOWN = { hair: '#5a5a68', shirt: '#8a8a99', accent: '#c8c8d4' }
 
-/**
- * 자리 배치: 위쪽에 리드 책상 하나, 아래 3x3 그리드에 팀원 9명.
- * 좌표는 논리 픽셀(320x200 기준)이고 렌더러가 정수배로 확대한다.
- */
-export const STAGE_W = 320
-export const STAGE_H = 200
+// 책상이 놓인 격자 칸. 캐릭터는 책상의 **북쪽 한 칸 앞**에 서서 일한다.
+const DESK_CELLS = [
+  { gx: 1, gy: 1 },
+  { gx: 3, gy: 1 },
+  { gx: 5, gy: 1 },
+  { gx: 1, gy: 3 },
+  { gx: 3, gy: 3 },
+  { gx: 5, gy: 3 },
+  { gx: 1, gy: 5 },
+  { gx: 3, gy: 5 },
+  { gx: 5, gy: 5 },
+]
 
-const DESK_COLS = [58, 160, 262]
-const DESK_ROWS = [96, 136, 176]
+// 리드는 팀을 마주보는 상석
+const LEAD_DESK = { gx: 3, gy: -0.2 }
 
 export function buildAgents() {
   const agents = new Map()
-
-  // 리드 자리 — 팀을 마주보는 위쪽 가운데
-  agents.set(LEAD_ID, makeAgent(ROSTER[0], { x: 160, y: 56 }))
-
-  const rest = ROSTER.slice(1)
-  rest.forEach((role, i) => {
-    const seat = { x: DESK_COLS[i % 3], y: DESK_ROWS[Math.floor(i / 3)] }
-    agents.set(role.id, makeAgent(role, seat))
+  agents.set(LEAD_ID, makeAgent(ROSTER[0], LEAD_DESK))
+  ROSTER.slice(1).forEach((role, i) => {
+    agents.set(role.id, makeAgent(role, DESK_CELLS[i % DESK_CELLS.length]))
   })
   return agents
 }
 
-export function makeAgent(role, seat) {
+export function makeAgent(role, desk) {
+  const work = { gx: desk.gx, gy: desk.gy - 0.75 } // 책상 앞(일하는 자리)
+  const rest = { gx: desk.gx - 0.55, gy: desk.gy + 0.85 } // 자리 옆(쉬는 자리)
   return {
     id: role.id,
     label: role.label ?? role.id,
     palette: makePalette(role.hair ? role : { ...UNKNOWN }),
-    seat,
-    // 쉴 때는 자리 왼쪽 아래(라운지)에서 서성인다
-    x: seat.x,
-    y: seat.y + 14,
-    tx: seat.x,
-    ty: seat.y + 14,
+    desk,
+    work,
+    rest,
+    gx: rest.gx,
+    gy: rest.gy,
     pose: 'idle',
     flip: false,
     active: false,
-    task: null, // 말풍선에 띄울 현재 작업
+    task: null,
     lastEventAt: 0,
     busyUntil: 0,
+    queued: 0, // 이 팀원에게 보낸 지시 중 아직 결과가 안 온 개수
   }
 }
 
 export function agentOrCreate(agents, id) {
   if (agents.has(id)) return agents.get(id)
-  const idx = agents.size
-  const seat = {
-    x: DESK_COLS[idx % 3],
-    y: DESK_ROWS[Math.min(2, Math.floor(idx / 3))] + 22,
-  }
-  const a = makeAgent({ id, label: id, ...UNKNOWN }, seat)
+  const idx = agents.size - 1
+  const desk = { gx: 6.4, gy: (idx % 6) * 1.1 }
+  const a = makeAgent({ id, label: id, ...UNKNOWN }, desk)
   agents.set(id, a)
   return a
 }

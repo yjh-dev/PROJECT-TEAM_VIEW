@@ -145,6 +145,19 @@ export function drawSprite(ctx, frame, palette, x, y, scale, flip = false) {
   const ox = Math.round(x * scale - (W * scale) / 2)
   const oy = Math.round(y * scale - H * scale)
 
+  // 1) 실루엣을 어두운 색으로 한 픽셀 밀어 먼저 깔면 캐릭터가 배경에서 떠오른다.
+  //    아이소메트릭 화면에서 평면 스프라이트가 납작해 보이지 않게 하는 값싼 방법이다.
+  ctx.fillStyle = 'rgba(10,12,20,0.55)'
+  for (let row = 0; row < frame.length; row++) {
+    const line = frame[row]
+    for (let col = 0; col < line.length; col++) {
+      if (line[col] === '.') continue
+      const cx = flip ? W - 1 - col : col
+      ctx.fillRect(ox + cx * scale + scale, oy + row * scale + scale, scale, scale)
+    }
+  }
+
+  // 2) 본체
   for (let row = 0; row < frame.length; row++) {
     const line = frame[row]
     for (let col = 0; col < line.length; col++) {
@@ -157,6 +170,20 @@ export function drawSprite(ctx, frame, palette, x, y, scale, flip = false) {
       ctx.fillRect(ox + cx * scale, oy + row * scale, scale, scale)
     }
   }
+
+  // 3) 오른쪽 절반에 옅은 그늘 — 광원이 왼쪽 위에 있다고 가정한다
+  ctx.save()
+  ctx.globalAlpha = 0.14
+  ctx.fillStyle = '#0a0e18'
+  for (let row = 0; row < frame.length; row++) {
+    const line = frame[row]
+    for (let col = Math.floor(W * 0.62); col < line.length; col++) {
+      if (line[col] === '.') continue
+      const cx = flip ? W - 1 - col : col
+      ctx.fillRect(ox + cx * scale, oy + row * scale, scale, scale)
+    }
+  }
+  ctx.restore()
 }
 
 /** 역할별 팔레트. H=머리, S=셔츠, K=포인트가 캐릭터를 구분하는 축이다. */

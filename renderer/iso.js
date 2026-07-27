@@ -1,0 +1,120 @@
+// 아이소메트릭 좌표계. 격자(gx, gy) → 화면(논리 픽셀).
+//
+// 타일은 2:1 마름모(32x16)다. 고전 도트 게임에서 쓰는 비율이고, 정수 배율로 확대해도
+// 픽셀이 뭉개지지 않는다.
+
+export const TILE_W = 32
+export const TILE_H = 16
+export const GRID = 7 // 7x7 바닥
+
+export const STAGE_W = 360
+export const STAGE_H = 250
+
+// 격자 원점(0,0)이 놓일 화면 좌표. 위쪽에 벽 공간을 남긴다.
+const ORIGIN_X = STAGE_W / 2
+const ORIGIN_Y = 62
+
+/** 격자 좌표 → 화면 좌표(타일 중심). gx/gy는 소수여도 된다(캐릭터가 부드럽게 움직인다). */
+export function toScreen(gx, gy) {
+  return {
+    x: ORIGIN_X + (gx - gy) * (TILE_W / 2),
+    y: ORIGIN_Y + (gx + gy) * (TILE_H / 2),
+  }
+}
+
+/** 화면 좌표 → 격자 좌표. 캐릭터 클릭 판정에 쓴다. */
+export function toGrid(sx, sy) {
+  const dx = sx - ORIGIN_X
+  const dy = sy - ORIGIN_Y
+  return {
+    gx: (dy / (TILE_H / 2) + dx / (TILE_W / 2)) / 2,
+    gy: (dy / (TILE_H / 2) - dx / (TILE_W / 2)) / 2,
+  }
+}
+
+/** 그리는 순서. 값이 작을수록 뒤(먼저 그린다). */
+export function depth(gx, gy) {
+  return gx + gy
+}
+
+/** 마름모 타일 하나. */
+export function fillTile(ctx, s, gx, gy, top, side) {
+  const { x, y } = toScreen(gx, gy)
+  const hw = TILE_W / 2
+  const hh = TILE_H / 2
+
+  ctx.beginPath()
+  ctx.moveTo(x * s, (y - hh) * s)
+  ctx.lineTo((x + hw) * s, y * s)
+  ctx.lineTo(x * s, (y + hh) * s)
+  ctx.lineTo((x - hw) * s, y * s)
+  ctx.closePath()
+  ctx.fillStyle = top
+  ctx.fill()
+
+  if (side) {
+    // 타일 두께 — 바닥이 판때기가 아니라 블록처럼 보이게 한다
+    const t = 2
+    ctx.beginPath()
+    ctx.moveTo((x - hw) * s, y * s)
+    ctx.lineTo(x * s, (y + hh) * s)
+    ctx.lineTo(x * s, (y + hh + t) * s)
+    ctx.lineTo((x - hw) * s, (y + t) * s)
+    ctx.closePath()
+    ctx.fillStyle = side
+    ctx.fill()
+  }
+}
+
+/**
+ * 아이소메트릭 상자(책상·모니터 등). h는 논리 높이.
+ * 윗면·왼면·오른면을 밝기 차이로 칠해 입체로 보이게 한다.
+ */
+export function drawBox(ctx, s, gx, gy, w, d, h, colors, lift = 0) {
+  const { x, y } = toScreen(gx, gy)
+  const hw = (TILE_W / 2) * w
+  const hd = (TILE_H / 2) * d
+  const baseY = y - lift
+
+  // 윗면
+  ctx.beginPath()
+  ctx.moveTo(x * s, (baseY - h - hd) * s)
+  ctx.lineTo((x + hw) * s, (baseY - h) * s)
+  ctx.lineTo(x * s, (baseY - h + hd) * s)
+  ctx.lineTo((x - hw) * s, (baseY - h) * s)
+  ctx.closePath()
+  ctx.fillStyle = colors.top
+  ctx.fill()
+
+  // 왼쪽 면(그늘)
+  ctx.beginPath()
+  ctx.moveTo((x - hw) * s, (baseY - h) * s)
+  ctx.lineTo(x * s, (baseY - h + hd) * s)
+  ctx.lineTo(x * s, (baseY + hd) * s)
+  ctx.lineTo((x - hw) * s, baseY * s)
+  ctx.closePath()
+  ctx.fillStyle = colors.left
+  ctx.fill()
+
+  // 오른쪽 면
+  ctx.beginPath()
+  ctx.moveTo((x + hw) * s, (baseY - h) * s)
+  ctx.lineTo(x * s, (baseY - h + hd) * s)
+  ctx.lineTo(x * s, (baseY + hd) * s)
+  ctx.lineTo((x + hw) * s, baseY * s)
+  ctx.closePath()
+  ctx.fillStyle = colors.right
+  ctx.fill()
+}
+
+/** 캐릭터 발밑 그림자. 바닥에 붙어 있다는 느낌을 준다. */
+export function drawShadow(ctx, s, gx, gy) {
+  const { x, y } = toScreen(gx, gy)
+  ctx.save()
+  ctx.globalAlpha = 0.28
+  ctx.fillStyle = '#000'
+  ctx.beginPath()
+  ctx.ellipse(x * s, y * s, 6 * s, 3 * s, 0, 0, Math.PI * 2)
+  ctx.fill()
+  ctx.restore()
+}

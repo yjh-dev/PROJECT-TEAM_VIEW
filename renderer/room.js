@@ -1,103 +1,111 @@
-// 사무실 배경. 전부 도형으로 그린다(에셋 없음).
-import { STAGE_W, STAGE_H } from './agents.js'
+// 아이소메트릭 사무실. 전부 도형으로 그린다(에셋 없음).
+import { GRID, TILE_H, TILE_W, toScreen, fillTile, drawBox } from './iso.js'
 
-const FLOOR = '#2a2f3d'
-const FLOOR_ALT = '#262b38'
-const WALL = '#1b1f2a'
-const WALL_TRIM = '#141821'
-const DESK = '#6b4f36'
-const DESK_TOP = '#8a6544'
-const SCREEN_OFF = '#1d2430'
-const SCREEN_ON = '#3ea6c9'
+const FLOOR_A = { top: '#39405a', side: '#252a3c' }
+const FLOOR_B = { top: '#333a52', side: '#212636' }
+const DESK = { top: '#8a6544', left: '#5d4530', right: '#71543a' }
+const SCREEN_FRAME = { top: '#2a3040', left: '#1b202c', right: '#222736' }
 
-const TILE = 16
-const WALL_H = 34
-
-export function drawRoom(ctx, s, t) {
-  // 벽
-  ctx.fillStyle = WALL
-  ctx.fillRect(0, 0, STAGE_W * s, WALL_H * s)
-  ctx.fillStyle = WALL_TRIM
-  ctx.fillRect(0, (WALL_H - 3) * s, STAGE_W * s, 3 * s)
-
-  // 창문 두 개
-  drawWindow(ctx, s, 40, 8, t)
-  drawWindow(ctx, s, 232, 8, t)
-
-  // 바닥 체크 타일
-  for (let y = WALL_H; y < STAGE_H; y += TILE) {
-    for (let x = 0; x < STAGE_W; x += TILE) {
-      const alt = ((x / TILE) | 0) % 2 === ((y / TILE) | 0) % 2
-      ctx.fillStyle = alt ? FLOOR : FLOOR_ALT
-      ctx.fillRect(x * s, y * s, TILE * s, TILE * s)
+export function drawFloor(ctx, s) {
+  for (let gy = 0; gy < GRID; gy++) {
+    for (let gx = 0; gx < GRID; gx++) {
+      const c = (gx + gy) % 2 === 0 ? FLOOR_A : FLOOR_B
+      fillTile(ctx, s, gx, gy, c.top, c.side)
     }
   }
-
-  // 화분
-  drawPlant(ctx, s, 12, 92)
-  drawPlant(ctx, s, 306, 92)
 }
 
-function drawWindow(ctx, s, x, y, t) {
-  const w = 48
-  const h = 20
-  ctx.fillStyle = '#0f1420'
-  ctx.fillRect(x * s, y * s, w * s, h * s)
-  // 밤하늘 + 아주 느리게 깜빡이는 별
-  ctx.fillStyle = '#1c2740'
-  ctx.fillRect((x + 2) * s, (y + 2) * s, (w - 4) * s, (h - 4) * s)
-  for (let i = 0; i < 6; i++) {
-    const sx = x + 5 + ((i * 13) % (w - 10))
-    const sy = y + 4 + ((i * 7) % (h - 8))
-    const twinkle = (Math.sin(t / 700 + i) + 1) / 2
-    ctx.fillStyle = `rgba(220,235,255,${0.25 + twinkle * 0.6})`
+/** 뒤쪽 두 벽. 바닥보다 먼저 그려 뒤에 놓는다. */
+export function drawWalls(ctx, s, t) {
+  const H = 30
+
+  // 북서쪽 벽 (gx = -0.5 라인)
+  for (let gy = 0; gy < GRID; gy++) {
+    drawWallPanel(ctx, s, -1, gy, H, '#262c3e', '#1d2231')
+  }
+  // 북동쪽 벽 (gy = -0.5 라인)
+  for (let gx = 0; gx < GRID; gx++) {
+    drawWallPanel(ctx, s, gx, -1, H, '#2c3346', null)
+  }
+
+  // 창문 두 개 — 밤하늘이 살짝 반짝인다
+  drawWindow(ctx, s, 1, -1, t)
+  drawWindow(ctx, s, 4, -1, t)
+}
+
+function drawWallPanel(ctx, s, gx, gy, h, face, edge) {
+  const { x, y } = toScreen(gx, gy)
+  const hw = TILE_W / 2
+  const hh = TILE_H / 2
+  ctx.beginPath()
+  ctx.moveTo((x - hw) * s, (y - h) * s)
+  ctx.lineTo(x * s, (y - h + hh) * s)
+  ctx.lineTo((x + hw) * s, (y - h) * s)
+  ctx.lineTo((x + hw) * s, y * s)
+  ctx.lineTo(x * s, (y + hh) * s)
+  ctx.lineTo((x - hw) * s, y * s)
+  ctx.closePath()
+  ctx.fillStyle = face
+  ctx.fill()
+  if (edge) {
+    ctx.fillStyle = edge
+    ctx.fillRect((x - hw) * s, (y - 1) * s, TILE_W * s, s)
+  }
+}
+
+function drawWindow(ctx, s, gx, gy, t) {
+  const { x, y } = toScreen(gx, gy)
+  const w = 20
+  const h = 14
+  const cx = x
+  const cy = y - 20
+
+  ctx.fillStyle = '#141a2a'
+  ctx.fillRect((cx - w / 2) * s, (cy - h / 2) * s, w * s, h * s)
+  ctx.fillStyle = '#1b2740'
+  ctx.fillRect((cx - w / 2 + 1) * s, (cy - h / 2 + 1) * s, (w - 2) * s, (h - 2) * s)
+  for (let i = 0; i < 5; i++) {
+    const sx = cx - w / 2 + 3 + ((i * 7) % (w - 6))
+    const sy = cy - h / 2 + 3 + ((i * 5) % (h - 6))
+    const tw = (Math.sin(t / 800 + i * 1.7) + 1) / 2
+    ctx.fillStyle = `rgba(215,232,255,${0.2 + tw * 0.65})`
     ctx.fillRect(sx * s, sy * s, s, s)
   }
-  // 창틀
-  ctx.fillStyle = '#39405a'
-  ctx.fillRect(x * s, (y + h / 2 - 0.5) * s, w * s, s)
-  ctx.fillRect((x + w / 2 - 0.5) * s, y * s, s, h * s)
+  ctx.fillStyle = '#454d6b'
+  ctx.fillRect((cx - w / 2) * s, cy * s, w * s, s)
+  ctx.fillRect(cx * s, (cy - h / 2) * s, s, h * s)
 }
 
-function drawPlant(ctx, s, x, y) {
-  ctx.fillStyle = '#7a4a30'
-  ctx.fillRect(x * s, (y + 8) * s, 8 * s, 6 * s)
-  ctx.fillStyle = '#4f8a4a'
-  ctx.fillRect((x + 1) * s, y * s, 6 * s, 8 * s)
-  ctx.fillStyle = '#66ab5e'
-  ctx.fillRect((x + 2) * s, (y - 3) * s, 4 * s, 5 * s)
-}
+/** 책상 + 모니터. 책상 칸(gx, gy)에 놓는다. */
+export function drawDesk(ctx, s, gx, gy, screenOn, t) {
+  drawBox(ctx, s, gx, gy, 0.92, 0.92, 7, DESK)
 
-/** 책상 + 모니터. 캐릭터보다 **먼저** 그려서 앉은 몸이 책상에 가려지지 않게 한다. */
-export function drawDesk(ctx, s, seat) {
-  const x = seat.x - 16
-  const y = seat.y
-  ctx.fillStyle = DESK
-  ctx.fillRect(x * s, y * s, 32 * s, 10 * s)
-  ctx.fillStyle = DESK_TOP
-  ctx.fillRect(x * s, y * s, 32 * s, 3 * s)
-}
+  // 모니터는 책상 위(뒤쪽)에 세운다
+  drawBox(ctx, s, gx - 0.15, gy - 0.15, 0.42, 0.42, 9, SCREEN_FRAME, 7)
 
-/** 모니터는 캐릭터 **뒤**에 있으므로 책상과 함께 그린다. */
-export function drawMonitor(ctx, s, seat, on, t) {
-  // 책상 상판 바로 위에 올려 놓는다(공중에 뜨면 가구로 안 보인다).
-  const x = seat.x + 4
-  const y = seat.y - 10
-  ctx.fillStyle = '#171c26'
-  ctx.fillRect(x * s, y * s, 12 * s, 9 * s)
-  if (on) {
-    // 코드가 흐르는 듯한 스캔라인
-    ctx.fillStyle = SCREEN_ON
-    ctx.fillRect((x + 1) * s, (y + 1) * s, 10 * s, 7 * s)
-    ctx.fillStyle = 'rgba(10,20,30,0.45)'
+  const { x, y } = toScreen(gx - 0.15, gy - 0.15)
+  const sx = x - 5
+  const sy = y - 7 - 14
+  if (screenOn) {
+    ctx.fillStyle = '#2f7f9e'
+    ctx.fillRect(sx * s, sy * s, 10 * s, 7 * s)
+    ctx.fillStyle = 'rgba(180,240,255,0.75)'
     for (let i = 0; i < 4; i++) {
-      const ly = y + 2 + ((i * 2 + Math.floor(t / 160)) % 6)
-      ctx.fillRect((x + 2) * s, ly * s, (2 + ((i * 3) % 7)) * s, s)
+      const ly = sy + 1 + ((i * 2 + Math.floor(t / 150)) % 6)
+      ctx.fillRect((sx + 1) * s, ly * s, (2 + ((i * 3) % 6)) * s, s)
     }
   } else {
-    ctx.fillStyle = SCREEN_OFF
-    ctx.fillRect((x + 1) * s, (y + 1) * s, 10 * s, 7 * s)
+    ctx.fillStyle = '#1a1f2b'
+    ctx.fillRect(sx * s, sy * s, 10 * s, 7 * s)
   }
-  ctx.fillStyle = '#2b3242'
-  ctx.fillRect((x + 5) * s, (y + 9) * s, 2 * s, 2 * s)
+}
+
+/** 화분 — 빈 구석을 채운다. */
+export function drawPlant(ctx, s, gx, gy) {
+  drawBox(ctx, s, gx, gy, 0.4, 0.4, 5, { top: '#8a5a3a', left: '#5e3d27', right: '#734a2f' })
+  const { x, y } = toScreen(gx, gy)
+  ctx.fillStyle = '#5aa053'
+  ctx.fillRect((x - 3) * s, (y - 13) * s, 6 * s, 8 * s)
+  ctx.fillStyle = '#6cbb63'
+  ctx.fillRect((x - 2) * s, (y - 17) * s, 4 * s, 5 * s)
 }

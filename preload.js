@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require('electron')
 
 contextBridge.exposeInMainWorld('teamView', {
   pickProject: () => ipcRenderer.invoke('project:pick'),
+  sendCommand: (payload) => ipcRenderer.invoke('command:send', payload),
   currentProject: () => ipcRenderer.invoke('project:current'),
   onEvents: (cb) => ipcRenderer.on('events:new', (_e, events) => cb(events)),
   onReset: (cb) => ipcRenderer.on('events:reset', () => cb()),
