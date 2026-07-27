@@ -1,165 +1,145 @@
-// 쿼터뷰(아이소메트릭) 도트 캐릭터. 16x24 그리드를 코드로 찍는다.
+// 쿼터뷰 도트 캐릭터. 14x20 그리드를 코드로 찍는다.
 //
-// 3D처럼 보이게 하는 핵심은 **한 색을 두 단계로 쓰는 것**이다. 광원을 왼쪽 위에 두고
-// 대문자는 밝은 면, 소문자는 그늘진 면으로 칠한다. 그래서 팔레트 키가 쌍으로 있다.
+// 단순한 실루엣이 아이소메트릭 배경에서 더 잘 읽힌다. 그래서 얼굴 이목구비는
+// 눈 두 점만 남기고, 부피는 **밝은 면/그늘 면 두 단계**로만 표현한다.
+// 광원은 왼쪽 위. 대문자가 밝은 면, 소문자가 그늘.
 //
-//   H/h 머리   F/f 얼굴·피부   E 눈   S/s 상의   A/a 팔   P/p 하의   B/b 신발   K 포인트
+//   H/h 머리   F/f 얼굴·팔   E 눈   S/s 상의   P/p 하의   B/b 신발   K 포인트(옷깃)
 //   . 투명
 //
-// 캐릭터는 화면 오른쪽 아래(남동)를 바라본다. 왼쪽으로 갈 때는 좌우 반전해서 남서를 본다.
+// 캐릭터는 화면 오른쪽 아래(남동)를 본다. 왼쪽으로 갈 때는 좌우 반전.
 
-const W = 16
-const H = 24
+const W = 14
+const H = 20
 
 const IDLE_A = [
-  '......HHHH......',
-  '....HHHHHHHh....',
-  '...HHHHHHHHhh...',
-  '..HHHFFFFFFhh...',
-  '..HHFFFFFFFfh...',
-  '..HhFFEFFEFff...',
-  '...hFFFFFFFff...',
-  '...hFFFFFFff....',
-  '....fFFFFff.....',
-  '.....KKKKK......',
-  '...SSSSSSSSs....',
-  '..SSSSSSSSSss...',
-  '..SSSSSSSSSss...',
-  '.ASSSSSSSSSssA..',
-  '.ASSSSSSSSSssA..',
-  '.aSSSSSSSSSssa..',
-  '...SSSSSSSss....',
-  '...PPPPPPPpp....',
-  '...PPPP.Ppp.....',
-  '...PPP..Ppp.....',
-  '...PPP..Ppp.....',
-  '..BBBB..BBbb....',
-  '.BBBBB..BBBbb...',
-  '................',
+  '....HHHHHH....',
+  '...HHHHHHHh...',
+  '..HHHHHHHHhh..',
+  '..HHFFFFFFhh..',
+  '..HhFFFFFFfh..',
+  '..HhFEFFEFff..',
+  '...hFFFFFFff..',
+  '....fFFFFff...',
+  '....KKKKKK....',
+  '..SSSSSSSSss..',
+  '.FSSSSSSSSssF.',
+  '.FSSSSSSSSssF.',
+  '.fSSSSSSSSssf.',
+  '...SSSSSSss...',
+  '...PPPPPPpp...',
+  '...PPP.Ppp....',
+  '...PPP.Ppp....',
+  '...PPP.Ppp....',
+  '..BBBB.BBbb...',
+  '..BBBB.BBbb...',
 ]
 
-// 숨쉬기 — 한 픽셀 내려앉는다
-const IDLE_B = ['................', ...IDLE_A.slice(0, 23)]
+const IDLE_B = ['..............', ...IDLE_A.slice(0, 19)]
 
 const WALK_A = [
-  '......HHHH......',
-  '....HHHHHHHh....',
-  '...HHHHHHHHhh...',
-  '..HHHFFFFFFhh...',
-  '..HHFFFFFFFfh...',
-  '..HhFFEFFEFff...',
-  '...hFFFFFFFff...',
-  '...hFFFFFFff....',
-  '....fFFFFff.....',
-  '.....KKKKK......',
-  '...SSSSSSSSs....',
-  '..SSSSSSSSSss...',
-  'A.SSSSSSSSSss...',
-  'ASSSSSSSSSSssA..',
-  'aSSSSSSSSSSssA..',
-  '..SSSSSSSSSssa..',
-  '...SSSSSSSss....',
-  '...PPPPPPPpp....',
-  '..PPPP..Ppp.....',
-  '..PPP...Pppp....',
-  '.PPP.....Ppp....',
-  '.BBBB....BBbb...',
-  'BBBBB.....BBbb..',
-  '................',
+  '....HHHHHH....',
+  '...HHHHHHHh...',
+  '..HHHHHHHHhh..',
+  '..HHFFFFFFhh..',
+  '..HhFFFFFFfh..',
+  '..HhFEFFEFff..',
+  '...hFFFFFFff..',
+  '....fFFFFff...',
+  '....KKKKKK....',
+  '..SSSSSSSSss..',
+  'F.SSSSSSSSss..',
+  'FSSSSSSSSSssF.',
+  'fSSSSSSSSSssf.',
+  '...SSSSSSss...',
+  '...PPPPPPpp...',
+  '..PPPP.Ppp....',
+  '..PPP..Pppp...',
+  '.PPP....Ppp...',
+  '.BBBB...BBbb..',
+  'BBBB.....BBbb.',
 ]
 
 const WALK_B = [
-  '......HHHH......',
-  '....HHHHHHHh....',
-  '...HHHHHHHHhh...',
-  '..HHHFFFFFFhh...',
-  '..HHFFFFFFFfh...',
-  '..HhFFEFFEFff...',
-  '...hFFFFFFFff...',
-  '...hFFFFFFff....',
-  '....fFFFFff.....',
-  '.....KKKKK......',
-  '...SSSSSSSSs....',
-  '..SSSSSSSSSss...',
-  '..SSSSSSSSSssA..',
-  '.ASSSSSSSSSssA..',
-  '.ASSSSSSSSSssa..',
-  '.a.SSSSSSSss....',
-  '...SSSSSSSss....',
-  '...PPPPPPPpp....',
-  '...PPPPPpp......',
-  '...PPPPpp.......',
-  '...PPPpp........',
-  '..BBBBbb........',
-  '.BBBBBbb........',
-  '................',
+  '....HHHHHH....',
+  '...HHHHHHHh...',
+  '..HHHHHHHHhh..',
+  '..HHFFFFFFhh..',
+  '..HhFFFFFFfh..',
+  '..HhFEFFEFff..',
+  '...hFFFFFFff..',
+  '....fFFFFff...',
+  '....KKKKKK....',
+  '..SSSSSSSSss..',
+  '..SSSSSSSSssF.',
+  '.FSSSSSSSSssF.',
+  '.fSSSSSSSSssf.',
+  '...SSSSSSss...',
+  '...PPPPPPpp...',
+  '...PPPPpp.....',
+  '...PPPpp......',
+  '...PPpp.......',
+  '..BBBbb.......',
+  '..BBBbb.......',
 ]
 
-// 앉아서 타이핑. 하반신은 책상에 가려지므로 그리지 않는다.
-const TYPE_A = [
-  '................',
-  '................',
-  '......HHHH......',
-  '....HHHHHHHh....',
-  '...HHHHHHHHhh...',
-  '..HHHFFFFFFhh...',
-  '..HHFFFFFFFfh...',
-  '..HhFFEFFEFff...',
-  '...hFFFFFFFff...',
-  '...hFFFFFFff....',
-  '....fFFFFff.....',
-  '.....KKKKK......',
-  '...SSSSSSSSs....',
-  '..SSSSSSSSSss...',
-  '.ASSSSSSSSSssA..',
-  '.AASSSSSSSssAA..',
-  '..aa.....aaa....',
-  '................',
-  '................',
-  '................',
-  '................',
-  '................',
-  '................',
-  '................',
+// 앉은 자세 — 의자에 앉아 무릎이 앞(화면 아래)으로 나온다.
+// 머리 위치가 서 있을 때보다 낮아야 앉은 것으로 읽히므로 위쪽을 비운다.
+const SIT_A = [
+  '..............',
+  '..............',
+  '....HHHHHH....',
+  '...HHHHHHHh...',
+  '..HHHHHHHHhh..',
+  '..HHFFFFFFhh..',
+  '..HhFFFFFFfh..',
+  '..HhFEFFEFff..',
+  '...hFFFFFFff..',
+  '....fFFFFff...',
+  '....KKKKKK....',
+  '..SSSSSSSSss..',
+  '.FSSSSSSSSssF.',
+  '.FFSSSSSSSsFF.',
+  '..ff......ff..',
+  '...PPPPPPpp...',
+  '..PPPPPPPppp..',
+  '..PPP....ppp..',
+  '..BBB....bbb..',
+  '..............',
 ]
 
-const TYPE_B = [
-  '................',
-  '................',
-  '......HHHH......',
-  '....HHHHHHHh....',
-  '...HHHHHHHHhh...',
-  '..HHHFFFFFFhh...',
-  '..HHFFFFFFFfh...',
-  '..HhFFEFFEFff...',
-  '...hFFFFFFFff...',
-  '...hFFFFFFff....',
-  '....fFFFFff.....',
-  '.....KKKKK......',
-  '...SSSSSSSSs....',
-  '..SSSSSSSSSss...',
-  '.ASSSSSSSSSssA..',
-  '..AASSSSSSSaA...',
-  '...aa...aaa.....',
-  '................',
-  '................',
-  '................',
-  '................',
-  '................',
-  '................',
-  '................',
+const SIT_B = [
+  '..............',
+  '..............',
+  '....HHHHHH....',
+  '...HHHHHHHh...',
+  '..HHHHHHHHhh..',
+  '..HHFFFFFFhh..',
+  '..HhFFFFFFfh..',
+  '..HhFEFFEFff..',
+  '...hFFFFFFff..',
+  '....fFFFFff...',
+  '....KKKKKK....',
+  '..SSSSSSSSss..',
+  '.FSSSSSSSSssF.',
+  '..FFSSSSSSFF..',
+  '...ff....ff...',
+  '...PPPPPPpp...',
+  '..PPPPPPPppp..',
+  '..PPP....ppp..',
+  '..BBB....bbb..',
+  '..............',
 ]
 
 export const POSES = {
   idle: [IDLE_A, IDLE_B],
   walk: [WALK_A, WALK_B],
-  type: [TYPE_A, TYPE_B],
+  sit: [SIT_A, SIT_B],
 }
 
 export const SPRITE_W = W
 export const SPRITE_H = H
 
-/** hex 색을 비율만큼 어둡게(또는 밝게) 만든다. 그늘 색을 손으로 고르지 않기 위해서. */
 function shade(hex, k) {
   const m = /^#?([0-9a-f]{6})$/i.exec(hex)
   if (!m) return hex
@@ -170,39 +150,35 @@ function shade(hex, k) {
   return `#${c.map((v) => v.toString(16).padStart(2, '0')).join('')}`
 }
 
-/** 역할별 팔레트. 밝은 면/그늘 면을 자동으로 짝지어 만든다. */
 export function makePalette({ hair, shirt, accent, skin = '#f2caa4' }) {
   const pants = '#414a63'
-  const shoes = '#22262f'
+  const shoes = '#262b36'
   return {
     H: hair,
-    h: shade(hair, 0.68),
+    h: shade(hair, 0.7),
     F: skin,
-    f: shade(skin, 0.74),
+    f: shade(skin, 0.76),
     E: '#2a2233',
     S: shirt,
-    s: shade(shirt, 0.7),
-    A: skin,
-    a: shade(skin, 0.74),
+    s: shade(shirt, 0.72),
     P: pants,
-    p: shade(pants, 0.7),
+    p: shade(pants, 0.72),
     B: shoes,
-    b: shade(shoes, 0.7),
+    b: shade(shoes, 0.72),
     K: accent,
   }
 }
 
 /**
- * 한 프레임을 그린다. (x, y)는 **논리 좌표**의 발밑 중앙이며 배경과 같은 배율로 확대된다.
- * flip=true면 좌우 반전(남서를 바라본다).
+ * (x, y)는 **논리 좌표**의 발밑 중앙. 배경과 같은 배율로 확대된다.
+ * yOffset은 앉을 때처럼 살짝 내려 그릴 때 쓴다.
  */
-export function drawSprite(ctx, frame, palette, x, y, scale, flip = false) {
+export function drawSprite(ctx, frame, palette, x, y, scale, flip = false, yOffset = 0) {
   const ox = Math.round(x * scale - (W * scale) / 2)
-  const oy = Math.round(y * scale - H * scale)
+  const oy = Math.round((y + yOffset) * scale - H * scale)
 
-  // 어두운 실루엣을 한 픽셀 밀어 먼저 깔면 바닥·책상과 분리돼 보인다.
-  // 배경이 밝으므로 진하게 깔면 때가 낀 것처럼 보인다 — 옅게.
-  ctx.fillStyle = 'rgba(60,45,30,0.28)'
+  // 옅은 외곽 — 밝은 바닥 위에서 실루엣이 묻히지 않게 한다
+  ctx.fillStyle = 'rgba(70,52,34,0.22)'
   for (let row = 0; row < frame.length; row++) {
     const line = frame[row]
     for (let col = 0; col < line.length; col++) {

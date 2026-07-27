@@ -1,30 +1,43 @@
 // 밝은 사무실. 전부 도형으로 그린다(에셋 없음).
 //
-// 색은 실제 사무실에서 가져왔다: 밝은 오크 바닥, 크림색 벽에 낮은 웨인스코팅,
-// 낮 하늘이 보이는 창. 가구는 "상자 하나"로 끝내지 않고 상판·다리·서랍·의자·
-// 키보드·머그처럼 눈에 보이는 부품을 각각 그린다.
+// 두 가지 원칙:
+// 1) **벽은 한 덩어리로 그린다.** 타일마다 조각을 그리면 위쪽 모서리가 톱니가 된다.
+// 2) **벽·화면에 붙는 것은 그 면에 눕힌다.** 화면에 정면으로 그리면 그 물건만
+//    카메라를 쳐다보는 것처럼 보여 아이소메트릭이 깨진다.
 
-import { GRID, TILE_H, TILE_W, toScreen, fillTile, drawBox } from './iso.js'
+import {
+  GRID,
+  TILE_H,
+  TILE_W,
+  toScreen,
+  fillTile,
+  drawBox,
+  wallQuad,
+  wallBase,
+  wallStep,
+  faceQuad,
+  drawAO,
+} from './iso.js'
 
 // ── 팔레트 ────────────────────────────────────────────────────────────────
-const FLOOR_A = { top: '#e2cba8', side: '#bfa17c' }
-const FLOOR_B = { top: '#dcc39f', side: '#b99a75' }
+const FLOOR_A = { top: '#e6d0af', side: '#c0a37e' }
+const FLOOR_B = { top: '#dfc7a3', side: '#b99b76' }
 
-const WALL_UPPER = '#f4f0e8'
-const WALL_UPPER_R = '#eae4d9'
-const WALL_LOWER = '#dfd8ca'
-const WALL_LOWER_R = '#d3cabb'
-const WALL_TRIM = '#c8bda9'
+const WALL_NW_UP = '#efe9de' // 왼쪽 벽(광원 반대편이라 살짝 어둡게)
+const WALL_NW_LOW = '#ddd4c4'
+const WALL_NE_UP = '#f7f3ec' // 오른쪽 벽(빛을 받는 면)
+const WALL_NE_LOW = '#e5ded1'
+const WALL_TRIM = '#cabfa9'
 
-const DESK_TOP = { top: '#f0e0c4', left: '#c9b28c', right: '#dcc7a3' }
-const DESK_LEG = { top: '#b39a75', left: '#8d7a5e', right: '#a08c6c' }
-const DRAWER = { top: '#e6d6ba', left: '#bda681', right: '#d0bb96' }
+const DESK_TOP = { top: '#f0e0c4', left: '#c4ad87', right: '#dcc7a3' }
+const DESK_LEG = { top: '#b39a75', left: '#8a7659', right: '#a08c6c' }
+const DRAWER = { top: '#e6d6ba', left: '#b9a27d', right: '#d0bb96' }
 
-const CHAIR_SEAT = { top: '#5f6a82', left: '#3f4759', right: '#4e5769' }
-const CHAIR_BACK = { top: '#6b7791', left: '#454e62', right: '#586377' }
+const CHAIR_SEAT = { top: '#63708c', left: '#3c4457', right: '#4e5a72' }
+const CHAIR_BACK = { top: '#6f7d9b', left: '#414b60', right: '#5a6780' }
 
-const BEZEL = { top: '#3a4150', left: '#252b36', right: '#2f3542' }
-const STAND = { top: '#4a5262', left: '#333a47', right: '#3d4453' }
+const BEZEL = { top: '#39404e', left: '#232935', right: '#2e3542' }
+const STAND = { top: '#4a5262', left: '#2f3644', right: '#3d4453' }
 
 // ── 바닥 ─────────────────────────────────────────────────────────────────
 export function drawFloor(ctx, s) {
@@ -37,11 +50,10 @@ export function drawFloor(ctx, s) {
   }
 }
 
-/** 마루널 결. 타일 하나에 얇은 선 두 줄이면 나무처럼 읽힌다. */
 function drawPlankLines(ctx, s, gx, gy) {
   const { x, y } = toScreen(gx, gy)
   ctx.save()
-  ctx.globalAlpha = 0.16
+  ctx.globalAlpha = 0.14
   ctx.strokeStyle = '#8a6f4d'
   ctx.lineWidth = Math.max(1, s * 0.5)
   for (const f of [-0.3, 0.25]) {
@@ -53,173 +65,120 @@ function drawPlankLines(ctx, s, gx, gy) {
   ctx.restore()
 }
 
-/** 회의 구역에 까는 러그. 바닥 위, 가구 아래. */
 export function drawRug(ctx, s, gx, gy, w = 3, d = 3) {
-  ctx.save()
-  ctx.globalAlpha = 0.9
   for (let i = 0; i < w; i++) {
     for (let j = 0; j < d; j++) {
       const edge = i === 0 || j === 0 || i === w - 1 || j === d - 1
-      fillTile(ctx, s, gx + i, gy + j, edge ? '#c9d8e6' : '#dde8f2', null)
+      fillTile(ctx, s, gx + i, gy + j, edge ? '#cfdce9' : '#e2ecf5', null)
     }
   }
-  ctx.restore()
 }
 
-// ── 벽 ───────────────────────────────────────────────────────────────────
+// ── 벽 (한 덩어리) ────────────────────────────────────────────────────────
+const WALL_H = 56
+const WAINSCOT = 19
+
 export function drawWalls(ctx, s, t) {
-  const H = 52
-  const LOW = 18 // 웨인스코팅 높이
+  // 왼쪽 벽 — gy = -1 라인을 따라 0..GRID 까지 한 번에
+  wallQuad(ctx, s, 'nw', 0, GRID, WAINSCOT, WALL_H, WALL_NW_UP)
+  wallQuad(ctx, s, 'nw', 0, GRID, 0, WAINSCOT, WALL_NW_LOW)
+  wallQuad(ctx, s, 'nw', 0, GRID, WAINSCOT - 1.5, WAINSCOT, WALL_TRIM)
 
-  for (let gy = 0; gy < GRID; gy++) {
-    drawWallPanel(ctx, s, -1, gy, H, LOW, WALL_UPPER, WALL_LOWER)
-  }
-  for (let gx = 0; gx < GRID; gx++) {
-    drawWallPanel(ctx, s, gx, -1, H, LOW, WALL_UPPER_R, WALL_LOWER_R)
-  }
+  // 오른쪽 벽
+  wallQuad(ctx, s, 'ne', 0, GRID, WAINSCOT, WALL_H, WALL_NE_UP)
+  wallQuad(ctx, s, 'ne', 0, GRID, 0, WAINSCOT, WALL_NE_LOW)
+  wallQuad(ctx, s, 'ne', 0, GRID, WAINSCOT - 1.5, WAINSCOT, WALL_TRIM)
 
-  drawWindow(ctx, s, 2, -1, t)
-  drawWindow(ctx, s, 6, -1, t)
-  drawWindow(ctx, s, -1, 6, t)
-  drawWhiteboard(ctx, s, -1, 2)
-  drawClock(ctx, s, 4.6, -1, t)
+  // 벽이 만나는 모서리 기둥 — 두 면 사이에 경계를 준다
+  const c = toScreen(-1, -1)
+  ctx.fillStyle = '#e0d8c8'
+  ctx.fillRect((c.x - 1) * s, (c.y - WALL_H) * s, 2 * s, WALL_H * s)
+
+  drawWindow(ctx, s, 'ne', 1.2, t)
+  drawWindow(ctx, s, 'ne', 5.2, t)
+  drawWindow(ctx, s, 'nw', 6.2, t)
+  drawWhiteboard(ctx, s, 'nw', 1.4)
+  drawClock(ctx, s, 'ne', 3.9, t)
 }
 
-function drawWallPanel(ctx, s, gx, gy, h, low, upper, lower) {
-  const { x, y } = toScreen(gx, gy)
-  const hw = TILE_W / 2
-  const hh = TILE_H / 2
+/** 창문 — 벽면에 눕혀 그린다. */
+function drawWindow(ctx, s, side, g, t) {
+  const gLen = 2.2
+  const low = 24
+  const high = 46
 
-  // 위쪽(도배) 면
-  ctx.beginPath()
-  ctx.moveTo((x - hw) * s, (y - h) * s)
-  ctx.lineTo(x * s, (y - h + hh) * s)
-  ctx.lineTo((x + hw) * s, (y - h) * s)
-  ctx.lineTo((x + hw) * s, (y - low) * s)
-  ctx.lineTo(x * s, (y - low + hh) * s)
-  ctx.lineTo((x - hw) * s, (y - low) * s)
-  ctx.closePath()
-  ctx.fillStyle = upper
-  ctx.fill()
+  wallQuad(ctx, s, side, g - 0.12, gLen + 0.24, low - 1.5, high + 1.5, '#ffffff')
+  wallQuad(ctx, s, side, g, gLen, low, high, '#a9d9f4')
+  wallQuad(ctx, s, side, g, gLen, (low + high) / 2, high, '#c6e9fb') // 위쪽이 더 밝은 하늘
 
-  // 아래쪽(웨인스코팅) 면
-  ctx.beginPath()
-  ctx.moveTo((x - hw) * s, (y - low) * s)
-  ctx.lineTo(x * s, (y - low + hh) * s)
-  ctx.lineTo((x + hw) * s, (y - low) * s)
-  ctx.lineTo((x + hw) * s, y * s)
-  ctx.lineTo(x * s, (y + hh) * s)
-  ctx.lineTo((x - hw) * s, y * s)
-  ctx.closePath()
-  ctx.fillStyle = lower
-  ctx.fill()
-
-  // 몰딩 두 줄
-  ctx.fillStyle = WALL_TRIM
-  ctx.beginPath()
-  ctx.moveTo((x - hw) * s, (y - low) * s)
-  ctx.lineTo(x * s, (y - low + hh) * s)
-  ctx.lineTo((x + hw) * s, (y - low) * s)
-  ctx.lineTo((x + hw) * s, (y - low + 1.5) * s)
-  ctx.lineTo(x * s, (y - low + hh + 1.5) * s)
-  ctx.lineTo((x - hw) * s, (y - low + 1.5) * s)
-  ctx.closePath()
-  ctx.fill()
-}
-
-function drawWindow(ctx, s, gx, gy, t) {
-  const { x, y } = toScreen(gx, gy)
-  const w = 30
-  const h = 24
-  const cy = y - 34
-
-  // 창틀
-  ctx.fillStyle = '#ffffff'
-  ctx.fillRect((x - w / 2 - 2) * s, (cy - h / 2 - 2) * s, (w + 4) * s, (h + 4) * s)
-
-  // 하늘 그라데이션 대신 두 단계 — 도트 느낌을 유지한다
-  ctx.fillStyle = '#a8d8f5'
-  ctx.fillRect((x - w / 2) * s, (cy - h / 2) * s, w * s, h * s)
-  ctx.fillStyle = '#c3e6fb'
-  ctx.fillRect((x - w / 2) * s, (cy - h / 2) * s, w * s, (h / 2) * s)
-
-  // 구름 — 아주 느리게 흐른다
-  ctx.fillStyle = 'rgba(255,255,255,0.92)'
-  for (let i = 0; i < 2; i++) {
-    const drift = ((t / 90 + i * 40) % (w + 16)) - 8
-    const cxp = x - w / 2 + drift
-    const cyp = cy - h / 4 + i * 7
-    if (cxp > x - w / 2 - 6 && cxp < x + w / 2) {
-      ctx.fillRect(cxp * s, cyp * s, 7 * s, 2 * s)
-      ctx.fillRect((cxp + 1) * s, (cyp - 2) * s, 4 * s, 2 * s)
-    }
-  }
+  // 구름 — 창 안에서 천천히 흐른다
+  const drift = ((t / 4000) % 1) * gLen
+  wallQuad(ctx, s, side, g + drift * 0.7, 0.5, high - 12, high - 8, 'rgba(255,255,255,0.95)')
+  wallQuad(ctx, s, side, g + ((drift + 1.1) % gLen), 0.35, low + 5, low + 8, 'rgba(255,255,255,0.8)')
 
   // 창살
-  ctx.fillStyle = '#ffffff'
-  ctx.fillRect((x - w / 2) * s, cy * s, w * s, 1.5 * s)
-  ctx.fillRect(x * s, (cy - h / 2) * s, 1.5 * s, h * s)
+  wallQuad(ctx, s, side, g, gLen, (low + high) / 2 - 0.8, (low + high) / 2 + 0.8, '#ffffff')
+  wallQuad(ctx, s, side, g + gLen / 2 - 0.04, 0.08, low, high, '#ffffff')
 
   // 창턱
-  ctx.fillStyle = '#e8e2d6'
-  ctx.fillRect((x - w / 2 - 3) * s, (cy + h / 2 + 2) * s, (w + 6) * s, 2 * s)
+  wallQuad(ctx, s, side, g - 0.2, gLen + 0.4, low - 3.5, low - 1.5, '#e9e2d4')
 }
 
-function drawWhiteboard(ctx, s, gx, gy) {
-  const { x, y } = toScreen(gx, gy)
-  const w = 34
-  const h = 22
-  const cy = y - 32
+function drawWhiteboard(ctx, s, side, g) {
+  const gLen = 2.6
+  const low = 24
+  const high = 44
 
-  ctx.fillStyle = '#b9c0cc'
-  ctx.fillRect((x - w / 2 - 1) * s, (cy - h / 2 - 1) * s, (w + 2) * s, (h + 2) * s)
-  ctx.fillStyle = '#fbfcfe'
-  ctx.fillRect((x - w / 2) * s, (cy - h / 2) * s, w * s, h * s)
+  wallQuad(ctx, s, side, g - 0.1, gLen + 0.2, low - 1, high + 1, '#aeb6c4')
+  wallQuad(ctx, s, side, g, gLen, low, high, '#fbfcfe')
 
-  // 낙서 — 순서도 비슷한 것
-  ctx.fillStyle = '#4a7fd4'
-  ctx.fillRect((x - 12) * s, (cy - 6) * s, 8 * s, 5 * s)
-  ctx.fillRect((x + 2) * s, (cy - 6) * s, 8 * s, 5 * s)
-  ctx.fillStyle = '#6b7280'
-  ctx.fillRect((x - 4) * s, (cy - 4) * s, 6 * s, s)
-  ctx.fillStyle = '#e05c5c'
-  ctx.fillRect((x - 12) * s, (cy + 3) * s, 14 * s, s)
-  ctx.fillRect((x - 12) * s, (cy + 6) * s, 9 * s, s)
+  // 낙서 — 상자 두 개와 밑줄
+  wallQuad(ctx, s, side, g + 0.3, 0.7, high - 8, high - 4, '#4a7fd4')
+  wallQuad(ctx, s, side, g + 1.3, 0.7, high - 8, high - 4, '#4a7fd4')
+  wallQuad(ctx, s, side, g + 1.05, 0.25, high - 6.5, high - 5.5, '#7b8494')
+  wallQuad(ctx, s, side, g + 0.3, 1.6, low + 5, low + 6, '#e05c5c')
+  wallQuad(ctx, s, side, g + 0.3, 1.0, low + 2.5, low + 3.5, '#e05c5c')
 
   // 마커 받침
-  ctx.fillStyle = '#cfd6e0'
-  ctx.fillRect((x - w / 2) * s, (cy + h / 2) * s, w * s, 1.5 * s)
-  ctx.fillStyle = '#e05c5c'
-  ctx.fillRect((x - 6) * s, (cy + h / 2 - 1) * s, 4 * s, s)
+  wallQuad(ctx, s, side, g, gLen, low - 1.5, low, '#cfd6e0')
 }
 
-function drawClock(ctx, s, gx, gy, t) {
-  const { x, y } = toScreen(gx, gy)
-  const cy = y - 44
+function drawClock(ctx, s, side, g, t) {
+  const base = wallBase(side, g)
+  const step = wallStep(side)
+  const cx = base.x + step.dx * 0.35
+  const cy = base.y + step.dy * 0.35 - 49
   const r = 5
-  ctx.fillStyle = '#3f4756'
+
+  ctx.save()
+  // 벽 기울기에 맞춰 살짝 눌러 그린다(정면 원이면 벽에서 떠 보인다)
+  ctx.translate(cx * s, cy * s)
+  ctx.scale(1, 0.86)
+  ctx.fillStyle = '#454d5c'
   ctx.beginPath()
-  ctx.arc(x * s, cy * s, (r + 1) * s, 0, Math.PI * 2)
+  ctx.arc(0, 0, (r + 1) * s, 0, Math.PI * 2)
   ctx.fill()
   ctx.fillStyle = '#fdfdfd'
   ctx.beginPath()
-  ctx.arc(x * s, cy * s, r * s, 0, Math.PI * 2)
+  ctx.arc(0, 0, r * s, 0, Math.PI * 2)
   ctx.fill()
 
   const sec = (t / 1000) % 60
-  ctx.strokeStyle = '#3f4756'
-  ctx.lineWidth = Math.max(1, s * 0.6)
+  ctx.strokeStyle = '#454d5c'
+  ctx.lineWidth = Math.max(1, s * 0.5)
   ctx.beginPath()
-  ctx.moveTo(x * s, cy * s)
-  ctx.lineTo((x + Math.sin((sec / 60) * Math.PI * 2) * r * 0.8) * s, (cy - Math.cos((sec / 60) * Math.PI * 2) * r * 0.8) * s)
+  ctx.moveTo(0, 0)
+  ctx.lineTo(Math.sin((sec / 60) * Math.PI * 2) * r * 0.8 * s, -Math.cos((sec / 60) * Math.PI * 2) * r * 0.8 * s)
   ctx.stroke()
+  ctx.restore()
 }
 
-// ── 업무 자리(책상 한 세트) ───────────────────────────────────────────────
-export function drawWorkstation(ctx, s, gx, gy, screenOn, t) {
-  const DESK_H = 11
+// ── 업무 자리 ─────────────────────────────────────────────────────────────
+const DESK_H = 11
 
-  // 다리 네 개 → 상판 → 서랍 순으로 그려야 가구처럼 보인다
+export function drawWorkstation(ctx, s, gx, gy, screenOn, t) {
+  drawAO(ctx, s, gx, gy, 22, 11, 0.2)
+
   for (const [ox, oy] of [
     [-0.34, -0.34],
     [0.34, -0.34],
@@ -231,190 +190,179 @@ export function drawWorkstation(ctx, s, gx, gy, screenOn, t) {
   drawBox(ctx, s, gx, gy, 1.05, 1.05, 2, DESK_TOP, DESK_H - 2)
   drawBox(ctx, s, gx + 0.3, gy + 0.3, 0.36, 0.36, DESK_H - 3, DRAWER)
 
-  // 서랍 손잡이 두 개
-  const dr = toScreen(gx + 0.3, gy + 0.3)
-  ctx.fillStyle = '#8d7a5e'
-  ctx.fillRect((dr.x + 2) * s, (dr.y - 6) * s, 5 * s, 1.2 * s)
-  ctx.fillRect((dr.x + 2) * s, (dr.y - 2) * s, 5 * s, 1.2 * s)
+  // 서랍 손잡이 — 서랍 앞면에 눕혀 붙인다
+  faceQuad(ctx, s, gx + 0.3, gy + 0.48, 'right', 0.22, DESK_H - 6, DESK_H - 5.2, '#8a7659')
+  faceQuad(ctx, s, gx + 0.3, gy + 0.48, 'right', 0.22, DESK_H - 9, DESK_H - 8.2, '#8a7659')
 
-  drawChair(ctx, s, gx - 0.05, gy - 1.0)
-  drawMonitor(ctx, s, gx - 0.2, gy - 0.2, DESK_H, screenOn, t)
-  drawKeyboard(ctx, s, gx + 0.12, gy + 0.12, DESK_H)
-  drawMug(ctx, s, gx + 0.42, gy - 0.28, DESK_H)
-  drawPapers(ctx, s, gx - 0.42, gy + 0.3, DESK_H)
+  drawMonitor(ctx, s, gx - 0.22, gy - 0.22, screenOn, t)
+  drawKeyboard(ctx, s, gx + 0.1, gy + 0.1)
+  drawMug(ctx, s, gx + 0.42, gy - 0.3)
+  drawPapers(ctx, s, gx - 0.44, gy + 0.32)
 }
 
-function drawChair(ctx, s, gx, gy) {
-  drawBox(ctx, s, gx, gy, 0.1, 0.1, 5, CHAIR_SEAT) // 기둥
-  drawBox(ctx, s, gx, gy, 0.5, 0.5, 1.5, CHAIR_SEAT, 5) // 좌판
-  drawBox(ctx, s, gx - 0.22, gy - 0.22, 0.42, 0.12, 10, CHAIR_BACK, 6.5) // 등받이
-
-  // 바퀴 다리
+/** 의자. 캐릭터가 앉는 자리이므로 캐릭터보다 **먼저** 그린다. */
+export function drawChair(ctx, s, gx, gy) {
+  drawAO(ctx, s, gx, gy, 9, 4.5, 0.16)
+  drawBox(ctx, s, gx, gy, 0.1, 0.1, 5, CHAIR_SEAT)
+  drawBox(ctx, s, gx, gy, 0.52, 0.52, 1.6, CHAIR_SEAT, 5)
   const p = toScreen(gx, gy)
-  ctx.fillStyle = '#3f4759'
-  for (const dx of [-6, 0, 6]) {
-    ctx.fillRect((p.x + dx - 1) * s, (p.y - 1) * s, 2.5 * s, 1.5 * s)
-  }
+  ctx.fillStyle = '#3c4658'
+  for (const dx of [-6, 0, 6]) ctx.fillRect((p.x + dx - 1) * s, (p.y - 1) * s, 2.5 * s, 1.5 * s)
 }
 
-function drawMonitor(ctx, s, gx, gy, deskH, on, t) {
-  const p = toScreen(gx, gy)
-  drawBox(ctx, s, gx, gy, 0.28, 0.28, 2, STAND, deskH) // 받침
-  drawBox(ctx, s, gx, gy, 0.07, 0.07, 6, STAND, deskH + 2) // 목
+/** 의자 등받이는 캐릭터 **뒤**에 있으므로 따로 그린다. */
+export function drawChairBack(ctx, s, gx, gy) {
+  drawBox(ctx, s, gx - 0.24, gy - 0.24, 0.46, 0.14, 11, CHAIR_BACK, 6.6)
+}
 
-  const w = 20
-  const h = 13
-  const sx = p.x - w / 2
-  const sy = p.y - deskH - 8 - h
+function drawMonitor(ctx, s, gx, gy, on, t) {
+  drawBox(ctx, s, gx, gy, 0.3, 0.3, 2, STAND, DESK_H)
+  drawBox(ctx, s, gx, gy, 0.08, 0.08, 6, STAND, DESK_H + 2)
 
-  // 베젤
-  ctx.fillStyle = '#2f3542'
-  ctx.fillRect((sx - 1.5) * s, (sy - 1.5) * s, (w + 3) * s, (h + 4) * s)
+  // 모니터 몸통을 상자로 세우고, 화면은 그 앞면에 눕힌다
+  const top = DESK_H + 8
+  drawBox(ctx, s, gx, gy, 0.62, 0.16, 14, BEZEL, top)
 
+  const yLow = top + 1.5
+  const yHigh = top + 12.5
   if (on) {
-    ctx.fillStyle = '#1e2a3a'
-    ctx.fillRect(sx * s, sy * s, w * s, h * s)
-    // 코드 줄 — 색이 다른 토큰이 섞여 흐른다
+    faceQuad(ctx, s, gx, gy + 0.09, 'right', 0.56, yLow, yHigh, '#1d2939')
     const colors = ['#7fd1ff', '#a5e887', '#ffd479', '#ff9ec4']
-    for (let i = 0; i < 6; i++) {
-      const ly = sy + 1.5 + i * 2
-      const off = (i * 3 + Math.floor(t / 220)) % 5
-      ctx.fillStyle = colors[(i + Math.floor(t / 700)) % colors.length]
-      ctx.fillRect((sx + 1.5 + off) * s, ly * s, (3 + ((i * 5) % 9)) * s, 1.2 * s)
+    for (let i = 0; i < 5; i++) {
+      const y0 = yLow + 1.2 + i * 2
+      const off = ((i * 3 + Math.floor(t / 240)) % 5) * 0.05
+      ctx.globalAlpha = 0.95
+      faceQuad(
+        ctx,
+        s,
+        gx - 0.2 + off + (i % 2) * 0.06,
+        gy + 0.09,
+        'right',
+        0.12 + ((i * 7) % 20) / 100,
+        y0,
+        y0 + 1.1,
+        colors[(i + Math.floor(t / 800)) % colors.length],
+      )
+      ctx.globalAlpha = 1
     }
   } else {
-    ctx.fillStyle = '#c9d6e4'
-    ctx.fillRect(sx * s, sy * s, w * s, h * s)
-    ctx.fillStyle = '#dbe6f1'
-    ctx.fillRect(sx * s, sy * s, w * s, (h / 2) * s)
+    faceQuad(ctx, s, gx, gy + 0.09, 'right', 0.56, yLow, yHigh, '#c9d6e4')
+    faceQuad(ctx, s, gx, gy + 0.09, 'right', 0.56, (yLow + yHigh) / 2, yHigh, '#dbe6f1')
   }
 
   // 전원 램프
-  ctx.fillStyle = on ? '#7ee08a' : '#8b93a1'
-  ctx.fillRect((p.x + w / 2 - 3) * s, (sy + h + 1) * s, 1.5 * s, 1.5 * s)
+  faceQuad(ctx, s, gx + 0.2, gy + 0.09, 'right', 0.06, top + 0.4, top + 1.1, on ? '#7ee08a' : '#8b93a1')
 }
 
-function drawKeyboard(ctx, s, gx, gy, deskH) {
+function drawKeyboard(ctx, s, gx, gy) {
   const p = toScreen(gx, gy)
-  const w = 16
-  const d = 5
-  ctx.fillStyle = '#e9edf3'
+  const w = 17
+  const d = 6
+  ctx.fillStyle = '#edf1f6'
   ctx.beginPath()
-  ctx.moveTo(p.x * s, (p.y - deskH - d / 2) * s)
-  ctx.lineTo((p.x + w / 2) * s, (p.y - deskH) * s)
-  ctx.lineTo(p.x * s, (p.y - deskH + d / 2) * s)
-  ctx.lineTo((p.x - w / 2) * s, (p.y - deskH) * s)
+  ctx.moveTo(p.x * s, (p.y - DESK_H - d / 2) * s)
+  ctx.lineTo((p.x + w / 2) * s, (p.y - DESK_H) * s)
+  ctx.lineTo(p.x * s, (p.y - DESK_H + d / 2) * s)
+  ctx.lineTo((p.x - w / 2) * s, (p.y - DESK_H) * s)
   ctx.closePath()
   ctx.fill()
   ctx.fillStyle = '#c3cad6'
-  for (let i = -3; i <= 3; i++) {
-    ctx.fillRect((p.x + i * 2) * s, (p.y - deskH - 0.5) * s, 1.2 * s, 1.2 * s)
+  for (let r = -1; r <= 1; r++) {
+    for (let i = -2; i <= 2; i++) {
+      ctx.fillRect((p.x + i * 2.6 + r * 1.2) * s, (p.y - DESK_H + r * 1.4 - 0.6) * s, 1.6 * s, 1.1 * s)
+    }
   }
-  // 마우스
-  ctx.fillStyle = '#e9edf3'
+  ctx.fillStyle = '#edf1f6'
   ctx.beginPath()
-  ctx.ellipse((p.x + 11) * s, (p.y - deskH + 1) * s, 2 * s, 1.4 * s, 0, 0, Math.PI * 2)
+  ctx.ellipse((p.x + 12) * s, (p.y - DESK_H + 1.5) * s, 2.2 * s, 1.5 * s, 0, 0, Math.PI * 2)
   ctx.fill()
 }
 
-function drawMug(ctx, s, gx, gy, deskH) {
+function drawMug(ctx, s, gx, gy) {
+  drawBox(ctx, s, gx, gy, 0.12, 0.12, 5, { top: '#ffffff', left: '#cfd6e0', right: '#eef2f7' }, DESK_H)
   const p = toScreen(gx, gy)
-  ctx.fillStyle = '#ffffff'
-  ctx.fillRect((p.x - 2) * s, (p.y - deskH - 5) * s, 4 * s, 5 * s)
-  ctx.fillStyle = '#e05c5c'
-  ctx.fillRect((p.x - 2) * s, (p.y - deskH - 3.5) * s, 4 * s, 1.5 * s)
-  ctx.fillStyle = '#cfd6e0'
-  ctx.fillRect((p.x + 2) * s, (p.y - deskH - 4) * s, 1.2 * s, 2.5 * s)
   ctx.fillStyle = '#6b4a2f'
-  ctx.fillRect((p.x - 1.6) * s, (p.y - deskH - 5) * s, 3.2 * s, 0.8 * s)
+  ctx.beginPath()
+  ctx.ellipse(p.x * s, (p.y - DESK_H - 5) * s, 2.4 * s, 1.2 * s, 0, 0, Math.PI * 2)
+  ctx.fill()
+  ctx.fillStyle = '#e05c5c'
+  faceQuad(ctx, s, gx, gy + 0.06, 'right', 0.11, DESK_H + 1.5, DESK_H + 3, '#e05c5c')
 }
 
-function drawPapers(ctx, s, gx, gy, deskH) {
+function drawPapers(ctx, s, gx, gy) {
   const p = toScreen(gx, gy)
   for (let i = 0; i < 3; i++) {
-    ctx.fillStyle = i === 2 ? '#ffffff' : '#f2f2ee'
+    ctx.fillStyle = i === 2 ? '#ffffff' : '#f1f1ec'
     ctx.beginPath()
-    ctx.moveTo(p.x * s, (p.y - deskH - i * 0.6 - 2) * s)
-    ctx.lineTo((p.x + 5) * s, (p.y - deskH - i * 0.6) * s)
-    ctx.lineTo(p.x * s, (p.y - deskH - i * 0.6 + 2) * s)
-    ctx.lineTo((p.x - 5) * s, (p.y - deskH - i * 0.6) * s)
+    ctx.moveTo((p.x + i * 0.6) * s, (p.y - DESK_H - i * 0.7 - 2.2) * s)
+    ctx.lineTo((p.x + 5.5 + i * 0.6) * s, (p.y - DESK_H - i * 0.7) * s)
+    ctx.lineTo((p.x + i * 0.6) * s, (p.y - DESK_H - i * 0.7 + 2.2) * s)
+    ctx.lineTo((p.x - 5.5 + i * 0.6) * s, (p.y - DESK_H - i * 0.7) * s)
     ctx.closePath()
     ctx.fill()
   }
-  ctx.fillStyle = '#b8bfcc'
-  ctx.fillRect((p.x - 2) * s, (p.y - deskH - 3.4) * s, 4 * s, 0.7 * s)
 }
 
 // ── 소품 ─────────────────────────────────────────────────────────────────
 export function drawMeetingTable(ctx, s, gx, gy) {
-  const TOP_H = 11
+  const H = 11
+  drawAO(ctx, s, gx, gy, 34, 17, 0.2)
   for (const [ox, oy] of [
     [-0.6, -0.6],
     [0.6, -0.6],
     [-0.6, 0.6],
     [0.6, 0.6],
   ]) {
-    drawBox(ctx, s, gx + ox, gy + oy, 0.12, 0.12, TOP_H, DESK_LEG)
+    drawBox(ctx, s, gx + ox, gy + oy, 0.12, 0.12, H, DESK_LEG)
   }
-  drawBox(ctx, s, gx, gy, 1.9, 1.9, 2.4, DESK_TOP, TOP_H - 2.4)
+  drawBox(ctx, s, gx, gy, 1.9, 1.9, 2.4, DESK_TOP, H - 2.4)
 
-  // 위에 놓인 것들: 노트북 두 대와 커피
-  const p = toScreen(gx, gy)
-  for (const dx of [-12, 8]) {
-    ctx.fillStyle = '#cfd6e0'
-    ctx.fillRect((p.x + dx) * s, (p.y - TOP_H - 4) * s, 9 * s, 4 * s)
-    ctx.fillStyle = '#2f3542'
-    ctx.fillRect((p.x + dx) * s, (p.y - TOP_H - 8) * s, 9 * s, 4.5 * s)
-    ctx.fillStyle = '#7fd1ff'
-    ctx.fillRect((p.x + dx + 1) * s, (p.y - TOP_H - 7) * s, 7 * s, 2.5 * s)
+  // 노트북 두 대 — 화면을 면에 눕힌다
+  for (const ox of [-0.45, 0.45]) {
+    drawBox(ctx, s, gx + ox, gy, 0.34, 0.26, 1, { top: '#dfe5ec', left: '#b3bac6', right: '#cdd4de' }, H)
+    drawBox(ctx, s, gx + ox, gy - 0.16, 0.34, 0.06, 6, BEZEL, H + 1)
+    faceQuad(ctx, s, gx + ox, gy - 0.13, 'right', 0.3, H + 2, H + 6.4, '#5ca9d6')
   }
-  ctx.fillStyle = '#ffffff'
-  ctx.fillRect((p.x - 2) * s, (p.y - TOP_H - 4) * s, 3.5 * s, 4 * s)
+  drawBox(ctx, s, gx, gy + 0.5, 0.1, 0.1, 4, { top: '#ffffff', left: '#cfd6e0', right: '#eef2f7' }, H)
 
-  // 의자 네 개
   drawChair(ctx, s, gx - 1.15, gy)
+  drawChairBack(ctx, s, gx - 1.15, gy)
   drawChair(ctx, s, gx + 1.15, gy)
-  drawChair(ctx, s, gx, gy - 1.15)
+  drawChairBack(ctx, s, gx + 1.15, gy)
   drawChair(ctx, s, gx, gy + 1.15)
+  drawChairBack(ctx, s, gx, gy + 1.15)
 }
 
 export function drawCoffeeCorner(ctx, s, gx, gy) {
   const H = 12
-  // 카운터
-  drawBox(ctx, s, gx, gy, 1.1, 0.7, H, { top: '#efe7d8', left: '#b7a68b', right: '#d6c8ae' })
+  drawAO(ctx, s, gx, gy, 20, 10, 0.2)
+  drawBox(ctx, s, gx, gy, 1.15, 0.75, H, { top: '#f0e8d9', left: '#b5a48a', right: '#d8caaf' })
 
-  const p = toScreen(gx, gy)
-  // 커피머신 본체
-  ctx.fillStyle = '#3c4250'
-  ctx.fillRect((p.x - 7) * s, (p.y - H - 14) * s, 12 * s, 14 * s)
-  ctx.fillStyle = '#2b303b'
-  ctx.fillRect((p.x - 7) * s, (p.y - H - 6) * s, 12 * s, 6 * s)
+  // 커피머신 — 상자로 세우고 앞면에 버튼/노즐을 붙인다
+  drawBox(ctx, s, gx - 0.18, gy - 0.1, 0.42, 0.32, 15, { top: '#454c5b', left: '#2b303b', right: '#3a4150' }, H)
+  faceQuad(ctx, s, gx - 0.18, gy + 0.06, 'right', 0.36, H + 9, H + 13, '#2b303b')
+  faceQuad(ctx, s, gx - 0.28, gy + 0.06, 'right', 0.08, H + 10.5, H + 12, '#e05c5c')
+  faceQuad(ctx, s, gx - 0.1, gy + 0.06, 'right', 0.05, H + 4, H + 7, '#9aa2b1')
+
   // 물통
-  ctx.fillStyle = 'rgba(190,225,245,0.85)'
-  ctx.fillRect((p.x + 5) * s, (p.y - H - 12) * s, 4 * s, 12 * s)
-  // 버튼과 노즐
-  ctx.fillStyle = '#e05c5c'
-  ctx.fillRect((p.x - 5) * s, (p.y - H - 12) * s, 2 * s, 2 * s)
-  ctx.fillStyle = '#8f97a6'
-  ctx.fillRect((p.x - 2) * s, (p.y - H - 7) * s, 1.5 * s, 3 * s)
+  drawBox(ctx, s, gx + 0.3, gy - 0.1, 0.16, 0.16, 12, { top: '#dff0fa', left: '#a9c4d4', right: '#c8e0ee' }, H)
+
   // 컵 두 개
-  for (const dx of [4, 7]) {
-    ctx.fillStyle = '#ffffff'
-    ctx.fillRect((p.x + dx) * s, (p.y - H - 3) * s, 2.5 * s, 3 * s)
+  for (const ox of [0.12, 0.3]) {
+    drawBox(ctx, s, gx + ox, gy + 0.28, 0.09, 0.09, 3.2, { top: '#ffffff', left: '#cfd6e0', right: '#eef2f7' }, H)
   }
 }
 
 export function drawPlant(ctx, s, gx, gy) {
+  drawAO(ctx, s, gx, gy, 10, 5, 0.18)
+  drawBox(ctx, s, gx, gy, 0.44, 0.44, 7, { top: '#e08a63', left: '#a05a3a', right: '#c9714b' })
   const p = toScreen(gx, gy)
-  // 화분
-  drawBox(ctx, s, gx, gy, 0.42, 0.42, 7, { top: '#e08a63', left: '#a55c3c', right: '#c9714b' })
-  // 잎 — 겹쳐진 타원 몇 개면 관엽식물처럼 보인다
   const leaves = [
-    [0, -16, 7, 5, '#4f9152'],
-    [-5, -13, 6, 4, '#5aa85d'],
-    [5, -13, 6, 4, '#47854a'],
-    [-2, -20, 5, 4, '#63b566'],
-    [3, -19, 5, 3.5, '#519455'],
+    [0, -16, 7.5, 5, '#4f9152'],
+    [-5.5, -13, 6, 4, '#5aa85d'],
+    [5.5, -13, 6, 4, '#44814a'],
+    [-2, -21, 5, 4, '#63b566'],
+    [3, -20, 5, 3.5, '#4f9455'],
   ]
   for (const [dx, dy, rx, ry, color] of leaves) {
     ctx.fillStyle = color
@@ -424,11 +372,9 @@ export function drawPlant(ctx, s, gx, gy) {
   }
 }
 
-/** 깊이 정렬에 함께 넣을 정적 소품들. */
 export const PROPS = [
-  { gx: 5.5, gy: 5.5, draw: drawMeetingTable },
-  { gx: 2.4, gy: 2.4, draw: drawCoffeeCorner },
-  { gx: -0.5, gy: 8.4, draw: drawPlant },
-  { gx: 8.4, gy: -0.5, draw: drawPlant },
-  { gx: 8.4, gy: 8.4, draw: drawPlant },
+  { gx: 2.5, gy: 5.5, draw: drawMeetingTable },
+  { gx: 5.5, gy: 2.5, draw: drawCoffeeCorner },
+  { gx: 8.6, gy: 5.5, draw: drawPlant },
+  { gx: 5.5, gy: 8.6, draw: drawPlant },
 ]

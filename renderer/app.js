@@ -7,7 +7,15 @@
 import { POSES, drawSprite } from './sprites.js'
 import { ROSTER, buildAgents, agentOrCreate, LEAD_ID } from './agents.js'
 import { STAGE_W, STAGE_H, toScreen, depth, drawShadow } from './iso.js'
-import { drawFloor, drawWalls, drawRug, drawWorkstation, PROPS } from './room.js'
+import {
+  drawFloor,
+  drawWalls,
+  drawRug,
+  drawWorkstation,
+  drawChair,
+  drawChairBack,
+  PROPS,
+} from './room.js'
 
 const canvas = document.getElementById('stage')
 const ctx = canvas.getContext('2d')
@@ -249,7 +257,7 @@ function update(dt, now) {
     } else {
       a.gx = dest.gx
       a.gy = dest.gy
-      a.pose = working ? 'type' : 'idle'
+      a.pose = working ? 'sit' : 'idle'
       // 대화 중이면 상대를 바라본다
       if (a.faceTarget && now < (a.talkUntil ?? 0)) {
         const other = agents.get(a.faceTarget)
@@ -260,7 +268,7 @@ function update(dt, now) {
 }
 
 function frameIndex(pose, t) {
-  const speed = pose === 'walk' ? 150 : pose === 'type' ? 130 : 700
+  const speed = pose === 'walk' ? 150 : pose === 'sit' ? 150 : 700
   return Math.floor(t / speed) % 2
 }
 
@@ -318,7 +326,7 @@ function draw(t) {
   ctx.clearRect(0, 0, canvas.width, canvas.height)
   drawWalls(ctx, scale, t)
   drawFloor(ctx, scale)
-  drawRug(ctx, scale, 4.5, 4.5, 3, 3)
+  drawRug(ctx, scale, 1.5, 4.5, 3, 3) // 회의 구역
 
   const items = []
   for (const a of agents.values()) {
@@ -335,14 +343,19 @@ function draw(t) {
     }
     const a = it.a
     if (it.kind === 'desk') {
-      drawWorkstation(ctx, scale, a.desk.gx, a.desk.gy, a.pose === 'type', t)
+      drawWorkstation(ctx, scale, a.desk.gx, a.desk.gy, a.pose === 'sit', t)
+      // 의자는 캐릭터보다 뒤에 있어야 앉은 것처럼 보인다(등받이는 캐릭터 뒤)
+      drawChair(ctx, scale, a.chair.gx, a.chair.gy)
+      drawChairBack(ctx, scale, a.chair.gx, a.chair.gy)
       continue
     }
 
-    drawShadow(ctx, scale, a.gx, a.gy)
+    const sitting = a.pose === 'sit'
+    if (!sitting) drawShadow(ctx, scale, a.gx, a.gy)
     const { x, y } = toScreen(a.gx, a.gy)
     const frames = POSES[a.pose] ?? POSES.idle
-    drawSprite(ctx, frames[frameIndex(a.pose, t)], a.palette, x, y, scale, a.flip)
+    // 앉으면 좌판 높이만큼 올라앉는다
+    drawSprite(ctx, frames[frameIndex(a.pose, t)], a.palette, x, y, scale, a.flip, sitting ? -5 : 0)
 
     if (target === a.id) {
       ctx.strokeStyle = '#4a90d9'

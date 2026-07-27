@@ -5,12 +5,12 @@
 
 export const TILE_W = 44
 export const TILE_H = 22
-export const GRID = 9 // 9x9 바닥 — 책상 사이에 통로가 생기도록 넉넉히
+export const GRID = 10 // 10x10 바닥 — 캐릭터가 어떤 자세여도 타일 위에 있도록
 
 // 9x9 격자가 딱 들어가는 크기. 여기서 더 키우면 정수 배율이 3에서 2로 떨어져
 // 오히려 작아 보인다(픽셀 아트라 배율은 정수여야 한다).
-export const STAGE_W = 460
-export const STAGE_H = 316
+export const STAGE_W = 500
+export const STAGE_H = 336
 
 // 격자 원점(0,0)이 놓일 화면 좌표. 위쪽에 벽 공간을 남긴다.
 const ORIGIN_X = STAGE_W / 2
@@ -107,6 +107,70 @@ export function drawBox(ctx, s, gx, gy, w, d, h, colors, lift = 0) {
   ctx.closePath()
   ctx.fillStyle = colors.right
   ctx.fill()
+}
+
+// ── 벽면에 눕히는 사각형 ───────────────────────────────────────────────
+// 창문·화이트보드·시계를 화면에 정면으로 그리면 "혼자 카메라를 쳐다보는" 꼴이 된다.
+// 벽이 기울어져 있으므로 그 위에 붙는 것도 같은 각도로 기울여야 한다.
+//
+// side='nw' → gx=-1 벽(오른쪽 아래로 내려가는 면), side='ne' → gy=-1 벽(오른쪽 위로)
+
+export function wallBase(side, g) {
+  return side === 'nw' ? toScreen(-1, g) : toScreen(g, -1)
+}
+
+export function wallStep(side) {
+  return side === 'nw'
+    ? { dx: -TILE_W / 2, dy: TILE_H / 2 }
+    : { dx: TILE_W / 2, dy: TILE_H / 2 }
+}
+
+/** 벽면 위의 사각형. gStart~gStart+gLen 구간, 바닥에서 yLow~yHigh 높이. */
+export function wallQuad(ctx, s, side, gStart, gLen, yLow, yHigh, color) {
+  const a = wallBase(side, gStart)
+  const step = wallStep(side)
+  const bx = a.x + step.dx * gLen
+  const by = a.y + step.dy * gLen
+
+  ctx.beginPath()
+  ctx.moveTo(a.x * s, (a.y - yHigh) * s)
+  ctx.lineTo(bx * s, (by - yHigh) * s)
+  ctx.lineTo(bx * s, (by - yLow) * s)
+  ctx.lineTo(a.x * s, (a.y - yLow) * s)
+  ctx.closePath()
+  ctx.fillStyle = color
+  ctx.fill()
+}
+
+/** 상자의 앞면(왼쪽·오른쪽 면)에 붙이는 사각형. 모니터 화면처럼. */
+export function faceQuad(ctx, s, gx, gy, side, w, yLow, yHigh, color) {
+  const c = toScreen(gx, gy)
+  const step = side === 'left' ? { dx: -TILE_W / 2, dy: TILE_H / 2 } : { dx: TILE_W / 2, dy: TILE_H / 2 }
+  const ax = c.x - (step.dx * w) / 2
+  const ay = c.y - (step.dy * w) / 2
+  const bx = c.x + (step.dx * w) / 2
+  const by = c.y + (step.dy * w) / 2
+
+  ctx.beginPath()
+  ctx.moveTo(ax * s, (ay - yHigh) * s)
+  ctx.lineTo(bx * s, (by - yHigh) * s)
+  ctx.lineTo(bx * s, (by - yLow) * s)
+  ctx.lineTo(ax * s, (ay - yLow) * s)
+  ctx.closePath()
+  ctx.fillStyle = color
+  ctx.fill()
+}
+
+/** 가구 밑 그늘. 바닥에 놓여 있다는 느낌을 준다(입체감의 절반은 이것에서 나온다). */
+export function drawAO(ctx, s, gx, gy, rx = 16, ry = 8, alpha = 0.18) {
+  const { x, y } = toScreen(gx, gy)
+  ctx.save()
+  ctx.globalAlpha = alpha
+  ctx.fillStyle = '#5a4530'
+  ctx.beginPath()
+  ctx.ellipse(x * s, y * s, rx * s, ry * s, 0, 0, Math.PI * 2)
+  ctx.fill()
+  ctx.restore()
 }
 
 /** 캐릭터 발밑 그림자. 바닥에 붙어 있다는 느낌을 준다. */
