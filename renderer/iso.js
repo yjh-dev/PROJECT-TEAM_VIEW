@@ -5,16 +5,18 @@
 
 export const TILE_W = 44
 export const TILE_H = 22
-export const GRID = 10 // 10x10 바닥 — 캐릭터가 어떤 자세여도 타일 위에 있도록
+// 도면 전체가 들어가는 격자 크기 (gx 0..GRID_W-1, gy 0..GRID_H-1).
+// 방 구획은 layout.js가 정한다.
+export const GRID_W = 13
+export const GRID_H = 12
+export const GRID = Math.max(GRID_W, GRID_H) // 하위 호환용
 
-// 9x9 격자가 딱 들어가는 크기. 여기서 더 키우면 정수 배율이 3에서 2로 떨어져
-// 오히려 작아 보인다(픽셀 아트라 배율은 정수여야 한다).
-export const STAGE_W = 500
-export const STAGE_H = 336
+export const STAGE_W = 560
+export const STAGE_H = 356
 
 // 격자 원점(0,0)이 놓일 화면 좌표. 위쪽에 벽 공간을 남긴다.
-const ORIGIN_X = STAGE_W / 2
-const ORIGIN_Y = 84
+const ORIGIN_X = 276
+const ORIGIN_Y = 74
 
 /** 격자 좌표 → 화면 좌표(타일 중심). gx/gy는 소수여도 된다(캐릭터가 부드럽게 움직인다). */
 export function toScreen(gx, gy) {

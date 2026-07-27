@@ -3,7 +3,7 @@
 // 명단에 없는 이름이 이벤트로 들어와도 무시하지 않고 회색 캐릭터로 자리를 만든다.
 
 import { makePalette } from './sprites.js'
-import { GRID } from './iso.js'
+import { ROOMS } from './layout.js'
 
 export const LEAD_ID = 'lead'
 
@@ -22,23 +22,22 @@ export const ROSTER = [
 
 const UNKNOWN = { hair: '#5a5a68', shirt: '#8a8a99', accent: '#c8c8d4' }
 
-// 책상이 놓인 격자 칸(10x10 바닥, 0..9). 3칸 간격으로 벌려 통로를 둔다.
-// 캐릭터는 책상 앞 의자에 앉고, 쉴 때는 통로 쪽으로 물러난다.
-// **모든 좌표가 0..9 안에 있어야 한다** — 벗어나면 캐릭터가 바닥 밖에 뜬다.
+// 자리는 **모두 사무실(office) 안**에 둔다. 회의실·탕비실은 다 같이 쓰는 공간이다.
+// 사무실은 gx 0..8, gy 0..11. 3칸 간격으로 벌려 통로를 낸다.
 const DESK_CELLS = [
-  { gx: 1, gy: 1 },
-  { gx: 4, gy: 1 },
-  { gx: 7, gy: 1 },
-  { gx: 1, gy: 4 },
-  { gx: 4, gy: 4 },
-  { gx: 7, gy: 4 },
-  { gx: 1, gy: 7 },
-  { gx: 4, gy: 7 },
-  { gx: 7, gy: 7 },
+  { gx: 1, gy: 2 },
+  { gx: 4, gy: 2 },
+  { gx: 7, gy: 2 },
+  { gx: 1, gy: 5 },
+  { gx: 4, gy: 5 },
+  { gx: 7, gy: 5 },
+  { gx: 1, gy: 8 },
+  { gx: 4, gy: 8 },
+  { gx: 7, gy: 8 },
 ]
 
-// 리드는 오른쪽 끝에서 팀을 바라본다
-const LEAD_DESK = { gx: 9, gy: 1 }
+// 리드는 맨 위에서 팀 전체를 바라본다
+const LEAD_DESK = { gx: 4, gy: 0 }
 
 export function buildAgents() {
   const agents = new Map()
@@ -49,10 +48,12 @@ export function buildAgents() {
   return agents
 }
 
-// 바닥은 0..GRID-1 칸이고 타일이 ±0.5씩 덮는다. 가장자리에 딱 붙으면 발이
-// 반쯤 걸치므로 여유를 두고 **항상 바닥 안**으로 잘라낸다.
-const clampCell = (v) => Math.max(0, Math.min(GRID - 1, v))
-const onFloor = (p) => ({ gx: clampCell(p.gx), gy: clampCell(p.gy) })
+// 자리 계산 결과가 사무실 밖(벽 너머·바닥 밖)으로 나가지 않게 잘라낸다.
+const O = ROOMS.office
+const onFloor = (p) => ({
+  gx: Math.max(O.x0, Math.min(O.x1, p.gx)),
+  gy: Math.max(O.y0, Math.min(O.y1, p.gy)),
+})
 
 export function makeAgent(role, desk) {
   // 의자 칸 = 일하는 자리(여기 앉는다). 쉴 때는 책상 옆 통로로 물러난다.
@@ -81,7 +82,7 @@ export function makeAgent(role, desk) {
 export function agentOrCreate(agents, id) {
   if (agents.has(id)) return agents.get(id)
   const idx = agents.size - 1
-  const desk = { gx: 9, gy: 4 + (idx % 5) } // 명단에 없는 팀원의 임시 자리(바닥 안)
+  const desk = { gx: 7, gy: 11 - (idx % 3) } // 명단에 없는 팀원의 임시 자리(사무실 안)
   const a = makeAgent({ id, label: id, ...UNKNOWN }, desk)
   agents.set(id, a)
   return a

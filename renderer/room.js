@@ -7,7 +7,8 @@
 //    커지면 장난감처럼 보인다.
 
 import {
-  GRID,
+  GRID_W,
+  GRID_H,
   TILE_H,
   TILE_W,
   toScreen,
@@ -21,6 +22,7 @@ import {
   px,
   topSeam,
 } from './iso.js'
+import { ROOMS } from './layout.js'
 
 // ── 팔레트 ────────────────────────────────────────────────────────────────
 const FLOOR_A = { top: '#e8d3b4', side: '#c2a582' }
@@ -48,12 +50,33 @@ const METAL = { top: '#9aa3b2', left: '#6d7686', right: '#828c9c' }
 const DESK_H = 10
 
 // ── 바닥 ─────────────────────────────────────────────────────────────────
+// 방마다 바닥재가 다르다. 나무(사무실) / 카펫(회의실) / 타일(탕비실).
+const FLOOR_SETS = {
+  wood: [
+    { top: '#e8d3b4', side: '#c2a582' },
+    { top: '#e1c9a8', side: '#bb9d7a' },
+  ],
+  carpet: [
+    { top: '#c8d3e2', side: '#a3aec0' },
+    { top: '#c1cddd', side: '#9ca7ba' },
+  ],
+  tile: [
+    { top: '#eef0f2', side: '#c3c7cd' },
+    { top: '#e2e6ea', side: '#b8bdc4' },
+  ],
+}
+
 export function drawFloor(ctx, s) {
-  for (let gy = 0; gy < GRID; gy++) {
-    for (let gx = 0; gx < GRID; gx++) {
-      const c = (gx + gy) % 2 === 0 ? FLOOR_A : FLOOR_B
-      fillTile(ctx, s, gx, gy, c.top, c.side)
-      drawPlankLines(ctx, s, gx, gy)
+  for (const key of Object.keys(ROOMS)) {
+    const r = ROOMS[key]
+    const set = FLOOR_SETS[r.floor]
+    for (let gy = r.y0; gy <= r.y1; gy++) {
+      for (let gx = r.x0; gx <= r.x1; gx++) {
+        const c = set[(gx + gy) % 2]
+        fillTile(ctx, s, gx, gy, c.top, c.side)
+        if (r.floor === 'wood') drawPlankLines(ctx, s, gx, gy)
+        else if (r.floor === 'tile') drawTileGrout(ctx, s, gx, gy)
+      }
     }
   }
 }
@@ -73,11 +96,28 @@ function drawPlankLines(ctx, s, gx, gy) {
   ctx.restore()
 }
 
+/** 타일 줄눈 — 마름모 네 변을 따라 얇게. */
+function drawTileGrout(ctx, s, gx, gy) {
+  const { x, y } = toScreen(gx, gy)
+  ctx.save()
+  ctx.globalAlpha = 0.35
+  ctx.strokeStyle = '#aab0b8'
+  ctx.lineWidth = Math.max(1, s * 0.4)
+  ctx.beginPath()
+  ctx.moveTo(x * s, (y - TILE_H / 2) * s)
+  ctx.lineTo((x + TILE_W / 2) * s, y * s)
+  ctx.lineTo(x * s, (y + TILE_H / 2) * s)
+  ctx.lineTo((x - TILE_W / 2) * s, y * s)
+  ctx.closePath()
+  ctx.stroke()
+  ctx.restore()
+}
+
 export function drawRug(ctx, s, gx, gy, w = 3, d = 3) {
   for (let i = 0; i < w; i++) {
     for (let j = 0; j < d; j++) {
       const edge = i === 0 || j === 0 || i === w - 1 || j === d - 1
-      fillTile(ctx, s, gx + i, gy + j, edge ? '#cdd9e7' : '#e3ecf5', null)
+      fillTile(ctx, s, gx + i, gy + j, edge ? '#b9c8dc' : '#d3dfee', null)
     }
   }
 }
@@ -85,27 +125,69 @@ export function drawRug(ctx, s, gx, gy, w = 3, d = 3) {
 // ── 벽 ───────────────────────────────────────────────────────────────────
 const WALL_H = 54
 const WAINSCOT = 18
+const INNER_H = 38 // 내벽은 낮게 — 높으면 안쪽 방이 안 보인다
 
 export function drawWalls(ctx, s, t) {
-  wallQuad(ctx, s, 'nw', 0, GRID, WAINSCOT, WALL_H, WALL_NW_UP)
-  wallQuad(ctx, s, 'nw', 0, GRID, 0, WAINSCOT, WALL_NW_LOW)
-  wallQuad(ctx, s, 'nw', 0, GRID, WAINSCOT - 1.4, WAINSCOT, WALL_TRIM)
+  // 바깥벽 — 도면 전체를 감싼다
+  wallQuad(ctx, s, 'nw', 0, GRID_H, WAINSCOT, WALL_H, WALL_NW_UP)
+  wallQuad(ctx, s, 'nw', 0, GRID_H, 0, WAINSCOT, WALL_NW_LOW)
+  wallQuad(ctx, s, 'nw', 0, GRID_H, WAINSCOT - 1.4, WAINSCOT, WALL_TRIM)
 
-  wallQuad(ctx, s, 'ne', 0, GRID, WAINSCOT, WALL_H, WALL_NE_UP)
-  wallQuad(ctx, s, 'ne', 0, GRID, 0, WAINSCOT, WALL_NE_LOW)
-  wallQuad(ctx, s, 'ne', 0, GRID, WAINSCOT - 1.4, WAINSCOT, WALL_TRIM)
+  wallQuad(ctx, s, 'ne', 0, GRID_W, WAINSCOT, WALL_H, WALL_NE_UP)
+  wallQuad(ctx, s, 'ne', 0, GRID_W, 0, WAINSCOT, WALL_NE_LOW)
+  wallQuad(ctx, s, 'ne', 0, GRID_W, WAINSCOT - 1.4, WAINSCOT, WALL_TRIM)
 
-  // 두 벽이 만나는 모서리
   const c = wallBase('nw', 0)
   ctx.fillStyle = '#e3dbcb'
   ctx.fillRect((c.x - 0.8) * s, (c.y - WALL_H) * s, 1.6 * s, WALL_H * s)
 
   drawWindow(ctx, s, 'ne', 1.1, t)
   drawWindow(ctx, s, 'ne', 5.6, t)
-  drawWindow(ctx, s, 'nw', 5.9, t)
-  drawWhiteboard(ctx, s, 'nw', 1.1)
-  drawPoster(ctx, s, 'ne', 4.1)
-  drawClock(ctx, s, 'nw', 4.5, t)
+  drawWindow(ctx, s, 'ne', 9.6, t) // 회의실 창
+  drawWindow(ctx, s, 'nw', 6.9, t)
+  drawWhiteboard(ctx, s, 'nw', 1.2)
+  drawPoster(ctx, s, 'ne', 4.2)
+  drawClock(ctx, s, 'nw', 5.4, t)
+}
+
+/**
+ * 내벽 한 칸. 깊이 정렬 대상이라 조각으로 그린다.
+ * dir='nw'면 gy 방향(세로벽), 'ne'면 gx 방향(가로벽).
+ */
+export function drawInnerWall(ctx, s, gx, gy, dir) {
+  const w = dir === 'nw' ? 0.1 : 1.02
+  const d = dir === 'nw' ? 1.02 : 0.1
+  drawBox(ctx, s, gx, gy, w, d, INNER_H, {
+    top: '#f2ede3',
+    left: '#cfc6b6',
+    right: '#e4dccd',
+  })
+  const p = toScreen(gx, gy)
+  // 걸레받이와 상단 몰딩
+  const half = (dir === 'nw' ? TILE_W : TILE_W) / 2
+  px(ctx, s, p.x - half * 0.5, p.y - 2.2, half, 2.2, '#d8cfbe')
+  px(ctx, s, p.x - half * 0.5, p.y - INNER_H - 0.8, half, 0.9, '#fbf7ef')
+}
+
+/** 문틀 — 기둥 두 개 + 상인방. 문은 열려 있다(다니는 게 보여야 하므로). */
+export function drawDoorway(ctx, s, gx, gy) {
+  const p = toScreen(gx, gy)
+  const H = INNER_H
+  // 양쪽 기둥
+  for (const e of [-1, 1]) {
+    const q = toScreen(gx, gy + e * 0.5)
+    drawBox(ctx, s, gx, gy + e * 0.5, 0.12, 0.12, H, {
+      top: '#f2ede3',
+      left: '#c8bfae',
+      right: '#e0d8c8',
+    })
+    px(ctx, s, q.x - 1.6, q.y - H + 1, 0.8, H - 2, '#fdfaf3')
+  }
+  // 상인방
+  px(ctx, s, p.x - 11, p.y - H - 1, 22, 3.5, '#efe9dd')
+  px(ctx, s, p.x - 11, p.y - H - 1, 22, 0.9, '#fdfaf3')
+  // 문지방
+  px(ctx, s, p.x - 9, p.y - 0.8, 18, 1.4, '#c9bfa9')
 }
 
 /** 창문 — 6칸 유리, 창틀 두께, 걷어올린 블라인드, 창턱까지 나눠 그린다. */
@@ -796,12 +878,15 @@ export function drawPlant(ctx, s, gx, gy) {
   }
 }
 
+// 회의 테이블은 회의실(gx 9..12, gy 0..4), 커피 코너는 탕비실(gx 9..12, gy 6..11)에.
 export const PROPS = [
-  { gx: 2.5, gy: 5.5, draw: drawMeetingTable },
-  { gx: 1.4, gy: 5.5, draw: drawMeetingChair },
-  { gx: 3.6, gy: 5.5, draw: drawMeetingChair },
-  { gx: 2.5, gy: 6.6, draw: drawMeetingChair },
-  { gx: 5.5, gy: 2.5, draw: drawCoffeeCorner },
-  { gx: 8.7, gy: 5.6, draw: drawPlant },
-  { gx: 5.6, gy: 8.7, draw: drawPlant },
+  { gx: 10.5, gy: 2, draw: drawMeetingTable },
+  { gx: 9.4, gy: 2, draw: drawMeetingChair },
+  { gx: 11.6, gy: 2, draw: drawMeetingChair },
+  { gx: 10.5, gy: 3.1, draw: drawMeetingChair },
+  { gx: 10.5, gy: 0.9, draw: drawMeetingChair },
+  { gx: 10, gy: 7.4, draw: drawCoffeeCorner },
+  { gx: 11.6, gy: 10.4, draw: drawPlant },
+  { gx: 0.4, gy: 11, draw: drawPlant },
+  { gx: 8, gy: 11, draw: drawPlant },
 ]

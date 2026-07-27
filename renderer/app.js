@@ -15,8 +15,11 @@ import {
   drawChair,
   drawChairBack,
   drawPartitions,
+  drawInnerWall,
+  drawDoorway,
   PROPS,
 } from './room.js'
+import { routeTo, interiorWallSegments, DOORWAYS, ROOMS } from './layout.js'
 
 const canvas = document.getElementById('stage')
 const ctx = canvas.getContext('2d')
@@ -34,6 +37,8 @@ const hintEl = document.getElementById('chat-hint')
 const BUSY_MS = 2600
 const IDLE_LEAVE_MS = 9000
 const TALK_MS = 3200
+
+const WALL_SEGMENTS = interiorWallSegments()
 
 let scale = 3
 let agents = buildAgents()
@@ -237,11 +242,12 @@ inputEl.addEventListener('keydown', (e) => {
 // **이건 실제 작업이 아니다.** 그래서 채팅 로그에는 남기지 않고, 말풍선도
 // 회색 작은 스타일(.small)로 구분한다. 진짜 활동은 이벤트에서만 나온다.
 
-const COFFEE = { gx: 5.5, gy: 3.7 }
+// 커피는 탕비실, 회의는 회의실. 방이 갈렸으므로 캐릭터는 문을 거쳐 이동한다.
+const COFFEE = { gx: 10, gy: 8.6 }
 const MEETING = [
-  { gx: 1.3, gy: 5.5 },
-  { gx: 3.7, gy: 5.5 },
-  { gx: 2.5, gy: 6.7 },
+  { gx: 9.4, gy: 2 },
+  { gx: 11.6, gy: 2 },
+  { gx: 10.5, gy: 3.1 },
 ]
 const SMALL_TALK = [
   '커피 한 잔 하고 올게요',
@@ -320,12 +326,26 @@ function update(dt, now) {
     const quiet = now - a.lastEventAt > IDLE_LEAVE_MS
     if (a.plan && (now >= a.plan.until || working)) a.plan = null
 
-    const dest =
-      working || (a.active && !quiet) ? a.work : a.plan ? a.plan.dest : a.rest
+    const goal = working || (a.active && !quiet) ? a.work : a.plan ? a.plan.dest : a.rest
 
+    // 목적지가 바뀌면 경로를 다시 짠다. 방이 나뉘어 있으므로 문을 거쳐야 한다 —
+    // 직선으로 가면 벽을 뚫고 지나간다.
+    if (!a.goal || a.goal.gx !== goal.gx || a.goal.gy !== goal.gy) {
+      a.goal = goal
+      a.path = routeTo({ gx: a.gx, gy: a.gy }, goal)
+    }
+    if (!a.path || a.path.length === 0) a.path = [goal]
+
+    const dest = a.path[0]
     const dx = dest.gx - a.gx
     const dy = dest.gy - a.gy
     const dist = Math.hypot(dx, dy)
+
+    // 경유지에 닿으면 다음 지점으로
+    if (dist <= 0.08 && a.path.length > 1) {
+      a.path.shift()
+      continue
+    }
 
     if (dist > 0.03) {
       const speed = 1.7
@@ -412,13 +432,16 @@ function draw(t) {
   ctx.clearRect(0, 0, canvas.width, canvas.height)
   drawWalls(ctx, scale, t)
   drawFloor(ctx, scale)
-  drawRug(ctx, scale, 1.5, 4.5, 3, 3) // 회의 구역
+  drawRug(ctx, scale, 9, 1, 3, 3) // 회의실 러그
 
   // 깊이 정렬. **각 물건을 자기 위치의 깊이로** 넣는다 — 파티션·의자를 책상과
   // 같은 깊이로 묶으면(예전 방식) 파티션 앞을 지나가는 캐릭터가 파티션에 가린다.
   // 깊이가 같을 때는 rank로 순서를 고정한다: 파티션 → 책상 → 의자 → 사람.
-  const RANK = { partition: 0, prop: 1, desk: 2, chair: 3, agent: 4 }
+  const RANK = { wall: 0, partition: 1, prop: 2, desk: 3, chair: 4, agent: 5 }
   const items = []
+  // 내벽도 한 칸씩 깊이 정렬에 넣는다. 통짜로 그리면 방 안 캐릭터가 벽에 가린다.
+  for (const w of WALL_SEGMENTS) items.push({ kind: 'wall', d: depth(w.gx, w.gy), w })
+  for (const dw of DOORWAYS) items.push({ kind: 'wall', d: depth(dw.gx, dw.gy), w: dw, door: true })
   for (const a of agents.values()) {
     const d = a.desk
     // 두 패널 모두 실제로는 책상보다 0.55만큼 뒤에 있다(서쪽/북쪽으로 각각 0.55).
@@ -431,6 +454,11 @@ function draw(t) {
   items.sort((p, q) => p.d - q.d || RANK[p.kind] - RANK[q.kind])
 
   for (const it of items) {
+    if (it.kind === 'wall') {
+      if (it.door) drawDoorway(ctx, scale, it.w.gx, it.w.gy)
+      else drawInnerWall(ctx, scale, it.w.gx, it.w.gy, it.w.dir)
+      continue
+    }
     if (it.kind === 'prop') {
       it.p.draw(ctx, scale, it.p.gx, it.p.gy, t)
       continue
