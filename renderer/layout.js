@@ -6,20 +6,21 @@
 //   사무실(office)    gx 0..8,  gy 0..11
 //   회의실(meeting)   gx 9..12, gy 0..4
 //   탕비실(pantry)    gx 9..12, gy 6..11
-//   휴게실(lounge)    gx 0..12, gy 13..16
+//   휴게실(lounge)    gx 0..12, gy 12..15
 //
-// 내벽: gx=8.5 세로벽 / gy=5.5 가로벽(회의실↔탕비실) / gy=12.5 가로벽(위층 전체↔휴게실)
+// 내벽: gx=8.5 세로벽 / gy=5.5 가로벽(회의실↔탕비실) / gy=11.5 가로벽(위층↔휴게실)
+// **방 사이에 빈 줄을 두면 안 된다** — 바닥이 끊겨 방이 따로 떠 있는 것처럼 보인다.
 
 export const ROOMS = {
   office: { x0: 0, y0: 0, x1: 8, y1: 11, name: '사무실', floor: 'wood' },
   meeting: { x0: 9, y0: 0, x1: 12, y1: 4, name: '회의실', floor: 'carpet' },
   pantry: { x0: 9, y0: 6, x1: 12, y1: 11, name: '탕비실', floor: 'tile' },
-  lounge: { x0: 0, y0: 13, x1: 12, y1: 16, name: '휴게실', floor: 'lounge' },
+  lounge: { x0: 0, y0: 12, x1: 12, y1: 15, name: '휴게실', floor: 'lounge' },
 }
 
 export const WALL_X = 8.5
 export const WALL_Y = 5.5
-export const WALL_LOUNGE_Y = 12.5
+export const WALL_LOUNGE_Y = 11.5
 
 export const DOOR_MEETING_GY = 2
 export const DOOR_PANTRY_GY = 8
@@ -30,8 +31,8 @@ const OUT_M = { gx: 7.9, gy: DOOR_MEETING_GY }
 const IN_M = { gx: 9.1, gy: DOOR_MEETING_GY }
 const OUT_P = { gx: 7.9, gy: DOOR_PANTRY_GY }
 const IN_P = { gx: 9.1, gy: DOOR_PANTRY_GY }
-const OUT_L = { gx: DOOR_LOUNGE_GX, gy: 11.9 }
-const IN_L = { gx: DOOR_LOUNGE_GX, gy: 13.1 }
+const OUT_L = { gx: DOOR_LOUNGE_GX, gy: 10.9 }
+const IN_L = { gx: DOOR_LOUNGE_GX, gy: 12.1 }
 
 // 방과 방을 잇는 문. 경로 탐색은 이 목록만 보고 한다.
 const DOOR_LINKS = [
@@ -114,9 +115,9 @@ export const SPOTS = {
     { gx: 10.5, gy: 3.1 },
   ],
   lounge: [
-    { gx: 2.2, gy: 14.6 },
-    { gx: 4.2, gy: 14.6 },
-    { gx: 8.5, gy: 15 },
-    { gx: 10.5, gy: 14.2 },
+    { gx: 2, gy: 13.4 },
+    { gx: 4.4, gy: 13.4 },
+    { gx: 8.2, gy: 13.4 },
+    { gx: 10.6, gy: 13.4 },
   ],
 }
