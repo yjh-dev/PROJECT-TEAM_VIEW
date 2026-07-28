@@ -264,6 +264,34 @@ function applyEvent(ev) {
   if (!ev._replay) chatFromEvent(ev, agent)
 }
 
+// ---------- 담당 배정 ----------
+//
+// '전체'로 보낸 지시를 리드가 혼자 처리하면 화면에서 팀이 놀고, 실제로도 분업이
+// 안 된다. 지시 내용을 보고 **담당 파트를 먼저 정해서** 보낸다. 그러면 지시가
+// "<담당> 서브에이전트로: ..." 형태로 세션에 들어가 실제로 그 팀원이 움직인다.
+
+// **순서가 규칙이다** — 위에서부터 먼저 맞는 것을 쓴다. 그래서 좁은 조건이 위로 간다.
+// 예: '모바일 앱 로그인 화면'은 '화면'이라는 넓은 낱말 탓에 프론트로 새기 쉬우므로
+// 모바일을 프론트보다 먼저 검사한다.
+const ROUTES = [
+  ['ux-designer', /피그마|figma|디자인|시안|와이어|목업|mockup|ui\s?kit|화면\s?설계|ia|정보구조|프로토타입|스타일가이드/i],
+  ['mobile-dev', /모바일|안드로이드|android|ios|flutter|react\s?native|앱스토어|플레이스토어|(^|\s)앱(\s|$)/i],
+  ['backend-dev', /백엔드|서버|api|엔드포인트|db|데이터베이스|스키마|쿼리|인증|로그인 처리|배치|크론/i],
+  ['frontend-dev', /프론트|화면|컴포넌트|페이지|css|스타일|반응형|react|next|vue|버튼|폼|레이아웃|퍼블리싱/i],
+  ['qa-tester', /테스트|qa|검증|시나리오|엣지|회귀|버그 재현|커버리지/i],
+  ['debugger', /디버그|원인|왜 안|에러|오류|크래시|실패 추적|스택/i],
+  ['code-reviewer', /리뷰|코드 검토|diff|pr|풀리퀘/i],
+  ['release-manager', /배포|릴리스|release|ci|도커|docker|파이프라인|롤백|버전/i],
+  ['planner', /기획|계획|분해|로드맵|백로그|요구사항|스펙|일정/i],
+]
+
+
+/** 지시 내용으로 담당을 고른다. 못 고르면 리드가 받아 알아서 나눈다. */
+function routeAgent(text) {
+  for (const [id, re] of ROUTES) if (re.test(text)) return id
+  return null
+}
+
 // ---------- 채팅 ----------
 
 function addMsg(kind, who, text) {
@@ -324,15 +352,22 @@ function renderTargets() {
 async function send() {
   const text = inputEl.value.trim()
   if (!text) return
-  const to = target === 'all' ? LEAD_ID : target
-  const label = target === 'all' ? '전체' : (agents.get(to)?.label ?? to)
+  // '전체'면 내용을 보고 담당을 배정한다(못 고르면 리드에게).
+  const routed = target === 'all' ? routeAgent(text) : null
+  const to = target === 'all' ? (routed ?? LEAD_ID) : target
+  const label =
+    target === 'all'
+      ? routed
+        ? `${agents.get(routed)?.label ?? routed} (자동 배정)`
+        : '전체'
+      : (agents.get(to)?.label ?? to)
 
   sendBtn.disabled = true
   hintEl.textContent = '보내는 중…'
   const res = await window.teamView.sendCommand({
     agent: to,
     text: target === 'all' ? text : text,
-    broadcast: target === 'all',
+    broadcast: target === 'all' && !routed,
     spawn: spawnEl.checked,
   })
   sendBtn.disabled = false
