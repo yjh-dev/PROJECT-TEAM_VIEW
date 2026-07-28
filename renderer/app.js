@@ -256,25 +256,53 @@ function isHistory(ev) {
 // 앱이 아는 사실은 둘뿐이다: (1) 내가 누구에게 보냈다 (2) 실제로 누가 시작했다.
 // 둘이 다르면 넘어간 것이다 — 지어낸 연출이 아니라 실제로 일어난 일이다.
 
-const queuedFor = [] // 앱이 보낸 지시의 담당 id, 보낸 순서대로
+const queuedFor = [] // 앱이 보낸 지시 { id: 담당, at: 보낸 시각(epoch 초) }, 보낸 순서대로
+
+/**
+ * 대기열에서 그 팀원 몫 하나를 뺀다. 그 팀원 것이 없으면 **가장 오래된 것** 하나.
+ * 뺀 항목을 돌려준다(없으면 null). 배지 카운터도 같이 줄인다.
+ */
+function takeQueued(id) {
+  const mine = queuedFor.findIndex((q) => q.id === id)
+  const [item] = queuedFor.splice(mine >= 0 ? mine : 0, 1)
+  if (!item) return null
+  const a = agents.get(item.id)
+  if (a && a.queued > 0) a.queued--
+  return item
+}
 
 /**
  * 시작한 팀원이 대기 중인 지시를 가져간다.
  * 지목된 사람이 아니라 다른 사람이 가져갔으면 **원래 지목됐던 팀원**을 돌려준다.
  */
 function claimQueued(agent) {
-  const mine = queuedFor.indexOf(agent.id)
-  if (mine >= 0) {
-    queuedFor.splice(mine, 1)
-    if (agent.queued > 0) agent.queued--
-    return null
+  const item = takeQueued(agent.id)
+  if (!item || item.id === agent.id) return null
+  const from = agents.get(item.id)
+  return from && from !== agent ? from : null
+}
+
+// 대기 지시를 이만큼(초) 붙들고 있으면 배지를 강제로 내린다.
+// 훅이 안 깔렸거나 세션이 안 떠 있으면 command_taken조차 오지 않는다. 실제로 훅이
+// 죽어서 3시간 동안 지시가 전혀 전달되지 않았는데, 화면은 그냥 조용한 것과 구분이
+// 되지 않았다. 그래서 조용히 지우지 않고 채팅에 실패를 드러낸다.
+const QUEUE_STALE_SEC = 600
+
+function sweepStaleQueued() {
+  if (!queuedFor.length) return
+  const nowSec = Date.now() / 1000
+  for (let i = queuedFor.length - 1; i >= 0; i--) {
+    const q = queuedFor[i]
+    if (nowSec - Number(q.at ?? nowSec) < QUEUE_STALE_SEC) continue
+    queuedFor.splice(i, 1)
+    const a = agents.get(q.id)
+    if (a && a.queued > 0) a.queued--
+    addMsg(
+      'sys',
+      '',
+      `— ${a?.label ?? q.id}에게 보낸 지시가 10분째 응답이 없습니다. 세션이 열려 있는지 확인하세요 —`,
+    )
   }
-  if (!queuedFor.length) return null
-  const fromId = queuedFor.shift()
-  const from = agents.get(fromId)
-  if (!from || from === agent) return null
-  if (from.queued > 0) from.queued--
-  return from
 }
 
 /** 넘긴 사람이 맡을 사람에게 걸어가서 알린다. */
@@ -326,6 +354,14 @@ function applyEvent(ev) {
       agent.busyUntil = 0
       agent.act = null
       break
+    case 'command_taken':
+      // 훅이 대기열을 세션에 밀어 넣었다는 사실. 지금까지는 agent_start로만 배지를
+      // 내렸는데, 리드가 위임 없이 직접 처리하면(인사·단순 질문) agent_start가 없어
+      // "지시 1건 대기"가 영영 남았다. 가져간 건 사실이므로 여기서 내린다.
+      // **상태 정리는 다시 읽는 기록에서도 해야 한다** — 안 그러면 앱을 켤 때마다
+      // 옛 지시가 대기 중으로 되살아난다. 대신 채팅 줄은 남기지 않는다.
+      takeQueued(ev.agent || LEAD_ID)
+      return
     case 'cancel':
       // 취소는 팀 전체에 걸린다. 하던 표시를 걷고 대기열 배지도 지운다.
       queuedFor.length = 0
@@ -527,7 +563,7 @@ async function send() {
     return
   }
   addMsg('me', `나 → ${label}`, text)
-  queuedFor.push(to)
+  queuedFor.push({ id: to, at: Date.now() / 1000 })
   const a = agents.get(to)
   if (a) a.queued++
   hintEl.textContent = res.spawned
@@ -665,6 +701,7 @@ function facingFlip(a, other) {
 }
 
 function update(dt, now) {
+  sweepStaleQueued()
   scheduleIdle(now)
 
   for (const a of agents.values()) {
@@ -1045,14 +1082,21 @@ window.teamView.onReset(() => {
   overlay.replaceChildren()
   messagesEl.replaceChildren()
 })
-window.teamView.onStatus(({ projectDir, exists }) => {
+window.teamView.onStatus(({ projectDir, exists, worker }) => {
   projectEl.textContent = projectDir ?? '(선택 안 됨)'
+  // 워커가 죽으면 보낸 지시를 **아무도 집어가지 않는다.** 그런데 화면상으로는
+  // 그냥 조용한 것과 똑같아서, 지시가 안 먹히는 걸 세 시간 동안 못 알아챘다.
+  // worker === 'none'은 클레임 파일 자체가 없는 경우 — 워커를 쓰지 않는 기존
+  // 방식이고 그때는 아무 세션이나 처리하므로 경고하지 않는다.
+  const deadWorker = worker === 'dead'
   statusEl.textContent = !projectDir
     ? '프로젝트를 선택하세요'
-    : exists
-      ? '이벤트 감시 중'
-      : '훅 설치 대기 중 — .claude/team-events.jsonl 없음'
-  statusEl.className = !projectDir || !exists ? 'warn' : 'ok'
+    : !exists
+      ? '훅 설치 대기 중 — .claude/team-events.jsonl 없음'
+      : deadWorker
+        ? '워커 없음 — 보낸 지시가 처리되지 않습니다'
+        : '이벤트 감시 중'
+  statusEl.className = !projectDir || !exists || deadWorker ? 'warn' : 'ok'
 })
 
 pickBtn.addEventListener('click', () => window.teamView.pickProject())

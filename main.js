@@ -12,9 +12,12 @@ const path = require('path')
 
 const POLL_MS = 300
 const CONFIG_NAME = 'config.json'
+// 워커 클레임은 30초에 한 번 갱신되므로 자주 볼 이유가 없다.
+const WORKER_POLL_MS = 2000
+const WORKER_TTL_S = 600 // 훅의 WORKER_TTL과 같은 값. 넘으면 죽은 워커로 본다.
 
 let win = null
-let watch = null // { file, offset, timer, tail }
+let watch = null // { file, offset, timer, tail, exists, worker, workerAt }
 
 function configPath() {
   return path.join(app.getPath('userData'), CONFIG_NAME)
@@ -45,6 +48,46 @@ function eventsFileFor(projectDir) {
   return path.join(projectDir, '.claude', 'team-events.jsonl')
 }
 
+/**
+ * 지시를 처리할 워커 세션이 살아 있는가.
+ *
+ *   'none' — 클레임 파일 자체가 없다. 워커를 쓰지 않는 기존 방식이므로 정상이다.
+ *   'live' — 최근에 갱신된 클레임이 있다.
+ *   'dead' — 클레임은 있는데 오래됐다. **보낸 지시가 아무도 처리하지 않는다.**
+ *
+ * 'dead'를 화면에 드러내는 것이 이 함수의 존재 이유다. 워커가 꺼진 것과 그냥
+ * 조용한 것은 화면에서 구분되지 않아, 지시가 안 먹히는 걸 세 시간 동안 못 알아챘다.
+ */
+function workerState(projectDir) {
+  let raw
+  try {
+    raw = fs.readFileSync(path.join(projectDir, '.claude', 'team-worker.json'), 'utf8')
+  } catch {
+    return 'none'
+  }
+  let at = 0
+  try {
+    at = Number(JSON.parse(raw).at) || 0
+  } catch {
+    return 'dead' // 읽을 수 없는 클레임은 믿지 않는다
+  }
+  return Date.now() / 1000 - at > WORKER_TTL_S ? 'dead' : 'live'
+}
+
+/** 상태줄에 필요한 것이 바뀌었을 때만 렌더러로 보낸다(300ms마다 도배하지 않게). */
+function pumpStatus(projectDir, { force = false } = {}) {
+  if (!watch) return
+  const now = Date.now()
+  if (!force && now - (watch.workerAt ?? 0) < WORKER_POLL_MS) return
+  watch.workerAt = now
+  const worker = workerState(projectDir)
+  const exists = fs.existsSync(watch.file)
+  if (!force && worker === watch.worker && exists === watch.exists) return
+  watch.worker = worker
+  watch.exists = exists
+  send('watch:status', { projectDir, file: watch.file, exists, worker })
+}
+
 function stopWatching() {
   if (watch?.timer) clearInterval(watch.timer)
   watch = null
@@ -71,9 +114,12 @@ function startWatching(projectDir, { replay = true } = {}) {
     }
   }
 
-  send('watch:status', { projectDir, file, exists: fs.existsSync(file) })
+  pumpStatus(projectDir, { force: true })
 
-  watch.timer = setInterval(() => pump(replay), POLL_MS)
+  watch.timer = setInterval(() => {
+    pump(replay)
+    pumpStatus(projectDir)
+  }, POLL_MS)
   pump(replay)
   replay = false
 }
