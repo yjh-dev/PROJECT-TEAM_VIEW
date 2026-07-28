@@ -67,7 +67,17 @@ def project_dir(payload):
     return next((c for c in candidates if c), os.getcwd())
 
 
-ACTIVE_TTL = 180  # 초. SubagentStop이 오지 않으면 이만큼 뒤 자동 해제한다.
+# 팀원에게 일을 넘기는 도구들. **이름이 하나가 아니다** — 예전에는 "Task"만 보고
+# 있었는데 실제로는 "Agent"로 들어와서, 위임이 통째로 안 잡혔다. 그래서 서브에이전트가
+# 시작하지 않은 것으로 처리되고 **그 팀원의 작업이 전부 리드에게 붙었다.**
+# 화면에서는 "리드 혼자 계속 일하는" 모습으로 보인다.
+DELEGATE_TOOLS = ("Task", "Agent")
+
+# 초. SubagentStop이 오지 않으면 이만큼 뒤 자동 해제한다.
+# 180초는 너무 짧았다 — 서브에이전트는 10분 넘게 도는 일이 흔한데, 그 사이 만료되면
+# 남은 작업이 다시 리드에게 붙는다. 짝이 안 맞는 유령을 막는 것이 목적이므로
+# 넉넉히 두되 무한정은 아니게 한다.
+ACTIVE_TTL = 1800
 
 
 def load_state(path):
@@ -322,12 +332,12 @@ def main():
         item = active.pop() if active else None
         events.append({"type": "agent_stop", "agent": (item or {}).get("name") or "lead"})
     elif kind == "pre":
-        if tool == "Task":
+        if tool in DELEGATE_TOOLS:
             sub = ti.get("subagent_type") if isinstance(ti, dict) else None
             agent = sub or "팀원"
             active.append({"name": agent, "at": time.time()})
             events.append({"type": "agent_start", "agent": agent})
-            events.append({"type": "tool", "tool": "Task", "agent": "lead"})
+            events.append({"type": "tool", "tool": tool, "agent": "lead"})
         else:
             events.append(
                 {
