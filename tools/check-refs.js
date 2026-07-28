@@ -36,6 +36,40 @@ for (const f of files) {
 
 const problems = []
 
+// 0) 문법부터 본다. 참조가 아무리 맞아도 파싱이 깨지면 화면이 통째로 안 뜬다.
+//    (실제로 문자열 안의 \n이 진짜 줄바꿈으로 치환돼 앱이 안 켜진 적이 있다.)
+for (const f of [...files, '../main.js', '../preload.js']) {
+  const p = f.startsWith('..') ? path.join(DIR, f) : path.join(DIR, f)
+  let src
+  try {
+    src = fs.readFileSync(p, 'utf8')
+  } catch {
+    continue
+  }
+  try {
+    // import/export가 있어도 파싱만 하도록 모듈로 컴파일해 본다
+    new (require('vm').SourceTextModule ?? Object)(src, { identifier: p })
+  } catch (err) {
+    if (err instanceof SyntaxError) problems.push(`${path.basename(p)}: 문법 오류 — ${err.message}`)
+    // SourceTextModule이 없는 런타임이면 아래 폴백으로 검사한다
+  }
+}
+
+// SourceTextModule은 --experimental-vm-modules 없이는 못 쓴다. 폴백: import/export를
+// 주석 처리한 뒤 Function 생성자로 파싱해 본다(실행하지 않는다).
+for (const f of files) {
+  const src = fs.readFileSync(path.join(DIR, f), 'utf8')
+  const stripped = src
+    .replace(/^\s*import\s[\s\S]*?from\s*'[^']*'\s*$/gm, '')
+    .replace(/^\s*export\s*\{[\s\S]*?\}\s*(from\s*'[^']*')?\s*$/gm, '')
+    .replace(/^\s*export\s+/gm, '')
+  try {
+    new Function(stripped)
+  } catch (err) {
+    if (err instanceof SyntaxError) problems.push(`${f}: 문법 오류 — ${err.message}`)
+  }
+}
+
 for (const [name, m] of modules) {
   // 1) import한 이름을 상대 모듈이 실제로 export 하는가
   for (const imp of m.imports) {

@@ -794,8 +794,7 @@ pickBtn.addEventListener('click', () => window.teamView.pickProject())
 // 대화 전체 복사 — 화면에 보이는 순서 그대로 텍스트로 뽑는다
 document.getElementById('copy-all').addEventListener('click', (e) => {
   const lines = [...messagesEl.children].map((el) => el.dataset.plain ?? el.textContent)
-  window.teamView.copyText(lines.join('
-'))
+  window.teamView.copyText(lines.join('\n'))
   const btn = e.currentTarget
   const before = btn.textContent
   btn.textContent = '복사됨'
