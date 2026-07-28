@@ -100,6 +100,54 @@ main {
 #chat header {
   padding: 10px;
   border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+#targets {
+  flex: 1;
+}
+
+.chat-tools button {
+  padding: 4px 10px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* 메시지별 복사 버튼 — 평소엔 숨고 올리면 나타난다 */
+.msg .copy {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  opacity: 0;
+  padding: 2px 6px;
+  font-size: 12px;
+  line-height: 1.2;
+  border-radius: 4px;
+  background: rgba(20, 26, 38, 0.85);
+  border: 1px solid #3f4a60;
+  color: #b9c3d6;
+  transition: opacity 0.12s;
+}
+
+.msg:hover .copy {
+  opacity: 1;
+}
+
+.msg .copy:hover {
+  color: #ffffff;
+  background: #33415c;
+}
+
+.msg .copy.done {
+  color: #9ece6a;
+  border-color: #4f7a3a;
+  opacity: 1;
+}
+
+.msg .body {
+  white-space: pre-wrap;
 }
 
 #targets {
@@ -144,9 +192,19 @@ main {
   display: flex;
   flex-direction: column;
   gap: 9px;
+  /* 전역 user-select:none 때문에 채팅에서 드래그 선택이 막혀 있었다.
+     읽고 복사하는 영역이므로 여기서만 되돌린다. */
+  user-select: text;
+  cursor: auto;
+}
+
+#messages ::selection {
+  background: #3d6ab5;
+  color: #ffffff;
 }
 
 .msg {
+  position: relative;
   max-width: 92%;
   padding: 7px 11px;
   border-radius: 10px;

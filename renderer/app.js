@@ -303,8 +303,28 @@ function addMsg(kind, who, text) {
     const w = document.createElement('span')
     w.className = 'who'
     w.textContent = who
-    el.append(w, document.createTextNode(text))
+    const body = document.createElement('span')
+    body.className = 'body'
+    body.textContent = text
+    // 복사 버튼 — 평소엔 숨어 있다가 말풍선에 올리면 나타난다
+    const copy = document.createElement('button')
+    copy.className = 'copy'
+    copy.type = 'button'
+    copy.title = '이 메시지 복사'
+    copy.textContent = '⧉'
+    copy.addEventListener('click', (e) => {
+      e.stopPropagation()
+      window.teamView.copyText(text)
+      copy.textContent = '✓'
+      copy.classList.add('done')
+      setTimeout(() => {
+        copy.textContent = '⧉'
+        copy.classList.remove('done')
+      }, 1200)
+    })
+    el.append(w, body, copy)
   }
+  el.dataset.plain = kind === 'sys' ? text : `${who}: ${text}`
   messagesEl.append(el)
   while (messagesEl.children.length > 200) messagesEl.firstChild.remove()
   messagesEl.scrollTop = messagesEl.scrollHeight
@@ -770,6 +790,19 @@ window.teamView.onStatus(({ projectDir, exists }) => {
 })
 
 pickBtn.addEventListener('click', () => window.teamView.pickProject())
+
+// 대화 전체 복사 — 화면에 보이는 순서 그대로 텍스트로 뽑는다
+document.getElementById('copy-all').addEventListener('click', (e) => {
+  const lines = [...messagesEl.children].map((el) => el.dataset.plain ?? el.textContent)
+  window.teamView.copyText(lines.join('
+'))
+  const btn = e.currentTarget
+  const before = btn.textContent
+  btn.textContent = '복사됨'
+  setTimeout(() => {
+    btn.textContent = before
+  }, 1200)
+})
 
 renderTargets()
 addMsg('sys', '', '캐릭터를 클릭하거나 위 칩으로 대상을 고르고 지시를 보내세요.')
