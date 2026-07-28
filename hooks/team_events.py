@@ -45,11 +45,26 @@ SECRETISH = re.compile(
 
 
 def project_dir(payload):
-    return (
-        payload.get("cwd")
-        or os.environ.get("CLAUDE_PROJECT_DIR")
-        or os.getcwd()
-    )
+    """이벤트를 기록할 프로젝트 뿌리.
+
+    **cwd를 먼저 믿으면 안 된다.** 세션이 다른 폴더에서 작업하면 cwd가 따라
+    움직이는데, 그 폴더에 `.claude`가 없으면 훅이 조용히 빠져나가 이벤트가
+    통째로 사라진다. 실제로 그렇게 3시간 동안 아무것도 기록되지 않았고,
+    Stop 훅이 대기열을 세션에 넣어 주지 못해 "명령을 내려도 작업을 안 하는"
+    상태가 됐다.
+
+    그래서 후보들 중 **실제로 `.claude`가 있는 첫 번째**를 고른다.
+    CLAUDE_PROJECT_DIR(프로젝트 뿌리)이 먼저다.
+    """
+    candidates = [
+        os.environ.get("CLAUDE_PROJECT_DIR"),
+        payload.get("cwd"),
+        os.getcwd(),
+    ]
+    for cand in candidates:
+        if cand and os.path.isdir(os.path.join(cand, ".claude")):
+            return cand
+    return next((c for c in candidates if c), os.getcwd())
 
 
 ACTIVE_TTL = 180  # 초. SubagentStop이 오지 않으면 이만큼 뒤 자동 해제한다.
