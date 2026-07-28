@@ -170,6 +170,8 @@ function describe(ev) {
       return `지시 받음: ${String(ev.detail ?? '').slice(0, 40)}`
     case 'error':
       return `실패: ${String(ev.detail ?? ev.tool ?? '').slice(0, 44)}`
+    case 'reply':
+      return String(ev.detail ?? '')
     case 'tool': {
       const d = shortPath(ev.detail)
       if (ev.tool === 'Edit' || ev.tool === 'Write') return `${d || '파일'} 고치는 중`
@@ -245,6 +247,12 @@ function applyEvent(ev) {
         agent.busyUntil = now + BUSY_MS
       }
       break
+    case 'reply':
+      // 답변은 '일하는 상태'가 아니다. 말풍선만 띄우고 상태는 건드리지 않는다.
+      agent.task = String(ev.detail ?? '').slice(0, 60)
+      agent.lastEventAt = now
+      if (!ev._replay) addMsg('agent', `${agent.label} · 답변`, String(ev.detail ?? ''))
+      return
     default:
       agent.active = true
       agent.busyUntil = now + BUSY_MS

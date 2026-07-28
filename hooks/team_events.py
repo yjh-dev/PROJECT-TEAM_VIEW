@@ -51,12 +51,31 @@ def project_dir(payload):
     )
 
 
+ACTIVE_TTL = 180  # 초. SubagentStop이 오지 않으면 이만큼 뒤 자동 해제한다.
+
+
 def load_state(path):
+    """활성 에이전트 목록을 읽되 **오래된 항목은 버린다.**
+
+    Task 호출은 있었는데 짝이 되는 SubagentStop이 오지 않으면(테스트로 넣은
+    가짜 이벤트, 중단된 세션 등) 그 에이전트가 영원히 활성으로 남아 이후 모든
+    도구가 엉뚱한 사람에게 귀속된다. 실제로 그 일이 있었다.
+    """
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            st = json.load(f)
     except Exception:
         return {"active": []}
+    now = time.time()
+    out = []
+    for item in st.get("active") or []:
+        if isinstance(item, dict):
+            if now - float(item.get("at") or 0) < ACTIVE_TTL:
+                out.append(item)
+        elif isinstance(item, str):
+            out.append({"name": item, "at": now})  # 예전 형식 호환
+    st["active"] = out
+    return st
 
 
 def save_state(path, state):
@@ -103,6 +122,41 @@ def write_events(log_path, events):
                 f.write(json.dumps(ev, ensure_ascii=False) + "\n")
     except Exception:
         pass
+
+
+def last_assistant_text(transcript_path):
+    """세션 기록에서 **마지막 답변 텍스트**를 뽑는다.
+
+    지금까지 경로가 앱 → 세션 한 방향이라, 앱에서 "안녕"을 보내도 대답이 앱으로
+    돌아오지 않았다(화면에는 상태 변화만 보였다). Stop 훅 페이로드에 들어오는
+    transcript_path를 읽어 마지막 assistant 메시지를 되돌려 준다.
+    """
+    if not transcript_path or not os.path.exists(transcript_path):
+        return None
+    try:
+        with open(transcript_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()[-400:]  # 끝부분만 본다(기록이 길 수 있다)
+    except Exception:
+        return None
+    for line in reversed(lines):
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+        if rec.get("type") != "assistant":
+            continue
+        content = (rec.get("message") or {}).get("content")
+        parts = []
+        if isinstance(content, list):
+            for c in content:
+                if isinstance(c, dict) and c.get("type") == "text" and c.get("text"):
+                    parts.append(c["text"])
+        elif isinstance(content, str):
+            parts.append(content)
+        text = " ".join(" ".join(parts).split())
+        if text:
+            return text[:180]
+    return None
 
 
 def detail_for(tool, ti):
@@ -155,7 +209,10 @@ def main():
             write_events(log_path, [
                 {"type": "agent_start", "agent": c.get("agent") or "lead"} for c in pending
             ])
-            save_state(state_path, {"active": [c.get("agent") for c in pending if c.get("agent")]})
+            save_state(
+                state_path,
+                {"active": [{"name": c.get("agent"), "at": time.time()} for c in pending if c.get("agent")]},
+            )
             lines = []
             for c in pending:
                 who = c.get("agent") or "lead"
@@ -170,17 +227,20 @@ def main():
             )
             print(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False))
             sys.exit(0)
+        reply = last_assistant_text(payload.get("transcript_path"))
+        if reply:
+            events.append({"type": "reply", "agent": "lead", "detail": reply})
         events.append({"type": "session", "state": "idle", "agent": "lead"})
     elif kind == "prompt":
         events.append({"type": "prompt", "agent": "lead"})
     elif kind == "subagent_stop":
-        agent = active.pop() if active else None
-        events.append({"type": "agent_stop", "agent": agent or "lead"})
+        item = active.pop() if active else None
+        events.append({"type": "agent_stop", "agent": (item or {}).get("name") or "lead"})
     elif kind == "pre":
         if tool == "Task":
             sub = ti.get("subagent_type") if isinstance(ti, dict) else None
             agent = sub or "팀원"
-            active.append(agent)
+            active.append({"name": agent, "at": time.time()})
             events.append({"type": "agent_start", "agent": agent})
             events.append({"type": "tool", "tool": "Task", "agent": "lead"})
         else:
@@ -188,7 +248,7 @@ def main():
                 {
                     "type": "tool",
                     "tool": tool,
-                    "agent": active[-1] if active else "lead",
+                    "agent": active[-1]["name"] if active else "lead",
                     "detail": detail_for(tool, ti),
                 }
             )
@@ -210,7 +270,7 @@ def main():
             {
                 "type": "error",
                 "tool": tool,
-                "agent": active[-1] if active else "lead",
+                "agent": active[-1]["name"] if active else "lead",
                 "detail": " ".join(msg.split())[:60] or detail_for(tool, ti),
             }
         )
