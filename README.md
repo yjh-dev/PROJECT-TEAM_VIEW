@@ -53,6 +53,9 @@ node tools/emit-demo-events.js <그 폴더 경로>
     "PreToolUse": [
       { "matcher": "*", "hooks": [{ "type": "command", "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/team_events.py\" pre", "timeout": 10 }] }
     ],
+    "PostToolUse": [
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/team_events.py\" post", "timeout": 10 }] }
+    ],
     "SubagentStop": [
       { "hooks": [{ "type": "command", "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/team_events.py\" subagent_stop", "timeout": 10 }] }
     ],
@@ -106,8 +109,22 @@ tools/emit-demo-events.js  훅 없이 화면만 확인할 때
 캐릭터를 추가하거나 색을 바꾸려면 `renderer/agents.js`의 `ROSTER`만 건드리면 됩니다.
 명단에 없는 이름이 이벤트로 들어와도 회색 캐릭터로 자리를 만들어 줍니다(무시하지 않습니다).
 
+## exe로 만들기
+
+```bash
+pnpm run build:dir   # release/win-unpacked/Team View.exe  (빠른 확인용)
+pnpm run build:win   # 설치본 + 포터블 exe
+```
+- `release/TeamView-Setup-<버전>-x64.exe` — 설치 경로를 고를 수 있는 설치본
+- `release/TeamView-Portable-<버전>-x64.exe` — 설치 없이 바로 실행
+
+> **서명 단계는 꺼져 있습니다**(`signAndEditExecutable: false`). 켜면 electron-builder가
+> winCodeSign 캐시를 푸는데, 그 안에 macOS 심볼릭 링크가 있어 **Windows 개발자 모드가
+> 꺼져 있으면 압축 해제가 실패**합니다. 서명할 인증서도 없으므로 껐습니다. 대신 exe의
+> 아이콘·제품 정보가 기본값(Electron)으로 남습니다. 개발자 모드를 켜면 다시 켜도 됩니다.
+
 ## 아직 없는 것
 
-- 배포용 exe 패키징(`electron-builder`) — 지금은 `pnpm dev`로 실행합니다
 - 캐릭터 클릭 시 해당 에이전트의 최근 출력 보기
 - 여러 프로젝트 동시 감시
+- 트레이 아이콘 / 항상 위

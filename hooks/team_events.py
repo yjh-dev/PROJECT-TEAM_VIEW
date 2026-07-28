@@ -109,10 +109,10 @@ def detail_for(tool, ti):
     if not isinstance(ti, dict):
         return None
     if tool == "Bash":
-        cmd = str(ti.get("command") or "")
+        cmd = " ".join(str(ti.get("command") or "").split())  # 줄바꿈·연속 공백 정리
         if SECRETISH.search(cmd):
             return "(민감한 명령 — 생략)"
-        return cmd[:40]
+        return cmd[:44]
     for key in ("file_path", "notebook_path", "path", "pattern"):
         v = ti.get(key)
         if isinstance(v, str) and v:
@@ -192,7 +192,29 @@ def main():
                     "detail": detail_for(tool, ti),
                 }
             )
-    else:  # post — 지금은 pre만으로 충분해서 기록하지 않는다
+    elif kind == "post":
+        # 실패를 잡는다. 성공은 이미 pre에서 기록했으므로 여기서는 **오류만** 남긴다.
+        # 화면에서 문제를 바로 알아채는 것이 목적이라 실패는 놓치면 안 된다.
+        res = payload.get("tool_response")
+        failed = False
+        msg = ""
+        if isinstance(res, dict):
+            failed = bool(res.get("is_error") or res.get("error"))
+            msg = str(res.get("error") or res.get("stderr") or "")
+        elif isinstance(res, str):
+            failed = res.lstrip().lower().startswith("error")
+            msg = res
+        if not failed:
+            return
+        events.append(
+            {
+                "type": "error",
+                "tool": tool,
+                "agent": active[-1] if active else "lead",
+                "detail": " ".join(msg.split())[:60] or detail_for(tool, ti),
+            }
+        )
+    else:
         return
 
     state["active"] = active

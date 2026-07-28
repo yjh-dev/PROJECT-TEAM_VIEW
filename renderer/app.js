@@ -14,6 +14,7 @@ import {
   drawWorkstation,
   drawChair,
   drawChairBack,
+  drawChairArms,
   drawPartitions,
   drawInnerWall,
   drawDoorway,
@@ -167,6 +168,8 @@ function describe(ev) {
       return '끝냈습니다'
     case 'command':
       return `지시 받음: ${String(ev.detail ?? '').slice(0, 40)}`
+    case 'error':
+      return `실패: ${String(ev.detail ?? ev.tool ?? '').slice(0, 44)}`
     case 'tool': {
       const d = shortPath(ev.detail)
       if (ev.tool === 'Edit' || ev.tool === 'Write') return `${d || '파일'} 고치는 중`
@@ -193,6 +196,8 @@ function applyEvent(ev) {
     case 'agent_start': {
       agent.active = true
       agent.busyUntil = now + BUSY_MS
+      agent.startedAt = now
+      agent.toolCount = 0
       if (agent.queued > 0) agent.queued--
       // 리드가 팀원을 부르는 연출: 서로 마주본다
       const lead = agents.get(LEAD_ID)
@@ -210,6 +215,25 @@ function applyEvent(ev) {
       agent.active = false
       agent.busyUntil = 0
       break
+    case 'error': {
+      // 화면만 봐도 문제를 알아채는 것이 목적이다. 당사자에게 느낌표를 띄우고
+      // 디버거를 그 자리로 보낸다(실제로 디버거가 호출되지 않아도 '봐야 할 곳'을 가리킨다).
+      agent.active = true
+      agent.busyUntil = now + BUSY_MS
+      agent.errorUntil = now + 12000
+      agent.errorCount = (agent.errorCount ?? 0) + 1
+      const dbg = agents.get('debugger')
+      if (dbg && dbg.id !== agent.id && !dbg.active) {
+        dbg.plan = {
+          kind: 'inspect',
+          dest: { gx: agent.chair.gx + 0.7, gy: agent.chair.gy + 0.5 },
+          until: now + 12000,
+          bubble: `${agent.label} 쪽 확인할게요`,
+          faceId: agent.id,
+        }
+      }
+      break
+    }
     case 'session':
       if (ev.state === 'idle') {
         for (const a of agents.values()) {
@@ -224,6 +248,7 @@ function applyEvent(ev) {
     default:
       agent.active = true
       agent.busyUntil = now + BUSY_MS
+      if (ev.type === 'tool') agent.toolCount = (agent.toolCount ?? 0) + 1
   }
 
   agent.task = describe(ev)
@@ -502,7 +527,7 @@ function nodesFor(a) {
   if (n) return n
   const tag = document.createElement('div')
   tag.className = 'tag'
-  tag.textContent = a.label // 한글 역할명만. 영문 id는 채팅 쪽에서 확인한다.
+  tag.innerHTML = '<span class="nm"></span><span class="meta"></span>' 
   const bubble = document.createElement('div')
   bubble.className = 'bubble'
   bubble.hidden = true
@@ -523,6 +548,17 @@ function syncOverlay(now) {
     tag.style.top = `${headY * scale + cam.y}px`
     tag.classList.toggle('on', a.active)
     tag.classList.toggle('sel', target === a.id)
+    const erroring = now < (a.errorUntil ?? 0)
+    tag.classList.toggle('err', erroring)
+    // 이름 + 진행 정보(경과 초·도구 호출 수). 일하는 중일 때만 붙인다.
+    tag.querySelector('.nm').textContent = (erroring ? '❗ ' : '') + a.label
+    const meta = tag.querySelector('.meta')
+    if (a.active && a.startedAt) {
+      const sec = Math.floor((now - a.startedAt) / 1000)
+      meta.textContent = ` ${sec}s · ${a.toolCount ?? 0}`
+    } else {
+      meta.textContent = ''
+    }
 
     let text = null
     let kind = ''
@@ -561,7 +597,7 @@ function draw(t) {
   // 깊이 정렬. **각 물건을 자기 위치의 깊이로** 넣는다 — 파티션·의자를 책상과
   // 같은 깊이로 묶으면(예전 방식) 파티션 앞을 지나가는 캐릭터가 파티션에 가린다.
   // 깊이가 같을 때는 rank로 순서를 고정한다: 파티션 → 책상 → 의자 → 사람.
-  const RANK = { wall: 0, partition: 1, prop: 2, desk: 3, chair: 4, agent: 5 }
+  const RANK = { wall: 0, partition: 1, prop: 2, desk: 3, chair: 4, agent: 5, arms: 6 }
   const items = []
   // 내벽도 한 칸씩 깊이 정렬에 넣는다. 통짜로 그리면 방 안 캐릭터가 벽에 가린다.
   for (const w of WALL_SEGMENTS) items.push({ kind: 'wall', d: depth(w.gx, w.gy), w })
@@ -573,13 +609,15 @@ function draw(t) {
     items.push({ kind: 'desk', d: depth(d.gx, d.gy), a })
     items.push({ kind: 'chair', d: depth(a.chair.gx, a.chair.gy), a })
     items.push({ kind: 'agent', d: depth(a.gx, a.gy), a })
+    // 팔걸이는 앉은 캐릭터 **앞**에 그려야 팔을 걸친 것처럼 보인다
+    items.push({ kind: 'arms', d: depth(a.chair.gx, a.chair.gy), a })
   }
   for (const p of PROPS) items.push({ kind: 'prop', d: depth(p.gx, p.gy), p })
   items.sort((p, q) => p.d - q.d || RANK[p.kind] - RANK[q.kind])
 
   for (const it of items) {
     if (it.kind === 'wall') {
-      if (it.door) drawDoorway(ctx, scale, it.w.gx, it.w.gy)
+      if (it.door) drawDoorway(ctx, scale, it.w.gx, it.w.gy, it.w.dir)
       else drawInnerWall(ctx, scale, it.w.gx, it.w.gy, it.w.dir)
       continue
     }
@@ -597,9 +635,13 @@ function draw(t) {
       continue
     }
     if (it.kind === 'chair') {
-      // 좌판과 등받이는 앉은 캐릭터보다 **먼저** 그린다(같은 깊이면 rank가 보장).
+      // 좌판과 등받이는 앉은 캐릭터보다 **먼저**(뒤에) 그린다.
       drawChair(ctx, scale, a.chair.gx, a.chair.gy)
       drawChairBack(ctx, scale, a.chair.gx, a.chair.gy)
+      continue
+    }
+    if (it.kind === 'arms') {
+      if (a.pose === 'sit') drawChairArms(ctx, scale, a.chair.gx, a.chair.gy)
       continue
     }
 
@@ -608,7 +650,7 @@ function draw(t) {
     const { x, y } = toScreen(a.gx, a.gy)
     const frames = POSES[a.pose] ?? POSES.idle
     // 앉으면 좌판 높이만큼 올라앉는다
-    drawSprite(ctx, frames[frameIndex(a.pose, t)], a.palette, x, y, scale, a.flip, sitting ? -5 : 0)
+    drawSprite(ctx, frames[frameIndex(a.pose, t)], a.palette, x, y, scale, a.flip, sitting ? -6.5 : 0)
 
     if (target === a.id) {
       ctx.strokeStyle = '#4a90d9'

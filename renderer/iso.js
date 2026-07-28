@@ -196,13 +196,17 @@ export function topSeam(ctx, s, gx, gy, lift, from, to, color, thick = 0.8) {
 // 매끈한 벡터라 서로 따로 놀았고, 얇은 상자는 지느러미처럼 뭉개졌다.
 // 여기서는 면을 **1픽셀 줄로 쌓아** 캐릭터와 같은 질감으로 만든다.
 
-/** 마름모 윗면을 1픽셀 가로줄로 쌓는다. */
-export function pxDiamond(ctx, s, cx, cy, w, d, color, lit) {
+/**
+ * 마름모 윗면을 1픽셀 가로줄로 쌓는다.
+ * bevel > 1이면 뾰족한 꼭짓점을 깎아 **모서리가 둥근 면**이 된다.
+ * (의자 좌판처럼 날카로운 마름모로 보이면 안 되는 곳에 쓴다.)
+ */
+export function pxDiamond(ctx, s, cx, cy, w, d, color, lit, bevel = 1) {
   const hw = (TILE_W / 2) * w
   const hh = (TILE_H / 2) * d
   const rows = Math.max(1, Math.round(hh))
   for (let i = -rows; i <= rows; i++) {
-    const f = 1 - Math.abs(i) / (rows + 0.0001)
+    const f = Math.min(1, (1 - Math.abs(i) / (rows + 0.0001)) * bevel)
     const half = Math.max(0.5, hw * f)
     px(ctx, s, cx - half, cy + i, half * 2, 1, i <= -rows + 1 && lit ? lit : color)
   }
@@ -214,7 +218,7 @@ export function pxDiamond(ctx, s, cx, cy, w, d, color, lit) {
  *
  * pal = { top, lit, left, right, edge }
  */
-export function pxBox(ctx, s, gx, gy, w, d, h, pal, lift = 0) {
+export function pxBox(ctx, s, gx, gy, w, d, h, pal, lift = 0, bevel = 1) {
   const c = toScreen(gx, gy)
   const cx = c.x
   const cy = c.y - lift
@@ -235,7 +239,7 @@ export function pxBox(ctx, s, gx, gy, w, d, h, pal, lift = 0) {
   px(ctx, s, cx - 1, cy + hh - h, 2, h, pal.edge ?? pal.left)
 
   // 윗면
-  pxDiamond(ctx, s, cx, cy - h, w, d, pal.top, pal.lit)
+  pxDiamond(ctx, s, cx, cy - h, w, d, pal.top, pal.lit, bevel)
 
   // 실루엣 외곽선 — 아래쪽 두 변만 살짝
   if (pal.edge) {
@@ -246,6 +250,86 @@ export function pxBox(ctx, s, gx, gy, w, d, h, pal, lift = 0) {
       px(ctx, s, cx + hw * f - 1, yEdge - 1, 1, 1, pal.edge)
     }
   }
+}
+
+// ── 정확한 아이소 입체 ───────────────────────────────────────────────────
+//
+// 마름모를 "선형 보간"으로 채우면 줄마다 폭이 3px, 5px, 4px… 제멋대로 줄어 계단이
+// 지저분해진다(가구가 찌글거리던 진짜 원인). 아이소 사각형은 네 꼭짓점이 정해진
+// **볼록 다각형**이므로, 다각형을 그대로 스캔라인으로 채우면 모서리 기울기가
+// 정확히 1/2로 떨어져 도트가 깔끔하게 맞는다.
+
+/** 볼록 다각형을 1픽셀 가로줄로 채운다. pts는 논리 좌표 [{x,y}...]. */
+export function pxPoly(ctx, s, pts, color, litColor) {
+  let minY = Infinity
+  let maxY = -Infinity
+  for (const p of pts) {
+    if (p.y < minY) minY = p.y
+    if (p.y > maxY) maxY = p.y
+  }
+  const y0 = Math.round(minY)
+  const y1 = Math.round(maxY)
+  for (let y = y0; y < y1; y++) {
+    const yc = y + 0.5
+    let xa = Infinity
+    let xb = -Infinity
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i]
+      const q = pts[(i + 1) % pts.length]
+      if (p.y === q.y) continue
+      const lo = Math.min(p.y, q.y)
+      const hi = Math.max(p.y, q.y)
+      if (yc < lo || yc >= hi) continue
+      const x = p.x + ((yc - p.y) / (q.y - p.y)) * (q.x - p.x)
+      if (x < xa) xa = x
+      if (x > xb) xb = x
+    }
+    if (xa > xb) continue
+    px(ctx, s, xa, y, Math.max(1, xb - xa), 1, y < y0 + 1 && litColor ? litColor : color)
+  }
+}
+
+/**
+ * 아이소 직육면체. gw/gd는 **격자 단위 전체 크기**(1 = 타일 하나 ≈ 1.9m),
+ * h는 논리 픽셀 높이. 윗면과 보이는 두 옆면을 다각형으로 채운다.
+ */
+export function pxSolid(ctx, s, gx, gy, gw, gd, h, pal, lift = 0) {
+  const c = toScreen(gx, gy)
+  const cy = c.y - lift
+  const a = gw / 2
+  const b = gd / 2
+  const HX = TILE_W / 2
+  const HY = TILE_H / 2
+
+  // 윗면 네 꼭짓점(뒤 → 오른쪽 → 앞 → 왼쪽)
+  const top = [
+    { x: c.x + (-a + b) * HX, y: cy - h - (a + b) * HY }, // 뒤
+    { x: c.x + (a + b) * HX, y: cy - h + (a - b) * HY }, // 오른쪽
+    { x: c.x + (a - b) * HX, y: cy - h + (a + b) * HY }, // 앞
+    { x: c.x - (a + b) * HX, y: cy - h + (-a + b) * HY }, // 왼쪽
+  ]
+  const [back, right, front, left] = top
+
+  // 옆면 두 장(앞쪽 두 모서리에서 아래로)
+  if (h > 0) {
+    pxPoly(
+      ctx,
+      s,
+      [left, front, { x: front.x, y: front.y + h }, { x: left.x, y: left.y + h }],
+      pal.left,
+    )
+    pxPoly(
+      ctx,
+      s,
+      [front, right, { x: right.x, y: right.y + h }, { x: front.x, y: front.y + h }],
+      pal.right,
+    )
+    if (pal.edge) {
+      px(ctx, s, front.x - 0.5, front.y, 1, h, pal.edge)
+    }
+  }
+  pxPoly(ctx, s, top, pal.top, pal.lit)
+  return { back, right, front, left, cy }
 }
 
 /** 색을 밝게/어둡게 — 팔레트를 손으로 다 고르지 않기 위해. */

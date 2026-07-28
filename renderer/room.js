@@ -21,12 +21,24 @@ import {
   drawAO,
   px,
   topSeam,
+  pxSolid,
 } from './iso.js'
 import { ROOMS } from './layout.js'
 import {
+  drawFridge,
+  drawWaterCooler,
+  drawSink,
+  drawMicrowave,
+  drawShelf,
+  drawBookshelf,
+  drawFloorLamp,
+  drawVending,
+  drawBeanBag,
+  drawLoungeRug,
   drawWorkstation,
   drawChair,
   drawChairBack,
+  drawChairArms,
   drawPartitions,
   drawMeetingTable,
   drawMeetingChair,
@@ -215,26 +227,58 @@ export function drawInnerWall(ctx, s, gx, gy, dir) {
   }
 }
 
-/** 문틀 — 기둥 두 개 + 상인방. 문은 열려 있다(다니는 게 보여야 하므로). */
-export function drawDoorway(ctx, s, gx, gy) {
+/**
+ * 문 — 문틀 + **활짝 열린 문짝** + 손잡이 + 명패.
+ *
+ * 전에는 문틀만 그리고 구멍만 뚫려 있어서 "벽이 끊긴 자리"처럼 보였다.
+ * 실제로는 문짝이 안쪽으로 열려 벽에 붙어 있어야 문으로 읽힌다.
+ * dir='nw'면 세로벽의 문(문짝이 gx 방향으로 열린다), 'ne'면 가로벽의 문.
+ */
+export function drawDoorway(ctx, s, gx, gy, dir = 'nw') {
   const p = toScreen(gx, gy)
   const H = INNER_H
-  // 양쪽 기둥
+  const JAMB = { top: '#f2ede3', lit: '#fdfaf3', left: '#c8bfae', right: '#e0d8c8', edge: '#b3a894' }
+
+  // 양쪽 문설주
   for (const e of [-1, 1]) {
-    const q = toScreen(gx, gy + e * 0.5)
-    drawBox(ctx, s, gx, gy + e * 0.5, 0.12, 0.12, H, {
-      top: '#f2ede3',
-      left: '#c8bfae',
-      right: '#e0d8c8',
-    })
-    px(ctx, s, q.x - 1.6, q.y - H + 1, 0.8, H - 2, '#fdfaf3')
+    const jx = dir === 'nw' ? gx : gx + e * 0.5
+    const jy = dir === 'nw' ? gy + e * 0.5 : gy
+    pxSolid(ctx, s, jx, jy, 0.1, 0.1, H, JAMB)
   }
-  // 상인방 — 유리 파티션 상단 프레임과 높이를 맞춘다
+
+  // 열린 문짝 — 한쪽 설주에 붙어 방 안쪽으로 90도 열려 있다
+  const hingeX = dir === 'nw' ? gx : gx - 0.5
+  const hingeY = dir === 'nw' ? gy - 0.5 : gy
+  const leafCx = dir === 'nw' ? hingeX + 0.28 : hingeX
+  const leafCy = dir === 'nw' ? hingeY : hingeY + 0.28
+  const leaf = pxSolid(
+    ctx,
+    s,
+    leafCx,
+    leafCy,
+    dir === 'nw' ? 0.5 : 0.08,
+    dir === 'nw' ? 0.08 : 0.5,
+    H - 2,
+    { top: '#e9dfcb', lit: '#f6efe1', left: '#b7a68c', right: '#d6c9b0', edge: '#9d9078' },
+  )
+  // 문짝 패널 홈 두 칸
+  const lx = leaf.left.x
+  const rx = leaf.right.x
+  for (const yy of [H - 8, H - 16]) {
+    px(ctx, s, lx + 2, leaf.front.y - yy, rx - lx - 4, 1, 'rgba(140,125,100,0.35)')
+  }
+  // 손잡이
+  px(ctx, s, rx - 3, leaf.front.y - H / 2, 1.6, 1.2, '#9c8a6d')
+
+  // 상인방
   px(ctx, s, p.x - 12, p.y - H - 1.4, 24, 2.8, '#e8e2d6')
   px(ctx, s, p.x - 12, p.y - H - 1.4, 24, 0.8, '#fbf7ef')
   // 문지방
   px(ctx, s, p.x - 9, p.y - 0.9, 18, 1.4, '#c9bfa9')
   px(ctx, s, p.x - 9, p.y - 0.9, 18, 0.5, '#e2d9c5')
+  // 명패
+  px(ctx, s, p.x + 7, p.y - H + 4, 5, 3, '#8fa8c4')
+  px(ctx, s, p.x + 7.6, p.y - H + 5, 3.8, 1, '#eaf2fb')
 }
 
 /** 창문 — 6칸 유리, 창틀 두께, 걷어올린 블라인드, 창턱까지 나눠 그린다. */
@@ -382,6 +426,31 @@ function drawWhiteboard(ctx, s, side, g) {
   wallQuad(ctx, s, side, g + 2.2, 0.42, low - 1.6, low - 1.2, '#7d8695')
 }
 
+/** 벽걸이 TV — 휴게실 벽에 건다(벽면에 눕혀 그린다). */
+function drawTV(ctx, s, side, g, t) {
+  const len = 2.4
+  const low = 26
+  const high = 40
+  wallQuad(ctx, s, side, g - 0.1, len + 0.2, low - 1, high + 1, '#22262e')
+  wallQuad(ctx, s, side, g - 0.1, len + 0.2, high, high + 1, '#3a404a') // 위 테두리 하이라이트
+  wallQuad(ctx, s, side, g, len, low, high, '#0f1620')
+
+  // 화면 — 색 띠가 천천히 바뀐다
+  const hue = Math.floor(t / 2500) % 3
+  const sets = [
+    ['#2b6cb0', '#4a9fd8', '#8ecae6'],
+    ['#7a4a8f', '#b06ab3', '#e0a3d5'],
+    ['#2f7a5a', '#4fae7f', '#93d8b0'],
+  ][hue]
+  sets.forEach((c, i) => {
+    wallQuad(ctx, s, side, g + 0.15 + i * 0.72, 0.62, low + 2 + i, high - 2 - i, c)
+  })
+  wallQuad(ctx, s, side, g, len, high - 1.5, high, 'rgba(255,255,255,0.16)')
+  // 받침대와 전원 LED
+  wallQuad(ctx, s, side, g + len / 2 - 0.1, 0.2, low - 2.5, low, '#2b3038')
+  wallQuad(ctx, s, side, g + len - 0.3, 0.12, low + 0.6, low + 1.2, '#7ee08a')
+}
+
 /** 벽 포스터 — 빈 벽을 채운다. */
 function drawPoster(ctx, s, side, g) {
   const len = 1.5
@@ -443,26 +512,46 @@ export const PROPS = [
   { gx: 11.5, gy: 2, draw: drawMeetingChair },
   { gx: 10.5, gy: 3, draw: drawMeetingChair },
   { gx: 10.5, gy: 1, draw: drawMeetingChair },
-  // 탕비실
-  { gx: 10, gy: 7.4, draw: drawCoffeeCorner },
-  { gx: 11.8, gy: 10.6, draw: drawTrashBins },
-  { gx: 9.3, gy: 10.8, draw: drawPlant },
-  // 휴게실
-  { gx: 2.6, gy: 13.2, draw: drawSofa },
-  { gx: 2.6, gy: 14.3, draw: drawLoungeTable },
-  { gx: 9.4, gy: 13.2, draw: drawSofa },
-  { gx: 9.4, gy: 14.3, draw: drawLoungeTable },
-  { gx: 0.4, gy: 15, draw: drawPlant },
-  { gx: 12.4, gy: 12.4, draw: drawPlant },
+  // 탕비실 — 커피머신·싱크대·냉장고·정수기·선반·분리수거
+  { gx: 9.6, gy: 6.6, draw: drawCoffeeCorner },
+  { gx: 11.6, gy: 6.6, draw: drawSink },
+  { gx: 12.2, gy: 8.6, draw: drawFridge },
+  { gx: 9.3, gy: 8.4, draw: drawWaterCooler },
+  { gx: 11.4, gy: 9.6, draw: drawTrashBins },
+  { gx: 9.4, gy: 10.6, draw: drawPlant },
+  // 휴게실 — 소파·티테이블·책장·자판기·조명·빈백
+  { gx: 3, gy: 12.6, draw: drawLoungeRug },
+  { gx: 3, gy: 12.6, draw: drawSofa },
+  { gx: 3, gy: 13.7, draw: drawLoungeTable },
+  { gx: 1, gy: 14.6, draw: drawBeanBag },
+  { gx: 4.6, gy: 14.6, draw: drawBeanBag },
+  { gx: 6.4, gy: 12.4, draw: drawBookshelf },
+  { gx: 0.4, gy: 12.6, draw: drawFloorLamp },
+  { gx: 8.6, gy: 12.4, draw: drawVending },
+  { gx: 10.6, gy: 12.6, draw: drawSofa },
+  { gx: 10.6, gy: 13.7, draw: drawLoungeTable },
+  { gx: 12.4, gy: 14.4, draw: drawPlant },
+  { gx: 7.4, gy: 15.2, draw: drawPlant },
   // 사무실
   { gx: 0.4, gy: 11, draw: drawPlant },
 ]
 
 // 앱은 room.js 하나만 import하면 되도록 가구 그리기도 여기서 내보낸다.
 export {
+  drawFridge,
+  drawWaterCooler,
+  drawSink,
+  drawMicrowave,
+  drawShelf,
+  drawBookshelf,
+  drawFloorLamp,
+  drawVending,
+  drawBeanBag,
+  drawLoungeRug,
   drawWorkstation,
   drawChair,
   drawChairBack,
+  drawChairArms,
   drawPartitions,
   drawMeetingTable,
   drawMeetingChair,
