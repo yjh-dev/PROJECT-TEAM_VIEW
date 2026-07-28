@@ -44,6 +44,21 @@ SECRETISH = re.compile(
 )
 
 
+# 위임 결과 문자열에 들어 있는 에이전트 id. 나중에 SendMessage로 그 에이전트를
+# 다시 깨울 때 `to`에 이 값이 들어오므로, 누구인지 알려면 표가 필요하다.
+AGENT_ID_RE = re.compile(r"agentId[\"'\s:]+([A-Za-z0-9_-]{6,})")
+ID_LIKE = re.compile(r"^a[0-9a-f]{8,}$")
+
+
+def agent_id_from(res):
+    try:
+        text = res if isinstance(res, str) else json.dumps(res, ensure_ascii=False)
+    except Exception:
+        return None
+    m = AGENT_ID_RE.search(text or "")
+    return m.group(1) if m else None
+
+
 def project_dir(payload):
     """이벤트를 기록할 프로젝트 뿌리.
 
@@ -338,6 +353,17 @@ def main():
             active.append({"name": agent, "at": time.time()})
             events.append({"type": "agent_start", "agent": agent})
             events.append({"type": "tool", "tool": tool, "agent": "lead"})
+        elif tool == "SendMessage":
+            # 서브에이전트를 **다시 깨우는 것**도 그 팀원이 다시 일을 시작하는 것이다.
+            # 이걸 안 잡아서, 재개된 디자이너의 Figma 작업이 전부 리드에게 붙었다.
+            # `to`는 보통 에이전트 id라 post에서 만들어 둔 표로 이름을 되찾는다.
+            to = ti.get("to") if isinstance(ti, dict) else None
+            resolved = (state.get("delegates") or {}).get(to)
+            name = resolved or (to if to and not ID_LIKE.match(str(to)) else None)
+            if name and name not in ("main", "lead"):
+                active.append({"name": name, "at": time.time()})
+                events.append({"type": "agent_start", "agent": name})
+            events.append({"type": "tool", "tool": tool, "agent": "lead"})
         else:
             events.append(
                 {
@@ -350,6 +376,14 @@ def main():
     elif kind == "post":
         # 실패를 잡는다. 성공은 이미 pre에서 기록했으므로 여기서는 **오류만** 남긴다.
         # 화면에서 문제를 바로 알아채는 것이 목적이라 실패는 놓치면 안 된다.
+        # 위임이 성공하면 **에이전트 id ↔ 팀원 이름**을 기억한다(SendMessage용).
+        if tool in DELEGATE_TOOLS:
+            who = ti.get("subagent_type") if isinstance(ti, dict) else None
+            aid = agent_id_from(payload.get("tool_response"))
+            if who and aid:
+                table = dict(state.get("delegates") or {})
+                table[aid] = who
+                state["delegates"] = dict(list(table.items())[-20:])
         res = payload.get("tool_response")
         failed = False
         msg = ""
@@ -360,15 +394,16 @@ def main():
             failed = res.lstrip().lower().startswith("error")
             msg = res
         if not failed:
-            return
-        events.append(
+            events = []  # 기록할 건 없지만 위에서 만든 표는 저장돼야 한다
+        else:
+            events.append(
             {
                 "type": "error",
                 "tool": tool,
                 "agent": active[-1]["name"] if active else "lead",
                 "detail": " ".join(msg.split())[:60] or detail_for(tool, ti),
             }
-        )
+            )
     else:
         return
 
