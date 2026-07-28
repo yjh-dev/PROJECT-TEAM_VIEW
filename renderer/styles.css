@@ -271,9 +271,46 @@ main {
 .send-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 8px;
   margin-top: 8px;
+}
+
+/* 취소는 되돌리기 어려운 쪽이라 눈에 덜 띄게, 그러나 항상 손 닿는 곳에 둔다 */
+#chat-cancel {
+  background: #3a2b30;
+  border-color: #5a3b44;
+  color: #e5a0ad;
+  margin-left: auto;
+  padding: 7px 12px;
+}
+#chat-cancel:hover:not(:disabled) {
+  background: #4a343b;
+}
+
+/* 상단 요약 — 지금 누가 뭘 하는지 */
+#now {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 46%;
+}
+#now.busy {
+  color: #9ece6a;
+}
+#now.queued {
+  color: #e0af68;
+}
+
+/* 보내기 버튼에 상대 이름이 붙으면서("프론트에게 보내기") 한 줄에 다 못 들어갔다.
+   패널이 좁으므로 체크박스는 **윗줄로 올리고** 버튼 둘만 아랫줄에 나란히 둔다. */
+.send-row button {
+  white-space: nowrap;
+  flex: 0 0 auto;
 }
 
 .send-row label {
@@ -283,6 +320,7 @@ main {
   align-items: center;
   gap: 5px;
   cursor: pointer;
+  flex: 1 0 100%;
 }
 
 #chat-hint {
@@ -374,6 +412,19 @@ main {
 .bubble.queued {
   color: #ffd79a;
   border-color: #7a6134;
+}
+
+/* 고른 팀원의 지난 활동 — 지금 일이 아니라는 걸 흐리게 표시한다 */
+.bubble.stale {
+  opacity: 0.6;
+}
+
+/* 클릭해서 고른 팀원 — 겹쳐도 이게 위로 온다 */
+.bubble.sel {
+  border-color: #8fbcf0;
+  box-shadow:
+    0 0 0 2px rgba(143, 188, 240, 0.45),
+    0 3px 10px rgba(0, 0, 0, 0.4);
 }
 
 /* 잡담 — 실제 작업이 아니라는 걸 눈에 띄게 구분한다 */

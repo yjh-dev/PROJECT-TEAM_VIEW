@@ -15,6 +15,8 @@
       <button id="pick">프로젝트 선택</button>
       <span id="project">(선택 안 됨)</span>
       <span id="status" class="warn">시작 중…</span>
+      <!-- 지금 일하는 사람을 한 줄로. 캐릭터를 일일이 쫓지 않아도 보이게. -->
+      <span id="now"></span>
     </div>
 
     <main>
@@ -45,8 +47,11 @@
           <div class="send-row">
             <label title="켜면 새 Claude Code 프로세스를 띄워 즉시 실행합니다. 끄면 지금 열려 있는 세션이 다음 턴에 받습니다.">
               <input type="checkbox" id="chat-spawn" />
-              새 세션으로 즉시 실행
+              <span>새 세션으로 즉시 실행</span>
             </label>
+            <button id="chat-cancel" type="button" title="대기 중인 지시를 버리고, 앱이 띄운 실행을 중단합니다">
+              작업 취소
+            </button>
             <button id="chat-send">보내기</button>
           </div>
           <p id="chat-hint"></p>

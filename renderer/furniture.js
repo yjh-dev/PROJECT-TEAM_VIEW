@@ -150,6 +150,21 @@ function drawPapers(ctx, s, gx, gy) {
 //   세로획: gx  0.14..0.5, gy -0.06.. 0.5   ← 오른쪽 끝(0.5)을 공유하며 앞으로 내려온다
 const BAR = { x0: -0.5, x1: 0.5, y0: -0.42, y1: -0.06 }
 const LEG = { x0: 0.14, x1: 0.5, y0: -0.06, y1: 0.5 }
+/**
+ * 자리 하나가 차지하는 바닥 넓이(격자 사각형). 경로 탐색이 이걸 보고 피해 간다.
+ * **그리는 코드 바로 옆에 둔다** — 좌표를 두 군데 적으면 반드시 어긋난다.
+ * 의자는 넣지 않는다. 앉으려면 걸어 들어가야 한다.
+ */
+export function workstationFootprint(gx, gy) {
+  return [
+    { x0: gx + BAR.x0, y0: gy + BAR.y0, x1: gx + BAR.x1, y1: gy + BAR.y1 },
+    { x0: gx + LEG.x0, y0: gy + LEG.y0, x1: gx + LEG.x1, y1: gy + LEG.y1 },
+    // 파티션 두 장 (drawPartitions의 panelAt 좌표와 같다)
+    { x0: gx - 0.54, y0: gy - 0.47, x1: gx - 0.46, y1: gy + 0.35 },
+    { x0: gx - 0.47, y0: gy - 0.54, x1: gx + 0.35, y1: gy - 0.46 },
+  ]
+}
+
 const cen = (r) => ({ gx: (r.x0 + r.x1) / 2, gy: (r.y0 + r.y1) / 2 })
 const wid = (r) => r.x1 - r.x0
 const dep = (r) => r.y1 - r.y0
@@ -200,7 +215,10 @@ export function drawWorkstation(ctx, s, gx, gy, screenOn, t, cups = 0) {
 // ── 의자 ─────────────────────────────────────────────────────────────────
 // 앉은 캐릭터와 겹치므로 **좌판까지만** 여기서 그리고, 등받이와 팔걸이는
 // 캐릭터 뒤/앞에 각각 따로 그린다.
-const SEAT_H = 5
+// 좌판 높이. 캐릭터가 20px ≈ 175cm이므로 1px ≈ 9cm — 사무용 의자 45cm는 약 5px다.
+// 쿠션 두께 1.8을 더한 **윗면**이 그 높이가 되도록 잡는다(앉는 높이는 윗면이 기준).
+const SEAT_H = 3.4
+const SEAT_TOP = SEAT_H + 1.8
 
 export function drawChair(ctx, s, gx, gy) {
   drawAO(ctx, s, gx, gy, 6, 3, 0.18)
@@ -228,7 +246,9 @@ export function drawChairBack(ctx, s, gx, gy) {
   const p = toScreen(gx - 0.16, gy - 0.16)
   const W = 9
   const H = 8
-  const bottom = p.y - SEAT_H - 1
+  // 좌판 **윗면**에서 시작해 어깨 높이까지. 전에는 좌판 아래에서 시작해
+  // 등받이가 종아리까지 내려왔고, 그래서 앉은 사람이 등받이에 걸터앉은 것처럼 보였다.
+  const bottom = p.y - SEAT_TOP + 1
   for (let i = 0; i < H; i++) {
     px(ctx, s, p.x - W / 2, bottom - H + i, W, 1, i === 0 ? '#6b7a95' : i >= H - 1 ? '#333c4d' : '#4c5870')
   }

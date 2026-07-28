@@ -5,12 +5,12 @@
   "description": "Claude Code 팀 에이전트의 실제 활동을 도트 캐릭터로 보여주는 윈도우 앱",
   "main": "main.js",
   "scripts": {
-    "dev": "node tools/check-refs.js && electron .",
-    "start": "node tools/check-refs.js && electron .",
+    "dev": "pnpm run check && electron .",
+    "start": "pnpm run check && electron .",
     "demo": "node tools/emit-demo-events.js",
-    "check": "node tools/check-refs.js",
-    "build:dir": "node tools/check-refs.js && electron-builder --dir",
-    "build:win": "node tools/check-refs.js && electron-builder --win nsis portable"
+    "check": "node tools/check-refs.js && node --no-warnings tools/check-nav.js",
+    "build:dir": "pnpm run check && electron-builder --dir",
+    "build:win": "pnpm run check && electron-builder --win nsis portable"
   },
   "devDependencies": {
     "electron": "^33.2.0",

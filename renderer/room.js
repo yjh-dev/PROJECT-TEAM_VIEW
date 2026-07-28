@@ -47,6 +47,7 @@ import {
   drawSofa,
   drawLoungeTable,
   drawPlant,
+  workstationFootprint,
 } from './furniture.js'
 
 // ── 팔레트 ────────────────────────────────────────────────────────────────
@@ -505,39 +506,54 @@ function drawClock(ctx, s, side, g, t) {
 }
 
 
+// w·d는 그 물건이 차지하는 바닥 넓이(격자 단위)다. 경로 탐색이 이걸 보고
+// 돌아간다 — 없으면 지나갈 수 있는 것(러그)이거나, 사람이 앉는 자리(의자)다.
+// 소파·빈백은 **앉는 자리**지만 몸통은 막아야 하므로 넣는다. 앉으러 갈 때는
+// 바로 앞까지 걸어간 뒤 앉는다(layout.js routeTo 참고).
 export const PROPS = [
   // 회의실
-  { gx: 10.5, gy: 2, draw: drawMeetingTable },
+  { gx: 10.5, gy: 2, draw: drawMeetingTable, w: 1.37, d: 0.9 },
   { gx: 9.5, gy: 2, draw: drawMeetingChair },
   { gx: 11.5, gy: 2, draw: drawMeetingChair },
   { gx: 10.5, gy: 3, draw: drawMeetingChair },
   { gx: 10.5, gy: 1, draw: drawMeetingChair },
   // 탕비실 — 커피머신·싱크대·냉장고·정수기·선반·분리수거
-  { gx: 9.6, gy: 6.6, draw: drawCoffeeCorner },
-  { gx: 11.6, gy: 6.6, draw: drawSink },
-  { gx: 12.2, gy: 8.6, draw: drawFridge },
-  { gx: 9.3, gy: 8.4, draw: drawWaterCooler },
-  { gx: 11.4, gy: 9.6, draw: drawTrashBins },
-  { gx: 9.4, gy: 10.6, draw: drawPlant },
+  { gx: 9.6, gy: 6.6, draw: drawCoffeeCorner, w: 1.16, d: 0.58 },
+  { gx: 11.6, gy: 6.6, draw: drawSink, w: 0.84, d: 0.47 },
+  { gx: 12.2, gy: 8.6, draw: drawFridge, w: 0.4, d: 0.38 },
+  { gx: 9.3, gy: 8.4, draw: drawWaterCooler, w: 0.24, d: 0.24 },
+  { gx: 11.4, gy: 9.6, draw: drawTrashBins, w: 0.9, d: 0.3 },
+  { gx: 9.4, gy: 10.6, draw: drawPlant, w: 0.3, d: 0.3 },
   // 휴게실 — 소파·티테이블·책장·자판기·조명·빈백
   { gx: 3, gy: 12.6, draw: drawLoungeRug },
-  { gx: 3, gy: 12.6, draw: drawSofa },
-  { gx: 3, gy: 13.7, draw: drawLoungeTable },
-  { gx: 1, gy: 14.6, draw: drawBeanBag },
-  { gx: 4.6, gy: 14.6, draw: drawBeanBag },
-  { gx: 6.4, gy: 12.4, draw: drawBookshelf },
-  { gx: 0.4, gy: 12.6, draw: drawFloorLamp },
-  { gx: 8.6, gy: 12.4, draw: drawVending },
-  { gx: 10.6, gy: 12.6, draw: drawSofa },
-  { gx: 10.6, gy: 13.7, draw: drawLoungeTable },
-  { gx: 12.4, gy: 14.4, draw: drawPlant },
-  { gx: 7.4, gy: 15.2, draw: drawPlant },
+  { gx: 3, gy: 12.6, draw: drawSofa, w: 1.36, d: 0.5 },
+  { gx: 3, gy: 13.7, draw: drawLoungeTable, w: 0.53, d: 0.37 },
+  { gx: 1, gy: 14.6, draw: drawBeanBag, w: 0.32, d: 0.3 },
+  { gx: 4.6, gy: 14.6, draw: drawBeanBag, w: 0.32, d: 0.3 },
+  { gx: 6.4, gy: 12.4, draw: drawBookshelf, w: 0.53, d: 0.22 },
+  { gx: 0.4, gy: 12.6, draw: drawFloorLamp, w: 0.15, d: 0.15 },
+  { gx: 8.6, gy: 12.4, draw: drawVending, w: 0.42, d: 0.32 },
+  { gx: 10.6, gy: 12.6, draw: drawSofa, w: 1.36, d: 0.5 },
+  { gx: 10.6, gy: 13.7, draw: drawLoungeTable, w: 0.53, d: 0.37 },
+  { gx: 12.4, gy: 14.4, draw: drawPlant, w: 0.3, d: 0.3 },
+  { gx: 7.4, gy: 15.2, draw: drawPlant, w: 0.3, d: 0.3 },
   // 사무실
-  { gx: 0.4, gy: 11, draw: drawPlant },
+  { gx: 0.4, gy: 11, draw: drawPlant, w: 0.3, d: 0.3 },
 ]
+
+/** 가구가 막는 바닥 사각형들. layout.js의 통행 격자가 이걸 받는다. */
+export function propFootprints() {
+  return PROPS.filter((p) => p.w).map((p) => ({
+    x0: p.gx - p.w / 2,
+    y0: p.gy - p.d / 2,
+    x1: p.gx + p.w / 2,
+    y1: p.gy + p.d / 2,
+  }))
+}
 
 // 앱은 room.js 하나만 import하면 되도록 가구 그리기도 여기서 내보낸다.
 export {
+  workstationFootprint,
   drawFridge,
   drawWaterCooler,
   drawSink,

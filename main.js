@@ -6,7 +6,7 @@
 // 놓치거나 중복 이벤트를 주는 일이 잦고, 우리가 읽는 건 append-only 로그라
 // 크기 비교가 훨씬 단순하고 정확하다.
 
-const { app, BrowserWindow, ipcMain, dialog } = require('electron')
+const { app, BrowserWindow, ipcMain, dialog, clipboard } = require('electron')
 const fs = require('fs')
 const path = require('path')
 
@@ -128,6 +128,27 @@ function pump(isReplay) {
   if (events.length) send('events:new', events)
 }
 
+/**
+ * 렌더러 오류를 **파일로** 남긴다.
+ *
+ * Electron은 Windows에서 GUI 서브시스템 앱이라 stdout/stderr이 콘솔에 붙지 않는다.
+ * console.error로만 찍다가 화면이 까맣게 죽었는데 로그는 텅 빈 상황을 겪었다.
+ * 경로는 창 제목줄에서 확인할 수 없으니 시작할 때 한 줄 적어 둔다.
+ */
+function rendererLogPath() {
+  return path.join(app.getPath('userData'), 'renderer.log')
+}
+
+function logRenderer(line) {
+  const stamped = `[${new Date().toISOString()}] ${line}`
+  console.error('[renderer]', line)
+  try {
+    fs.appendFileSync(rendererLogPath(), stamped + '\n', 'utf8')
+  } catch {
+    /* 로그를 못 남기는 것이 앱을 멈출 이유는 아니다 */
+  }
+}
+
 function createWindow() {
   win = new BrowserWindow({
     width: 1820,
@@ -141,8 +162,36 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      // 창이 가려지면 Chromium이 requestAnimationFrame을 멈춘다. 보통은 배터리를
+      // 아끼는 좋은 기본값이지만 **이 앱은 다른 창 뒤에서 보라고 만든 것**이다.
+      // 껐다 켜면 그동안 팀이 멈춰 있었던 것처럼 보인다. 그래서 끈다.
+      backgroundThrottling: false,
     },
   })
+  // 렌더러가 죽으면 창은 그냥 까맣게 남고 아무 단서도 없다. 세 번 당했다.
+  // 콘솔 오류와 로드 실패를 메인 stdout으로 끌어와 터미널에서 바로 보이게 한다.
+  // Electron 버전에 따라 (event, level, message, line, source)로도, event 하나로도 온다.
+  // 예전 서명만 보고 있다가 **오류를 통째로 놓쳤다** — 창은 까맣고 로그는 비어 있었다.
+  win.webContents.on('console-message', (...args) => {
+    const e = args[0]
+    const level = typeof args[1] === 'number' ? args[1] : e?.level
+    const message = typeof args[2] === 'string' ? args[2] : e?.message
+    const line = typeof args[3] === 'number' ? args[3] : e?.lineNumber
+    const source = typeof args[4] === 'string' ? args[4] : e?.sourceId
+    if (level === 2 || level === 3 || level === 'warning' || level === 'error') {
+      logRenderer(`${message}  (${source}:${line})`)
+    }
+  })
+  win.webContents.on('did-fail-load', (e, code, desc, url) => {
+    logRenderer(`로드 실패 ${code} ${desc} — ${url}`)
+  })
+  win.webContents.on('render-process-gone', (e, details) => {
+    logRenderer(`렌더러 프로세스 종료: ${details.reason}`)
+  })
+  win.webContents.on('preload-error', (e, preloadPath, err) => {
+    logRenderer(`preload 오류 ${preloadPath}: ${err.message}`)
+  })
+
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'))
 }
 
@@ -178,6 +227,74 @@ ipcMain.handle('project:pick', async () => {
 })
 
 ipcMain.handle('project:current', () => loadConfig().projectDir ?? null)
+
+// 클립보드는 **메인 프로세스**에서 쓴다. 샌드박스가 켜진 preload에서는 electron의
+// clipboard 모듈을 못 불러온다(undefined라 호출 즉시 예외가 났다).
+ipcMain.handle('clipboard:write', (_e, text) => {
+  clipboard.writeText(String(text ?? ''))
+  return true
+})
+
+// 앱이 띄운 claude 프로세스들. 취소할 때 이걸 정리한다.
+const spawned = new Set()
+
+/**
+ * 세 가지를 한꺼번에 한다.
+ *   1. 아직 안 집어간 대기열을 버린다
+ *   2. 앱이 띄운 claude 프로세스를 죽인다
+ *   3. **이미 돌고 있는 세션**을 멈추도록 취소 깃발을 세운다
+ *
+ * 3번이 핵심이다. 밖에서 남의 세션을 죽일 수는 없지만, PreToolUse 훅이 이 깃발을
+ * 보면 다음 도구 호출을 deny 한다 — 에이전트는 도구를 못 쓰고 이유를 읽고 멈춘다.
+ * 깃발에 시각을 적어 두고, 훅은 오래된 깃발을 무시한다(눌러 놓고 잊은 취소가
+ * 다음 작업을 잡아먹지 않도록).
+ */
+ipcMain.handle('command:cancel', () => {
+  const projectDir = loadConfig().projectDir
+  let queued = 0
+  let flagged = false
+  if (projectDir) {
+    const claudeDir = path.join(projectDir, '.claude')
+    const qf = path.join(claudeDir, 'team-commands.jsonl')
+    try {
+      if (fs.existsSync(qf)) {
+        queued = fs.readFileSync(qf, 'utf8').split(/\r?\n/).filter((l) => l.trim()).length
+        fs.unlinkSync(qf)
+      }
+    } catch {
+      /* 이미 없으면 그만 */
+    }
+    try {
+      fs.writeFileSync(path.join(claudeDir, 'team-cancel.flag'), String(Date.now() / 1000), 'utf8')
+      flagged = true
+    } catch {
+      /* 훅이 없는 프로젝트면 깃발도 의미가 없다 */
+    }
+  }
+  let killed = 0
+  for (const child of spawned) {
+    try {
+      process.kill(child.pid)
+      killed++
+    } catch {
+      /* 이미 끝난 프로세스 */
+    }
+    spawned.delete(child)
+  }
+  if (projectDir) {
+    try {
+      appendJsonl(eventsFileFor(projectDir), {
+        ts: Date.now() / 1000,
+        type: 'cancel',
+        agent: 'lead',
+        detail: `취소 — 대기 ${queued}건${killed ? ` · 실행 ${killed}건 중단` : ''}`,
+      })
+    } catch {
+      /* 기록 실패가 취소를 막지는 않는다 */
+    }
+  }
+  return { ok: true, queued, killed, flagged }
+})
 
 // ---------------------------------------------------------------------------
 // 개별 지시 전달
@@ -231,9 +348,17 @@ ipcMain.handle('command:send', async (_e, { agent, text, spawn: doSpawn, broadca
   // 새 Claude Code 프로세스로 즉시 실행
   // 담당이 지정돼 있으면 그 팀원에게, 아니면 **내용을 읽고 알아서** 고르게 한다.
   // 규칙(정규식)으로 나누던 것을 걷어냈다 - 문장의 뜻을 읽는 일은 모델이 낫다.
+  // 담당을 콕 집어 보내도 **그 역할에 맞는 일인지 먼저 보게 한다.** 프론트를 골라
+  // 놓고 기획안 수정을 보내면 프론트가 기획서를 고치고 있었다. 사람이 고른 담당은
+  // 지시일 뿐 판단이 아니다.
+  const HANDOFF =
+    ` 맡기기 전에 이 일이 그 팀원의 역할에 맞는지 먼저 판단해줘.` +
+    ` 맞지 않으면 억지로 시키지 말고 성격에 맞는 팀원에게 넘겨.` +
+    ` 어느 쪽이든 누구에게 맡겼는지 한 줄로 밝혀줘.`
+
   const prompt =
     agent && agent !== 'lead'
-      ? `${agent} 서브에이전트를 사용해서 다음을 처리해줘: ${body}`
+      ? `다음 지시를 ${agent} 서브에이전트에게 맡기려 해.${HANDOFF} 지시: ${body}`
       : `다음 지시를 읽고 성격에 맞는 서브에이전트에게 위임해서 처리해줘.` +
         ` 직접 처리하지 말고 Task 도구를 쓰고, 여러 파트가 걸리면 planner로 나눈 뒤 각자에게 넘겨줘.` +
         ` 지시: ${body}`
@@ -246,6 +371,8 @@ ipcMain.handle('command:send', async (_e, { agent, text, spawn: doSpawn, broadca
       stdio: 'ignore',
     })
     child.on('error', (err) => console.error('claude 실행 실패:', err.message))
+    child.on('exit', () => spawned.delete(child))
+    spawned.add(child)
     child.unref()
     return { ok: true, spawned: true }
   } catch (err) {

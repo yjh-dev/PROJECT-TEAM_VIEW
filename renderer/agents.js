@@ -56,9 +56,11 @@ const onFloor = (p) => ({
 })
 
 export function makeAgent(role, desk) {
-  // 의자 칸 = 일하는 자리(여기 앉는다). 쉴 때는 책상 옆 통로로 물러난다.
+  // 의자 칸 = 자기 자리. **기본 상태는 여기 앉아 있는 것**이다 — 일이 없다고
+  // 통로에 서 있으면 사무실이 아니라 대기실처럼 보인다. 자리를 뜨는 건
+  // 유휴 행동(커피·휴게실·잡담)이 있을 때뿐이다.
   const chair = onFloor({ gx: desk.gx, gy: desk.gy + 0.95 })
-  const rest = onFloor({ gx: desk.gx + 0.8, gy: desk.gy + 1.6 })
+  const stand = onFloor({ gx: desk.gx + 0.8, gy: desk.gy + 1.6 })
   return {
     chair,
     id: role.id,
@@ -66,13 +68,17 @@ export function makeAgent(role, desk) {
     palette: makePalette(role.hair ? role : { ...UNKNOWN }),
     desk,
     work: chair,
-    rest,
-    gx: rest.gx,
-    gy: rest.gy,
-    pose: 'idle',
+    rest: chair, // 쉴 때도 자기 의자
+    stand, // 자리에서 잠깐 일어설 때(스트레칭 등)
+    gx: chair.gx,
+    gy: chair.gy,
+    pose: 'sit',
+    seat: 'desk',
     flip: false,
     active: false,
+    working: false,
     task: null,
+    act: null, // 지금 무슨 종류의 일을 하는지(수정/읽기/실행/검색/위임)
     lastEventAt: 0,
     busyUntil: 0,
     queued: 0, // 이 팀원에게 보낸 지시 중 아직 결과가 안 온 개수

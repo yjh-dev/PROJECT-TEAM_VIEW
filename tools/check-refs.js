@@ -37,21 +37,16 @@ for (const f of files) {
 const problems = []
 
 // 0) 문법부터 본다. 참조가 아무리 맞아도 파싱이 깨지면 화면이 통째로 안 뜬다.
-//    (실제로 문자열 안의 \n이 진짜 줄바꿈으로 치환돼 앱이 안 켜진 적이 있다.)
-for (const f of [...files, '../main.js', '../preload.js']) {
-  const p = f.startsWith('..') ? path.join(DIR, f) : path.join(DIR, f)
-  let src
-  try {
-    src = fs.readFileSync(p, 'utf8')
-  } catch {
-    continue
-  }
-  try {
-    // import/export가 있어도 파싱만 하도록 모듈로 컴파일해 본다
-    new (require('vm').SourceTextModule ?? Object)(src, { identifier: p })
-  } catch (err) {
-    if (err instanceof SyntaxError) problems.push(`${path.basename(p)}: 문법 오류 — ${err.message}`)
-    // SourceTextModule이 없는 런타임이면 아래 폴백으로 검사한다
+//    (실제로 문자열 안의 \n이 진짜 줄바꿈으로 치환돼 앱이 안 켜진 적이 있다 — 두 번.)
+//
+//    메인/프리로드는 CommonJS라 `node --check`가 그대로 통한다. 전에는 여기서
+//    vm.SourceTextModule을 썼는데 그건 --experimental-vm-modules 없이는 undefined라
+//    **검사가 조용히 통과**했다. 그 사이 main.js의 문법 오류가 그대로 새어 나갔다.
+for (const f of ['main.js', 'preload.js']) {
+  const p = path.join(__dirname, '..', f)
+  const r = require('child_process').spawnSync(process.execPath, ['--check', p], { encoding: 'utf8' })
+  if (r.status !== 0) {
+    problems.push(`${f}: 문법 오류 — ${(r.stderr || '').split('\n').find((l) => /Error/.test(l)) ?? '파싱 실패'}`)
   }
 }
 

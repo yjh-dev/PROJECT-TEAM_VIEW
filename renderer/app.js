@@ -19,8 +19,10 @@ import {
   drawInnerWall,
   drawDoorway,
   PROPS,
+  propFootprints,
+  workstationFootprint,
 } from './room.js'
-import { routeTo, interiorWallSegments, DOORWAYS, SPOTS } from './layout.js'
+import { routeTo, interiorWallSegments, DOORWAYS, SPOTS, setObstacles } from './layout.js'
 
 const canvas = document.getElementById('stage')
 const ctx = canvas.getContext('2d')
@@ -34,12 +36,28 @@ const inputEl = document.getElementById('chat-input')
 const sendBtn = document.getElementById('chat-send')
 const spawnEl = document.getElementById('chat-spawn')
 const hintEl = document.getElementById('chat-hint')
+const nowEl = document.getElementById('now')
 
 const BUSY_MS = 2600
 const IDLE_LEAVE_MS = 9000
 const TALK_MS = 3200
 
 const WALL_SEGMENTS = interiorWallSegments()
+
+/**
+ * 통행 격자를 채운다. 이걸 안 하면 경로 탐색이 가구를 모르고 **뚫고 지나간다.**
+ * 자리 배치가 바뀌면(명단에 없는 팀원이 들어와 자리가 생기면) 다시 부른다.
+ */
+function refreshObstacles() {
+  const rects = propFootprints()
+  for (const a of agents.values()) rects.push(...workstationFootprint(a.desk.gx, a.desk.gy))
+  setObstacles(rects)
+  // 이미 잡아 둔 길은 옛 지도 기준이다. 다음 프레임에 다시 짜게 지운다.
+  for (const a of agents.values()) {
+    a.goal = null
+    a.path = null
+  }
+}
 
 // 카메라 — 드래그로 이동, Ctrl+휠/Ctrl+± 로 확대. fit은 창에 딱 맞는 기본 배율.
 const cam = { zoom: 1, x: 0, y: 0 }
@@ -160,6 +178,30 @@ function shortPath(p) {
   return parts.slice(-2).join('/')
 }
 
+// 지금 무슨 **종류**의 일을 하는지. 말풍선은 6초 뒤 사라지지만 이건 작업이
+// 끝날 때까지 이름표 옆에 남는다 — "누가 뭘 하는지 모르겠다"의 답이다.
+const ACTIVITY = {
+  Edit: { icon: '✎', word: '수정' },
+  Write: { icon: '✎', word: '작성' },
+  NotebookEdit: { icon: '✎', word: '수정' },
+  Read: { icon: '▤', word: '읽는 중' },
+  Grep: { icon: '⌕', word: '검색' },
+  Glob: { icon: '⌕', word: '검색' },
+  Bash: { icon: '▸', word: '실행' },
+  Task: { icon: '↗', word: '위임' },
+  WebFetch: { icon: '⇩', word: '조회' },
+  WebSearch: { icon: '⌕', word: '웹 검색' },
+  TodoWrite: { icon: '☑', word: '계획 정리' },
+}
+
+function activityOf(ev) {
+  if (ev.type === 'tool') return ACTIVITY[ev.tool] ?? { icon: '◆', word: ev.tool ?? '작업' }
+  if (ev.type === 'agent_start') return { icon: '▶', word: '시작' }
+  if (ev.type === 'error') return { icon: '❗', word: '실패' }
+  if (ev.type === 'prompt') return { icon: '☞', word: '지시 확인' }
+  return null
+}
+
 function describe(ev) {
   switch (ev.type) {
     case 'agent_start':
@@ -190,17 +232,83 @@ function describe(ev) {
   }
 }
 
+// 다시 읽는 기록 중 **지금 일어난 일로 볼 수 있는 시간**(초).
+//
+// 앱을 켜면 그동안 쌓인 로그가 통째로 흘러 들어온다. 그걸 방금 일어난 일처럼
+// 처리하면 타이머가 전부 '지금'을 기준으로 걸린다. 몇 시간 전 실패 하나 때문에
+// **앱을 켤 때마다 그 팀원이 빨갛게 켜지고** 디버거가 그리로 걸어갔다.
+// 이벤트가 제 시각(ts)을 갖고 있으니 나이를 보고 가른다.
+const LIVE_WINDOW_SEC = 60
+
+/** 이미 지나간 일인가. 지난 일은 '마지막으로 뭘 했는지'만 남기고 연출하지 않는다. */
+function isHistory(ev) {
+  if (!ev._replay) return false
+  const age = Date.now() / 1000 - Number(ev.ts ?? 0)
+  return !(age >= -5 && age < LIVE_WINDOW_SEC)
+}
+
+// ---------- 인계 ----------
+//
+// 앱에서 "프론트에게" 보낸 일이라도 리드가 읽어 보고 역할에 안 맞으면 다른 팀원에게
+// 넘긴다(그 판단은 세션 쪽에서 한다). 그러면 화면에서는 **엉뚱한 사람이 시작**하고,
+// 원래 지목된 사람 머리 위에는 "지시 1건 대기"가 영영 남았다.
+//
+// 앱이 아는 사실은 둘뿐이다: (1) 내가 누구에게 보냈다 (2) 실제로 누가 시작했다.
+// 둘이 다르면 넘어간 것이다 — 지어낸 연출이 아니라 실제로 일어난 일이다.
+
+const queuedFor = [] // 앱이 보낸 지시의 담당 id, 보낸 순서대로
+
+/**
+ * 시작한 팀원이 대기 중인 지시를 가져간다.
+ * 지목된 사람이 아니라 다른 사람이 가져갔으면 **원래 지목됐던 팀원**을 돌려준다.
+ */
+function claimQueued(agent) {
+  const mine = queuedFor.indexOf(agent.id)
+  if (mine >= 0) {
+    queuedFor.splice(mine, 1)
+    if (agent.queued > 0) agent.queued--
+    return null
+  }
+  if (!queuedFor.length) return null
+  const fromId = queuedFor.shift()
+  const from = agents.get(fromId)
+  if (!from || from === agent) return null
+  if (from.queued > 0) from.queued--
+  return from
+}
+
+/** 넘긴 사람이 맡을 사람에게 걸어가서 알린다. */
+function showHandoff(from, to, now) {
+  from.plan = {
+    kind: 'handoff',
+    dest: { gx: to.chair.gx + 0.8, gy: to.chair.gy + 0.6 },
+    until: now + 9000,
+    bubble: `이건 ${to.label} 쪽이 맞겠어요`,
+    faceId: to.id,
+  }
+  to.faceTarget = from.id
+  to.talkUntil = now + TALK_MS
+  addMsg('sys', '', `— ${from.label}에게 보냈지만 ${to.label}이(가) 맡았습니다 —`)
+}
+
 function applyEvent(ev) {
   const now = performance.now()
+  const known = agents.size
   const agent = agentOrCreate(agents, ev.agent || LEAD_ID)
+  // 명단에 없던 팀원이면 자리(책상·파티션)가 새로 생긴다 — 통행 격자를 다시 만든다
+  if (agents.size !== known) refreshObstacles()
+
+  const history = isHistory(ev)
 
   switch (ev.type) {
     case 'agent_start': {
+      agent.toolCount = 0
+      const handed = claimQueued(agent)
+      if (history) break // 지난 호출로 지금 일하는 것처럼 보이게 하지 않는다
+      if (handed) showHandoff(handed, agent, now)
       agent.active = true
       agent.busyUntil = now + BUSY_MS
       agent.startedAt = now
-      agent.toolCount = 0
-      if (agent.queued > 0) agent.queued--
       // 리드가 팀원을 부르는 연출: 서로 마주본다
       const lead = agents.get(LEAD_ID)
       if (lead && agent.id !== LEAD_ID) {
@@ -216,14 +324,30 @@ function applyEvent(ev) {
     case 'agent_stop':
       agent.active = false
       agent.busyUntil = 0
+      agent.act = null
       break
+    case 'cancel':
+      // 취소는 팀 전체에 걸린다. 하던 표시를 걷고 대기열 배지도 지운다.
+      queuedFor.length = 0
+      for (const a of agents.values()) {
+        a.active = false
+        a.busyUntil = 0
+        a.queued = 0
+        a.act = null
+        a.task = null
+      }
+      // 지난 기록을 다시 읽는 중이면 채팅에 또 쓰지 않는다(켤 때마다 쌓인다)
+      if (!ev._replay) addMsg('sys', '', `— ${ev.detail ?? '취소했습니다'} —`)
+      return
     case 'error': {
+      // 지난 실패는 **켜지 않는다.** 로그에 남은 옛 실패 하나 때문에 앱을 켤 때마다
+      // 그 팀원이 빨갛게 살아났다(느낌표 12초 + 디버거 출동). 이미 끝난 일이다.
+      if (history) break
       // 화면만 봐도 문제를 알아채는 것이 목적이다. 당사자에게 느낌표를 띄우고
       // 디버거를 그 자리로 보낸다(실제로 디버거가 호출되지 않아도 '봐야 할 곳'을 가리킨다).
       agent.active = true
       agent.busyUntil = now + BUSY_MS
       agent.errorUntil = now + 12000
-      agent.errorCount = (agent.errorCount ?? 0) + 1
       const dbg = agents.get('debugger')
       if (dbg && dbg.id !== agent.id && !dbg.active) {
         dbg.plan = {
@@ -237,12 +361,13 @@ function applyEvent(ev) {
       break
     }
     case 'session':
+      // '쉬는 중'은 지난 기록이어도 그대로 반영한다 — 끄는 쪽은 틀릴 일이 없다.
       if (ev.state === 'idle') {
         for (const a of agents.values()) {
           a.active = false
           a.busyUntil = 0
         }
-      } else {
+      } else if (!history) {
         agent.active = true
         agent.busyUntil = now + BUSY_MS
       }
@@ -250,17 +375,21 @@ function applyEvent(ev) {
     case 'reply':
       // 답변은 '일하는 상태'가 아니다. 말풍선만 띄우고 상태는 건드리지 않는다.
       agent.task = String(ev.detail ?? '').slice(0, 60)
-      agent.lastEventAt = now
+      agent.lastEventAt = history ? now - IDLE_LEAVE_MS - 1000 : now
       if (!ev._replay) addMsg('agent', `${agent.label} · 답변`, String(ev.detail ?? ''))
       return
     default:
+      if (ev.type === 'tool') agent.toolCount = (agent.toolCount ?? 0) + 1
+      if (history) break
       agent.active = true
       agent.busyUntil = now + BUSY_MS
-      if (ev.type === 'tool') agent.toolCount = (agent.toolCount ?? 0) + 1
   }
 
   agent.task = describe(ev)
-  agent.lastEventAt = now
+  agent.act = activityOf(ev) ?? agent.act
+  // 지난 일은 말풍선을 띄우지 않는다. 마지막으로 뭘 했는지는 남겨 두어
+  // 그 팀원을 클릭하면 볼 수 있다(흐린 말풍선).
+  agent.lastEventAt = history ? now - IDLE_LEAVE_MS - 1000 : now
   if (!ev._replay) chatFromEvent(ev, agent)
 }
 
@@ -349,7 +478,9 @@ function renderTargets() {
     }
     b.append(document.createTextNode(label))
     b.addEventListener('click', () => {
-      target = id
+      // 고른 사람을 다시 누르면 전체로 돌아간다. 한 번 고르면 풀 방법이 없어서
+      // **그 뒤 지시가 전부 그 사람에게 갔다** — 프론트가 기획안을 고치던 원인이다.
+      target = target === id ? 'all' : id
       renderTargets()
       inputEl.focus()
     })
@@ -357,6 +488,21 @@ function renderTargets() {
   }
   mk('all', '전체', null)
   for (const r of ROSTER) mk(r.id, r.label, r.shirt)
+  updateComposer()
+}
+
+/**
+ * 지금 **누구에게** 보내는지 입력창과 버튼에 그대로 적는다.
+ * 캐릭터를 클릭하면 대화 상대가 바뀌는데, 그걸 위쪽 칩 색으로만 알렸더니
+ * 보는 사람은 모른 채 계속 그 팀원에게 보내고 있었다.
+ */
+function updateComposer() {
+  const label = target === 'all' ? '전체' : (agents.get(target)?.label ?? target)
+  sendBtn.textContent = `${label}에게 보내기`
+  inputEl.placeholder =
+    target === 'all'
+      ? '전체에게 지시 — 담당은 리드가 정합니다. Enter 전송 · Shift+Enter 줄바꿈'
+      : `${label}에게 지시 — 역할에 안 맞으면 다른 팀원에게 넘어갑니다. 칩을 다시 눌러 전체로`
 }
 
 async function send() {
@@ -381,6 +527,7 @@ async function send() {
     return
   }
   addMsg('me', `나 → ${label}`, text)
+  queuedFor.push(to)
   const a = agents.get(to)
   if (a) a.queued++
   hintEl.textContent = res.spawned
@@ -404,10 +551,6 @@ inputEl.addEventListener('keydown', (e) => {
 // 회색 작은 스타일(.small)로 구분한다. 진짜 활동은 이벤트에서만 나온다.
 
 // 목적지는 layout.js가 방과 함께 정의한다.
-const COFFEE = SPOTS.coffee
-const TRASH = SPOTS.trash
-const MEETING = SPOTS.meeting
-const LOUNGE = SPOTS.lounge
 const MAX_CUPS = 6
 const SMALL_TALK = [
   '커피 한 잔 하고 올게요',
@@ -423,71 +566,93 @@ const SMALL_TALK = [
 ]
 
 const pick = (arr) => arr[Math.floor(Math.random() * arr.length)]
+const shuffled = (arr) => arr.slice().sort(() => Math.random() - 0.5)
+
+/** 이미 누가 쓰고 있는 자리는 빼고 고른다(한 소파에 둘이 겹쳐 앉지 않도록). */
+function freeSpots(list, now) {
+  const taken = new Set()
+  for (const a of agents.values()) {
+    if (a.plan && now < a.plan.until) taken.add(`${a.plan.dest.gx},${a.plan.dest.gy}`)
+  }
+  return list.filter((p) => !taken.has(`${p.gx},${p.gy}`))
+}
+
+// 혼자 하는 행동들. 자리를 뜨는 이유가 커피 하나뿐이면 사무실이 심심하다.
+const SOLO = [
+  { kind: 'coffee', spot: () => SPOTS.coffee, ms: 9000, say: ['커피 한 잔 하고 올게요', '카페인 충전…'] },
+  { kind: 'water', spot: () => SPOTS.water, ms: 7000, say: ['물 좀 뜨고 올게요'] },
+  { kind: 'vending', spot: () => SPOTS.vending, ms: 8000, say: ['간식 좀 사올게요', '당 떨어졌어요'] },
+  { kind: 'book', spot: () => SPOTS.bookshelf, ms: 9000, say: ['자료 좀 찾아볼게요', '이 책 어디 있더라'] },
+  { kind: 'window', spot: (n) => pick(freeSpots(SPOTS.window, n)), ms: 8000, say: ['잠깐 바람 좀…', '창밖 날씨 좋네요'] },
+  { kind: 'sofa', spot: (n) => pick(freeSpots(SPOTS.sofa, n)), ms: 14000, say: ['잠깐 쉬었다 올게요'] },
+  { kind: 'beanbag', spot: (n) => pick(freeSpots(SPOTS.beanbag, n)), ms: 15000, say: ['5분만 늘어져 있을게요'] },
+  { kind: 'wander', spot: (n) => pick(freeSpots(SPOTS.wander, n)), ms: 7000, say: [null, null, '잠깐 스트레칭…'] },
+  { kind: 'stretch', spot: (n, a) => a.stand, ms: 5000, say: ['으-. 어깨가…', '잠깐 일어날게요'] },
+]
 
 let nextIdleAt = 0
 
 function scheduleIdle(now) {
   if (now < nextIdleAt) return
-  nextIdleAt = now + 3500 + Math.random() * 4000
+  nextIdleAt = now + 2200 + Math.random() * 2800
 
   const free = [...agents.values()].filter(
     (a) => !a.active && !(a.plan && now < a.plan.until) && a.queued === 0,
   )
-  if (free.length < 2) return
-  // 절반쯤은 아무 일도 일어나지 않는다. 계속 북적이면 오히려 가짜처럼 보인다.
-  if (Math.random() < 0.45) return
+  if (!free.length) return
+  // 한 번씩은 아무 일도 일어나지 않는다. 쉼 없이 북적이면 오히려 가짜처럼 보인다.
+  if (Math.random() < 0.25) return
 
   // 컵이 쌓였으면 먼저 치우러 간다(쌓인 채로 계속 커피를 뽑지 않도록)
   const messy = free.filter((a) => a.cups >= 3)
-  if (messy.length && Math.random() < 0.55) {
+  if (messy.length && Math.random() < 0.5) {
     const a = pick(messy)
-    a.plan = { kind: 'trash', dest: TRASH, until: now + 9000, bubble: '컵 좀 버리고 올게요' }
+    a.plan = { kind: 'trash', dest: SPOTS.trash, until: now + 9000, bubble: '컵 좀 버리고 올게요' }
     return
   }
 
   const roll = Math.random()
-  if (roll < 0.26) {
-    // 커피 — 탕비실까지 걸어가서 한 잔 받아 온다
-    const a = pick(free)
-    a.plan = { kind: 'coffee', dest: COFFEE, until: now + 9000, bubble: '커피 한 잔 하고 올게요' }
-  } else if (roll < 0.42) {
-    // 휴게실에서 잠깐 쉰다
-    const n = 1 + (Math.random() < 0.5 ? 1 : 0)
-    const chosen = free.slice().sort(() => Math.random() - 0.5).slice(0, n)
-    chosen.forEach((a, i) => {
-      a.plan = {
-        kind: 'lounge',
-        dest: LOUNGE[(i + Math.floor(Math.random() * LOUNGE.length)) % LOUNGE.length],
-        until: now + 13000,
-        bubble: i === 0 ? '잠깐 쉬었다 올게요' : null,
-        faceId: chosen[(i + 1) % chosen.length]?.id,
-      }
-    })
-  } else if (roll < 0.75) {
-    // 둘이 마주보고 잡담
-    const a = pick(free)
-    const b = pick(free.filter((x) => x !== a))
-    if (!b) return
-    const mid = { gx: (a.rest.gx + b.rest.gx) / 2, gy: (a.rest.gy + b.rest.gy) / 2 }
+
+  // 둘 이상이 놀고 있을 때만 되는 것들(잡담·회의)을 먼저 굴린다
+  if (free.length >= 2 && roll < 0.24) {
+    const [a, b] = shuffled(free)
+    const mid = { gx: (a.chair.gx + b.chair.gx) / 2, gy: (a.chair.gy + b.chair.gy) / 2 }
     const talk = pick(SMALL_TALK)
-    a.plan = { dest: { gx: mid.gx - 0.35, gy: mid.gy }, until: now + 8000, bubble: talk, faceId: b.id }
-    b.plan = { dest: { gx: mid.gx + 0.35, gy: mid.gy }, until: now + 8000, bubble: null, faceId: a.id }
-    // 상대는 잠시 뒤에 대답한다
+    a.plan = { kind: 'chat', dest: { gx: mid.gx - 0.35, gy: mid.gy }, until: now + 8000, bubble: talk, faceId: b.id }
+    b.plan = { kind: 'chat', dest: { gx: mid.gx + 0.35, gy: mid.gy }, until: now + 8000, bubble: null, faceId: a.id }
     setTimeout(() => {
       if (b.plan && performance.now() < b.plan.until) b.plan.bubble = pick(SMALL_TALK)
     }, 2600)
-  } else {
-    // 회의 테이블에 두세 명이 모인다
-    const n = 2 + (Math.random() < 0.4 ? 1 : 0)
-    const chosen = free.slice().sort(() => Math.random() - 0.5).slice(0, n)
-    chosen.forEach((a, i) => {
-      a.plan = {
-        dest: MEETING[i % MEETING.length],
-        until: now + 11000,
-        bubble: i === 0 ? '잠깐 모여서 정리할까요?' : null,
-        faceId: chosen[(i + 1) % chosen.length]?.id,
-      }
-    })
+    return
+  }
+
+  if (free.length >= 2 && roll < 0.38) {
+    // 회의실 또는 휴게실 소파에 둘러앉는다
+    const toSofa = Math.random() < 0.45
+    const seats = freeSpots(toSofa ? SPOTS.sofa : SPOTS.meeting, now)
+    if (seats.length >= 2) {
+      const n = Math.min(seats.length, 2 + (Math.random() < 0.4 ? 1 : 0))
+      const chosen = shuffled(free).slice(0, n)
+      chosen.forEach((a, i) => {
+        a.plan = {
+          kind: toSofa ? 'sofa' : 'meeting',
+          dest: seats[i],
+          until: now + (toSofa ? 14000 : 11000),
+          bubble: i === 0 ? (toSofa ? '커피 마시면서 얘기해요' : '잠깐 모여서 정리할까요?') : null,
+          faceId: chosen[(i + 1) % chosen.length]?.id,
+        }
+      })
+      return
+    }
+  }
+
+  // 나머지는 혼자 하는 행동. 한 번에 한두 명씩 움직인다.
+  const movers = shuffled(free).slice(0, 1 + (free.length > 3 && Math.random() < 0.4 ? 1 : 0))
+  for (const a of movers) {
+    const b = pick(SOLO)
+    const dest = b.spot(now, a)
+    if (!dest) continue // 그 자리는 이미 누가 쓰는 중
+    a.plan = { kind: b.kind, dest, until: now + b.ms, bubble: pick(b.say) }
   }
 }
 
@@ -504,9 +669,11 @@ function update(dt, now) {
 
   for (const a of agents.values()) {
     const working = a.active && now < a.busyUntil
+    a.working = working
     const quiet = now - a.lastEventAt > IDLE_LEAVE_MS
     if (a.plan && (now >= a.plan.until || working)) a.plan = null
 
+    // 일이 없으면 rest(=자기 의자)로 돌아간다. 유휴 행동이 있을 때만 자리를 뜬다.
     const goal = working || (a.active && !quiet) ? a.work : a.plan ? a.plan.dest : a.rest
 
     // 목적지가 바뀌면 경로를 다시 짠다. 방이 나뉘어 있으므로 문을 거쳐야 한다 —
@@ -546,12 +713,16 @@ function update(dt, now) {
       a.gx += (dx / dist) * step
       a.gy += (dy / dist) * step
       a.pose = 'walk'
+      a.seat = null
       const screenDir = dx - dy
       if (Math.abs(screenDir) > 0.01) a.flip = screenDir < 0
     } else {
       a.gx = dest.gx
       a.gy = dest.gy
-      a.pose = working ? 'sit' : 'idle'
+      // 어디에 도착했느냐가 자세를 정한다. 유휴 목적지에 sit이 붙어 있으면
+      // 소파·빈백·회의 의자에 앉고, 아무 계획이 없으면 자기 의자에 앉아 있다.
+      a.seat = a.plan ? (a.plan.dest.sit ?? null) : 'desk'
+      a.pose = a.seat ? 'sit' : 'idle'
       // 대화 중이면 상대를 바라본다 (리드의 호출 연출 또는 유휴 잡담)
       const faceId = (now < (a.talkUntil ?? 0) && a.faceTarget) || a.plan?.faceId
       if (faceId) {
@@ -561,6 +732,16 @@ function update(dt, now) {
     }
   }
 }
+
+// 앉는 물건별 높이 보정(픽셀).
+//
+// 앉은 스프라이트는 **허벅지 밑면이 아래에서 5px** 위치에 있다. 그러니
+//   lift = 4 − (좌판 윗면 높이)
+// 로 두면 엉덩이가 정확히 좌판에 닿고 발은 바닥 근처에 온다.
+// 예전 값(-6.5)은 몸 전체를 좌판보다 6.5px 위로 띄워서, 등받이에 걸터앉은 것처럼 보였다.
+//   의자 좌판 윗면 5.2 (furniture.js SEAT_H 3.4 + 쿠션 1.8)
+//   소파 5.4 (좌석 4 + 쿠션 1.4) · 빈백은 푹 꺼지므로 조금 더 내린다
+const SEAT_LIFT = { desk: -1.2, meeting: -1.2, sofa: -1.4, beanbag: -1 }
 
 function frameIndex(pose, t) {
   const speed = pose === 'walk' ? 150 : pose === 'sit' ? 150 : 700
@@ -584,25 +765,51 @@ function nodesFor(a) {
   return n
 }
 
+/** 상단 요약 — 지금 일하는 사람과 하는 일. 캐릭터를 쫓지 않아도 보이게. */
+function renderNow(now) {
+  const busy = [...agents.values()].filter((a) => a.active)
+  if (!busy.length) {
+    const waiting = [...agents.values()].reduce((n, a) => n + a.queued, 0)
+    nowEl.textContent = waiting ? `지시 ${waiting}건 대기 중` : '조용합니다 — 진행 중인 작업 없음'
+    nowEl.className = waiting ? 'queued' : ''
+    return
+  }
+  nowEl.className = 'busy'
+  nowEl.textContent =
+    '작업 중 · ' +
+    busy
+      .sort((p, q) => (p.startedAt ?? 0) - (q.startedAt ?? 0))
+      .map((a) => {
+        const sec = a.startedAt ? Math.floor((now - a.startedAt) / 1000) : 0
+        return `${a.label}(${a.act ? a.act.word + ' ' : ''}${sec}s)`
+      })
+      .join(' · ')
+}
+
 function syncOverlay(now) {
+  renderNow(now)
+
+  // 1단계 — 내용과 기준 위치를 채운다. 위치 보정은 크기를 잰 뒤에 한다.
+  const items = []
   for (const a of agents.values()) {
     const { tag, bubble } = nodesFor(a)
     const { x, y } = toScreen(a.gx, a.gy)
 
-    // 이름표는 **머리 위**에. 앉으면 머리가 내려가므로 그만큼 함께 내린다.
-    const headY = y - (a.pose === 'sit' ? 19 : 21)
-    tag.style.left = `${x * scale + cam.x}px`
-    tag.style.top = `${headY * scale + cam.y}px`
+    // 이름표는 **머리 위**에. 스프라이트 맨 윗줄이 머리 꼭대기이므로
+    // 서 있으면 y-20, 앉으면 그 자리에서 lift만큼 내려간 곳이 머리 꼭대기다.
+    const headY = a.seat ? y + (SEAT_LIFT[a.seat] ?? 0) - 20 : y - 21
     tag.classList.toggle('on', a.active)
     tag.classList.toggle('sel', target === a.id)
     const erroring = now < (a.errorUntil ?? 0)
     tag.classList.toggle('err', erroring)
-    // 이름 + 진행 정보(경과 초·도구 호출 수). 일하는 중일 때만 붙인다.
+    // 이름 + **지금 뭘 하는지**. 말풍선은 곧 사라지지만 이 배지는 작업이 끝날
+    // 때까지 남는다. 경과 초·도구 호출 수도 같이 붙여 진행 중임을 보여 준다.
     tag.querySelector('.nm').textContent = (erroring ? '❗ ' : '') + a.label
     const meta = tag.querySelector('.meta')
-    if (a.active && a.startedAt) {
-      const sec = Math.floor((now - a.startedAt) / 1000)
-      meta.textContent = ` ${sec}s · ${a.toolCount ?? 0}`
+    if (a.active) {
+      const sec = a.startedAt ? Math.floor((now - a.startedAt) / 1000) : 0
+      const act = a.act ? `${a.act.icon} ${a.act.word} · ` : ''
+      meta.textContent = ` ${act}${sec}s · 🛠 ${a.toolCount ?? 0}`
     } else {
       meta.textContent = ''
     }
@@ -612,22 +819,91 @@ function syncOverlay(now) {
     if (a.queued > 0) {
       text = `지시 ${a.queued}건 대기`
       kind = 'queued'
-    } else if (a.task && (now - a.lastEventAt < 6000 || now < (a.talkUntil ?? 0))) {
+    } else if (a.task && (a.active || now - a.lastEventAt < 6000 || now < (a.talkUntil ?? 0))) {
+      // 일하는 동안에는 말풍선을 **끄지 않는다**. 6초 뒤 사라지게 두었더니
+      // 오래 걸리는 작업에서 "누가 뭘 하는지 모르겠다"는 상태가 됐다.
       text = a.task
     } else if (a.plan?.bubble && now < a.plan.until) {
       text = a.plan.bubble
       kind = 'small' // 잡담: 실제 작업이 아니라는 걸 눈에 띄게 구분한다
+    } else if (target === a.id && a.task) {
+      // 클릭해서 고른 팀원은 **마지막으로 한 일**을 계속 보여 준다. 지어낸 게
+      // 아니라 실제 마지막 이벤트라, 흐린 스타일로 지난 일임을 표시한다.
+      text = a.task
+      kind = 'stale'
     }
     if (text) {
       bubble.hidden = false
-      bubble.textContent = text
-      bubble.className = `bubble${kind ? ' ' + kind : ''}`
-      bubble.style.left = `${x * scale + cam.x}px`
-      bubble.style.top = `${(headY - 9) * scale + cam.y}px`
+      if (bubble.textContent !== text) bubble.textContent = text
+      bubble.className = `bubble${kind ? ' ' + kind : ''}${target === a.id ? ' sel' : ''}`
     } else {
       bubble.hidden = true
     }
+    items.push({ a, tag, bubble, x: x * scale + cam.x, anchor: headY * scale + cam.y })
   }
+
+  layoutOverlay(items)
+}
+
+// ---------- 말풍선 겹침 정리 ----------
+//
+// 자리가 붙어 있으면 이름표와 말풍선이 서로를 덮어 아무것도 못 읽는다.
+// 화면 **앞쪽(아래)** 사람부터 자리를 잡고, 뒤에 오는 사람이 겹치면 위로 밀어 올린다.
+// 선택한 팀원은 맨 먼저 자리를 잡고 z-index를 최대로 줘서 무조건 위로 올린다.
+
+const GAP = 3
+
+function layoutOverlay(items) {
+  // 2단계 — 크기를 **한 번에** 읽는다. 읽기와 쓰기를 번갈아 하면 요소마다
+  // 레이아웃이 다시 계산돼 프레임이 느려진다.
+  for (const it of items) {
+    it.tw = it.tag.offsetWidth
+    it.th = it.tag.offsetHeight
+    it.bw = it.bubble.hidden ? 0 : it.bubble.offsetWidth
+    it.bh = it.bubble.hidden ? 0 : it.bubble.offsetHeight
+    it.w = Math.max(it.tw, it.bw)
+    it.h = it.th + (it.bh ? it.bh + GAP : 0)
+  }
+
+  // 3단계 — 자리 잡는 순서. 선택 > 작업 중 > 화면 아래쪽(앞)
+  const order = items.slice().sort((p, q) => {
+    const sp = target === p.a.id ? 1 : 0
+    const sq = target === q.a.id ? 1 : 0
+    if (sp !== sq) return sq - sp
+    if (p.a.active !== q.a.active) return p.a.active ? -1 : 1
+    return q.anchor - p.anchor
+  })
+
+  const placed = []
+  order.forEach((it, i) => {
+    // 화면 밖으로 밀려나지 않게 가로 위치를 먼저 가둔다(전에는 왼쪽 벽에서 잘렸다)
+    const half = it.w / 2
+    const x = Math.min(canvas.width - half - 4, Math.max(half + 4, it.x))
+    let bottom = it.anchor
+
+    // 이미 놓인 것과 겹치면 그 위로 올린다
+    for (let guard = 0; guard < 24; guard++) {
+      const hit = placed.find(
+        (p) =>
+          x - half < p.right && x + half > p.left && bottom - it.h < p.bottom && bottom > p.bottom - p.h,
+      )
+      if (!hit) break
+      bottom = hit.bottom - hit.h - GAP
+    }
+    // 위쪽으로도 넘치지 않게
+    bottom = Math.max(it.h + 4, bottom)
+
+    placed.push({ left: x - half, right: x + half, bottom, h: it.h })
+
+    it.tag.style.left = `${x}px`
+    it.tag.style.top = `${bottom}px`
+    it.tag.style.zIndex = String(target === it.a.id ? 9999 : 100 + (order.length - i))
+    if (!it.bubble.hidden) {
+      it.bubble.style.left = `${x}px`
+      it.bubble.style.top = `${bottom - it.th - GAP}px`
+      it.bubble.style.zIndex = it.tag.style.zIndex
+    }
+  })
 }
 
 // ---------- 그리기 ----------
@@ -678,7 +954,9 @@ function draw(t) {
       continue
     }
     if (it.kind === 'desk') {
-      drawWorkstation(ctx, scale, a.desk.gx, a.desk.gy, a.pose === 'sit', t, a.cups)
+      // 모니터는 **일할 때만** 켜진다. 이제 기본이 앉아 있는 상태라 자세로는
+      // 일하는지 알 수 없다 — 켜진 화면이 그 구분을 대신한다.
+      drawWorkstation(ctx, scale, a.desk.gx, a.desk.gy, a.working, t, a.cups)
       continue
     }
     if (it.kind === 'chair') {
@@ -688,7 +966,9 @@ function draw(t) {
       continue
     }
     if (it.kind === 'arms') {
-      if (a.pose === 'sit') drawChairArms(ctx, scale, a.chair.gx, a.chair.gy)
+      // 팔걸이는 **자기 책상 의자에 앉아 있을 때만**. 소파에 가 있는데 빈 의자에
+      // 팔걸이를 얹으면 아무도 없는 자리에 팔이 떠 있다.
+      if (a.seat === 'desk') drawChairArms(ctx, scale, a.chair.gx, a.chair.gy)
       continue
     }
 
@@ -696,8 +976,8 @@ function draw(t) {
     if (!sitting) drawShadow(ctx, scale, a.gx, a.gy)
     const { x, y } = toScreen(a.gx, a.gy)
     const frames = POSES[a.pose] ?? POSES.idle
-    // 앉으면 좌판 높이만큼 올라앉는다
-    drawSprite(ctx, frames[frameIndex(a.pose, t)], a.palette, x, y, scale, a.flip, sitting ? -6.5 : 0)
+    // 앉는 높이는 앉는 물건마다 다르다. 빈백은 거의 바닥이다.
+    drawSprite(ctx, frames[frameIndex(a.pose, t)], a.palette, x, y, scale, a.flip, SEAT_LIFT[a.seat] ?? 0)
 
     if (target === a.id) {
       ctx.strokeStyle = '#4a90d9'
@@ -758,7 +1038,9 @@ canvas.addEventListener('click', (e) => {
 
 window.teamView.onEvents((events) => events.forEach(applyEvent))
 window.teamView.onReset(() => {
+  queuedFor.length = 0
   agents = buildAgents()
+  refreshObstacles()
   nodes.clear()
   overlay.replaceChildren()
   messagesEl.replaceChildren()
@@ -775,6 +1057,29 @@ window.teamView.onStatus(({ projectDir, exists }) => {
 
 pickBtn.addEventListener('click', () => window.teamView.pickProject())
 
+// ---------- 작업 취소 ----------
+//
+// 취소할 수 있는 건 **앱이 만든 것**뿐이다: 아직 안 집어간 대기열과, 앱이 띄운
+// claude 프로세스. 이미 세션 안에서 돌고 있는 작업은 앱이 손댈 수 없다 —
+// 그건 그 터미널에서 Esc로 멈춰야 한다. 그래서 결과를 사실대로 적어 준다.
+document.getElementById('chat-cancel').addEventListener('click', async (e) => {
+  const btn = e.currentTarget
+  btn.disabled = true
+  const res = await window.teamView.cancelAll()
+  btn.disabled = false
+  if (!res?.ok) {
+    hintEl.textContent = `취소 실패: ${res?.error ?? '알 수 없는 오류'}`
+    return
+  }
+  queuedFor.length = 0
+  for (const a of agents.values()) a.queued = 0
+  hintEl.textContent =
+    res.queued || res.killed
+      ? `취소됨 — 대기 ${res.queued}건${res.killed ? ` · 실행 ${res.killed}건 중단` : ''}`
+      : '취소할 대기·실행이 없습니다 (이미 도는 세션은 그 터미널에서 Esc)'
+  addMsg('sys', '', `— ${hintEl.textContent} —`)
+})
+
 // 대화 전체 복사 — 화면에 보이는 순서 그대로 텍스트로 뽑는다
 document.getElementById('copy-all').addEventListener('click', (e) => {
   const lines = [...messagesEl.children].map((el) => el.dataset.plain ?? el.textContent)
@@ -789,5 +1094,6 @@ document.getElementById('copy-all').addEventListener('click', (e) => {
 
 renderTargets()
 addMsg('sys', '', '캐릭터를 클릭하거나 위 칩으로 대상을 고르고 지시를 보내세요.')
+refreshObstacles()
 resize()
 requestAnimationFrame(loop)

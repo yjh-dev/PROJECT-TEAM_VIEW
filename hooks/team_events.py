@@ -35,6 +35,7 @@ for _stream in (sys.stdout, sys.stderr):
 STATE_NAME = "team-events.state.json"
 LOG_NAME = "team-events.jsonl"
 COMMANDS_NAME = "team-commands.jsonl"
+CANCEL_NAME = "team-cancel.flag"
 MAX_LOG_BYTES = 512 * 1024  # 넘으면 새로 시작한다(앱이 잘림을 감지해 리셋한다)
 
 # 명령 문자열에 이런 게 보이면 아예 기록하지 않는다(로그가 시크릿 유출 경로가 되지 않게).
@@ -76,6 +77,22 @@ def load_state(path):
             out.append({"name": item, "at": now})  # 예전 형식 호환
     st["active"] = out
     return st
+
+
+CANCEL_TTL = 300  # 초. 이보다 오래된 취소 깃발은 무시하고 지운다.
+
+
+def flag_age(path):
+    """깃발이 세워진 지 몇 초 지났는지. 파일 안의 시각을 먼저 믿고, 없으면 mtime."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return time.time() - float(f.read().strip())
+    except (OSError, ValueError):
+        pass
+    try:
+        return time.time() - os.path.getmtime(path)
+    except OSError:
+        return 0.0
 
 
 def save_state(path, state):
@@ -197,6 +214,52 @@ def main():
     ti = payload.get("tool_input") or {}
     events = []
 
+    # ── 앱에서 누른 "작업 취소" ────────────────────────────────────────────
+    # 이미 돌고 있는 세션은 밖에서 죽일 수 없다. 대신 **다음 도구 호출을 막는다** —
+    # PreToolUse가 deny를 돌려주면 에이전트는 그 도구를 못 쓰고, 이유를 읽고 멈춘다.
+    # 깃발은 세션이 한 턴을 마칠 때(Stop) 지운다. 안 지우면 다음 지시까지 막힌다.
+    cancel_flag = os.path.join(claude_dir, CANCEL_NAME)
+    if os.path.exists(cancel_flag) and flag_age(cancel_flag) > CANCEL_TTL:
+        # 눌러 놓고 잊은 취소가 몇 시간 뒤 작업을 막으면 안 된다.
+        try:
+            os.remove(cancel_flag)
+        except OSError:
+            pass
+    if kind == "pre" and os.path.exists(cancel_flag):
+        write_events(log_path, [{"type": "cancel", "agent": "lead", "detail": "사용자가 작업을 취소했습니다"}])
+        why = (
+            "사용자가 Team View 앱에서 작업 취소를 눌렀습니다. "
+            "지금 하던 일을 중단하고, 어디까지 했는지만 짧게 보고한 뒤 멈추세요. "
+            "다른 도구를 쓰거나 작업을 이어가지 마세요."
+        )
+        # 새 형식(hookSpecificOutput)과 예전 형식(decision/reason)을 함께 낸다.
+        # 취소가 조용히 무시되는 것이 최악이라 양쪽 다 채워 둔다.
+        print(
+            json.dumps(
+                {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": why,
+                    },
+                    "decision": "block",
+                    "reason": why,
+                },
+                ensure_ascii=False,
+            )
+        )
+        sys.exit(0)
+    if kind == "stop" and os.path.exists(cancel_flag):
+        # 턴이 끝났으니 깃발을 내린다. 대기열 처리보다 **먼저** 해야 취소가
+        # 다음 지시까지 잡아먹지 않는다.
+        try:
+            os.remove(cancel_flag)
+        except OSError:
+            pass
+        save_state(state_path, {"active": []})
+        write_events(log_path, [{"type": "session", "state": "idle", "agent": "lead"}])
+        sys.exit(0)
+
     if kind == "session":
         active = []
         events.append({"type": "session", "state": "start", "agent": "lead"})
@@ -211,17 +274,27 @@ def main():
             # 자리로 걸어가 타이핑했다. 큐에 담긴 이름은 '희망'이지 '사실'이 아니다.
             # 실제 시작은 리드가 Task로 그 팀원을 부를 때 PreToolUse가 기록한다.
             lines = []
+            named = False
             for c in pending:
                 who = c.get("agent") or "lead"
                 body = c.get("text", "")
                 if who and who != "lead":
-                    lines.append(f"- `{who}` 서브에이전트로: {body}")
+                    lines.append(f"- `{who}`에게 맡길 일: {body}")
+                    named = True
                 else:
                     lines.append(f"- {body}")
             reason = (
                 "Team View 앱에서 전달된 지시가 있습니다. 아래를 처리하세요.\n"
                 + "\n".join(lines)
             )
+            if named:
+                # 사람이 앱에서 고른 담당은 **지시일 뿐 판단이 아니다.** 프론트를 골라
+                # 놓고 기획안 수정을 보내면 프론트가 기획서를 고치고 있었다.
+                reason += (
+                    "\n\n맡을 팀원이 지정돼 있어도 **그 역할에 맞는 일인지 먼저 판단하세요.**"
+                    " 맞지 않으면 억지로 그 팀원에게 시키지 말고 성격에 맞는 팀원에게 넘기고,"
+                    " 누구에게 맡겼는지 한 줄로 밝히세요."
+                )
             print(json.dumps({"decision": "block", "reason": reason}, ensure_ascii=False))
             sys.exit(0)
         reply = last_assistant_text(payload.get("transcript_path"))
