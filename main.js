@@ -229,10 +229,14 @@ ipcMain.handle('command:send', async (_e, { agent, text, spawn: doSpawn, broadca
   if (!doSpawn) return { ok: true, spawned: false }
 
   // 새 Claude Code 프로세스로 즉시 실행
+  // 담당이 지정돼 있으면 그 팀원에게, 아니면 **내용을 읽고 알아서** 고르게 한다.
+  // 규칙(정규식)으로 나누던 것을 걷어냈다 - 문장의 뜻을 읽는 일은 모델이 낫다.
   const prompt =
     agent && agent !== 'lead'
       ? `${agent} 서브에이전트를 사용해서 다음을 처리해줘: ${body}`
-      : body
+      : `다음 지시를 읽고 성격에 맞는 서브에이전트에게 위임해서 처리해줘.` +
+        ` 직접 처리하지 말고 Task 도구를 쓰고, 여러 파트가 걸리면 planner로 나눈 뒤 각자에게 넘겨줘.` +
+        ` 지시: ${body}`
   try {
     const { spawn } = require('child_process')
     const child = spawn('claude', ['-p', prompt], {

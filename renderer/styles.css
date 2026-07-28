@@ -115,23 +115,33 @@ main {
   white-space: nowrap;
 }
 
-/* 메시지별 복사 버튼 — 평소엔 숨고 올리면 나타난다 */
-.msg .copy {
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  opacity: 0;
-  padding: 2px 6px;
-  font-size: 12px;
-  line-height: 1.2;
-  border-radius: 4px;
-  background: rgba(20, 26, 38, 0.85);
-  border: 1px solid #3f4a60;
-  color: #b9c3d6;
-  transition: opacity 0.12s;
+/* 메시지별 복사 버튼 — **항상 보인다.** 숨겨 뒀더니 있는 줄 모르고 지나쳤다. */
+.msg {
+  padding-right: 34px; /* 버튼 자리 — 글자와 겹치지 않게 */
 }
 
-.msg:hover .copy {
+.msg .copy {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  opacity: 0.55;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  font-size: 13px;
+  line-height: 20px;
+  text-align: center;
+  border-radius: 5px;
+  background: rgba(20, 26, 38, 0.7);
+  border: 1px solid #3f4a60;
+  color: #c3cddd;
+  transition:
+    opacity 0.12s,
+    background 0.12s;
+}
+
+.msg:hover .copy,
+.msg .copy:focus-visible {
   opacity: 1;
 }
 
