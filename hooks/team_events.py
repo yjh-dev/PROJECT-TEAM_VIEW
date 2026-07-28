@@ -206,13 +206,10 @@ def main():
         # Stop 훅이 decision=block을 반환하면 세션이 멈추지 않고 reason을 받아 이어간다.
         pending = take_pending_commands(claude_dir)
         if pending:
-            write_events(log_path, [
-                {"type": "agent_start", "agent": c.get("agent") or "lead"} for c in pending
-            ])
-            save_state(
-                state_path,
-                {"active": [{"name": c.get("agent"), "at": time.time()} for c in pending if c.get("agent")]},
-            )
+            # **여기서 agent_start를 지어내지 않는다.** 예전에는 대기열의 담당 이름으로
+            # 시작 이벤트를 써 버려서, 아무도 일을 시작하지 않았는데 그 캐릭터가
+            # 자리로 걸어가 타이핑했다. 큐에 담긴 이름은 '희망'이지 '사실'이 아니다.
+            # 실제 시작은 리드가 Task로 그 팀원을 부를 때 PreToolUse가 기록한다.
             lines = []
             for c in pending:
                 who = c.get("agent") or "lead"
