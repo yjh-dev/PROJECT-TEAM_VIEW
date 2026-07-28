@@ -34,7 +34,6 @@ const targetsEl = document.getElementById('targets')
 const messagesEl = document.getElementById('messages')
 const inputEl = document.getElementById('chat-input')
 const sendBtn = document.getElementById('chat-send')
-const spawnEl = document.getElementById('chat-spawn')
 const hintEl = document.getElementById('chat-hint')
 const nowEl = document.getElementById('now')
 
@@ -552,9 +551,8 @@ async function send() {
   hintEl.textContent = '보내는 중…'
   const res = await window.teamView.sendCommand({
     agent: to,
-    text: target === 'all' ? text : text,
+    text,
     broadcast: target === 'all',
-    spawn: spawnEl.checked,
   })
   sendBtn.disabled = false
 
@@ -566,9 +564,13 @@ async function send() {
   queuedFor.push({ id: to, at: Date.now() / 1000 })
   const a = agents.get(to)
   if (a) a.queued++
-  hintEl.textContent = res.spawned
-    ? 'Claude Code를 새로 띄워 실행 중입니다'
-    : '전달했습니다 — 열려 있는 세션이 다음 턴에 받습니다'
+  // 회사가 닫혀 있으면 지시는 파일에 남을 뿐 아무도 집어가지 않는다. 그걸 숨기면
+  // "보냈는데 아무 일도 안 일어나는" 상태를 화면에서 알아챌 수 없다.
+  hintEl.textContent = !res.companyOpen
+    ? '회사가 닫혀 있습니다 — 훅이 설치된 프로젝트인지 확인하세요'
+    : res.busy
+      ? '대기열에 넣었습니다 — 앞 작업이 끝나면 이어서 처리합니다'
+      : '회사가 받았습니다 — 곧 팀이 움직입니다'
   inputEl.value = ''
 }
 
@@ -1082,21 +1084,24 @@ window.teamView.onReset(() => {
   overlay.replaceChildren()
   messagesEl.replaceChildren()
 })
-window.teamView.onStatus(({ projectDir, exists, worker }) => {
+window.teamView.onStatus(({ projectDir, exists, company }) => {
   projectEl.textContent = projectDir ?? '(선택 안 됨)'
-  // 워커가 죽으면 보낸 지시를 **아무도 집어가지 않는다.** 그런데 화면상으로는
-  // 그냥 조용한 것과 똑같아서, 지시가 안 먹히는 걸 세 시간 동안 못 알아챘다.
-  // worker === 'none'은 클레임 파일 자체가 없는 경우 — 워커를 쓰지 않는 기존
-  // 방식이고 그때는 아무 세션이나 처리하므로 경고하지 않는다.
-  const deadWorker = worker === 'dead'
+  // 회사가 닫혀 있거나 남이 쥐고 있으면 보낸 지시를 **아무도 집어가지 않는다.**
+  // 그런데 화면상으로는 그냥 조용한 것과 똑같아서, 지시가 안 먹히는 걸 세 시간
+  // 동안 못 알아챘다. 그래서 상태줄에 드러낸다.
+  const shut = company === 'closed' || company === 'foreign'
   statusEl.textContent = !projectDir
     ? '프로젝트를 선택하세요'
     : !exists
       ? '훅 설치 대기 중 — .claude/team-events.jsonl 없음'
-      : deadWorker
-        ? '워커 없음 — 보낸 지시가 처리되지 않습니다'
-        : '이벤트 감시 중'
-  statusEl.className = !projectDir || !exists || deadWorker ? 'warn' : 'ok'
+      : company === 'foreign'
+        ? '다른 창이 이 프로젝트를 맡고 있습니다'
+        : company === 'closed'
+          ? '회사가 닫혀 있습니다 — 보낸 지시가 처리되지 않습니다'
+          : company === 'busy'
+            ? '회사 운영 중 — 지시 처리 중'
+            : '회사 운영 중 — 대기'
+  statusEl.className = !projectDir || !exists || shut ? 'warn' : 'ok'
 })
 
 pickBtn.addEventListener('click', () => window.teamView.pickProject())

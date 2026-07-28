@@ -1,23 +1,31 @@
 // Electron 메인 프로세스.
-// 하는 일은 두 가지뿐이다: (1) 창 띄우기, (2) 감시 대상 프로젝트의
-// `.claude/team-events.jsonl`을 tail 해서 새 줄을 렌더러로 보내기.
+// 하는 일은 세 가지다: (1) 창 띄우기, (2) 감시 대상 프로젝트의
+// `.claude/team-events.jsonl`을 tail 해서 새 줄을 렌더러로 보내기,
+// (3) **회사를 운영하기** — 앱에서 보낸 지시를 앱이 직접 받아 실행한다.
 //
 // 파일 감시는 fs.watch가 아니라 **폴링**이다. Windows에서 fs.watch는 "덧붙이기"를
 // 놓치거나 중복 이벤트를 주는 일이 잦고, 우리가 읽는 건 append-only 로그라
 // 크기 비교가 훨씬 단순하고 정확하다.
 
 const { app, BrowserWindow, ipcMain, dialog, clipboard } = require('electron')
+const { spawn } = require('child_process')
 const fs = require('fs')
 const path = require('path')
 
 const POLL_MS = 300
 const CONFIG_NAME = 'config.json'
-// 워커 클레임은 30초에 한 번 갱신되므로 자주 볼 이유가 없다.
+// 회사 클레임은 30초에 한 번 갱신되므로 자주 볼 이유가 없다.
 const WORKER_POLL_MS = 2000
-const WORKER_TTL_S = 600 // 훅의 WORKER_TTL과 같은 값. 넘으면 죽은 워커로 본다.
+const WORKER_TTL_S = 600 // 훅의 WORKER_TTL과 같은 값. 넘으면 죽은 클레임으로 본다.
+const CLAIM_REFRESH_MS = 30_000 // 훅의 WORKER_REFRESH와 같은 값
+const QUEUE_POLL_MS = 1000 // 대기열을 얼마나 자주 들여다볼지
+const WORKER_NAME = 'team-worker.json'
+const CANCEL_NAME = 'team-cancel.flag'
+const COMMANDS_NAME = 'team-commands.jsonl'
 
 let win = null
-let watch = null // { file, offset, timer, tail, exists, worker, workerAt }
+let watch = null // { file, offset, timer, tail, exists, company, workerAt }
+let company = null // { projectDir, claimTimer, queueTimer, child, hasSession }
 
 function configPath() {
   return path.join(app.getPath('userData'), CONFIG_NAME)
@@ -49,29 +57,26 @@ function eventsFileFor(projectDir) {
 }
 
 /**
- * 지시를 처리할 워커 세션이 살아 있는가.
+ * 회사가 문을 열었는가 — 즉 앱에서 보낸 지시를 받아 줄 주체가 있는가.
  *
- *   'none' — 클레임 파일 자체가 없다. 워커를 쓰지 않는 기존 방식이므로 정상이다.
- *   'live' — 최근에 갱신된 클레임이 있다.
- *   'dead' — 클레임은 있는데 오래됐다. **보낸 지시가 아무도 처리하지 않는다.**
+ *   'open'    — 이 앱이 대기열을 맡고 있다. 보낸 지시는 회사가 처리한다.
+ *   'busy'    — 회사가 열려 있고, 지금 지시 하나를 실행하는 중이다.
+ *   'foreign' — 다른 주체(다른 앱 창·예전 방식의 워커 세션)가 클레임을 쥐고 있다.
+ *   'closed'  — 아무도 안 맡고 있다. **보낸 지시가 처리되지 않는다.**
  *
- * 'dead'를 화면에 드러내는 것이 이 함수의 존재 이유다. 워커가 꺼진 것과 그냥
+ * 'closed'를 화면에 드러내는 것이 이 함수의 존재 이유다. 회사가 닫힌 것과 그냥
  * 조용한 것은 화면에서 구분되지 않아, 지시가 안 먹히는 걸 세 시간 동안 못 알아챘다.
  */
-function workerState(projectDir) {
-  let raw
-  try {
-    raw = fs.readFileSync(path.join(projectDir, '.claude', 'team-worker.json'), 'utf8')
-  } catch {
-    return 'none'
-  }
+function companyState(projectDir) {
+  // 우리가 맡고 있으면 파일을 볼 필요가 없다 — 우리가 진실이다.
+  if (company && company.projectDir === projectDir) return company.child ? 'busy' : 'open'
   let at = 0
   try {
-    at = Number(JSON.parse(raw).at) || 0
+    at = Number(JSON.parse(fs.readFileSync(claimPath(projectDir), 'utf8')).at) || 0
   } catch {
-    return 'dead' // 읽을 수 없는 클레임은 믿지 않는다
+    return 'closed' // 없거나 읽을 수 없는 클레임은 믿지 않는다
   }
-  return Date.now() / 1000 - at > WORKER_TTL_S ? 'dead' : 'live'
+  return Date.now() / 1000 - at > WORKER_TTL_S ? 'closed' : 'foreign'
 }
 
 /** 상태줄에 필요한 것이 바뀌었을 때만 렌더러로 보낸다(300ms마다 도배하지 않게). */
@@ -80,12 +85,12 @@ function pumpStatus(projectDir, { force = false } = {}) {
   const now = Date.now()
   if (!force && now - (watch.workerAt ?? 0) < WORKER_POLL_MS) return
   watch.workerAt = now
-  const worker = workerState(projectDir)
+  const state = companyState(projectDir)
   const exists = fs.existsSync(watch.file)
-  if (!force && worker === watch.worker && exists === watch.exists) return
-  watch.worker = worker
+  if (!force && state === watch.company && exists === watch.exists) return
+  watch.company = state
   watch.exists = exists
-  send('watch:status', { projectDir, file: watch.file, exists, worker })
+  send('watch:status', { projectDir, file: watch.file, exists, company: state })
 }
 
 function stopWatching() {
@@ -100,6 +105,10 @@ function stopWatching() {
 function startWatching(projectDir, { replay = true } = {}) {
   stopWatching()
   if (!projectDir) return
+
+  // 감시를 시작한다는 건 이 프로젝트의 회사가 문을 연다는 뜻이다.
+  // 앱이 보고 있는 프로젝트와 지시를 처리하는 프로젝트가 갈라지면 안 된다.
+  openCompany(projectDir)
 
   const file = eventsFileFor(projectDir)
   watch = { file, offset: 0, tail: '', timer: null }
@@ -257,8 +266,13 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   stopWatching()
+  closeCompany() // 창을 닫으면 회사도 문을 닫는다
   if (process.platform !== 'darwin') app.quit()
 })
+
+// 종료 경로가 여럿이라 여기서도 정리한다. 클레임을 남긴 채 죽으면 그 프로젝트는
+// TTL(10분)이 지날 때까지 "다른 회사가 맡고 있음"으로 보여 지시가 멈춘다.
+app.on('before-quit', closeCompany)
 
 ipcMain.handle('project:pick', async () => {
   const res = await dialog.showOpenDialog(win, {
@@ -281,13 +295,242 @@ ipcMain.handle('clipboard:write', (_e, text) => {
   return true
 })
 
-// 앱이 띄운 claude 프로세스들. 취소할 때 이걸 정리한다.
+// ---------------------------------------------------------------------------
+// 회사
+//
+// 팀뷰는 **하나의 기업체**다. 앱이 켜져 있으면 회사가 문을 연 것이고, 앱에서 보낸
+// 지시는 언제나 회사가 받는다. 사람이 다른 창에서 클로드와 대화하고 있어도 그
+// 세션으로 지시가 새어 들어가지 않는다. 예전에는 "새 세션으로 즉시 실행" 체크박스로
+// 그걸 사람이 매번 골라야 했는데, 끄고 보내면 지시가 **그때 마침 턴을 끝내는 아무
+// 세션**에게 갔다. 회사가 하나면 고를 것도 없다.
+//
+// 지시를 회사 것으로 묶어 주는 장치가 `.claude/team-worker.json` 클레임이다.
+// 훅(team_events.py)은 살아 있는 `mode: "poller"` 클레임을 보면 대기열을 아예
+// 건드리지 않는다. 예전에는 이 클레임을 **대화형 워커 세션**이 적었는데, 갱신이
+// 훅이 돌 때만 일어나서 워커가 조용하면 10분 뒤 만료됐다. 그러면 훅의 마지막
+// 폴백("아무 세션이나 처리한다")으로 떨어져 사람과 대화하던 세션이 지시를 집어갔다.
+// 이제 클레임을 **앱이** 적는다. 앱은 대화를 하지 않으니 조용해질 일이 없다.
+// ---------------------------------------------------------------------------
+
+// 회사가 띄운 claude 프로세스들. 취소하거나 문을 닫을 때 이걸 정리한다.
 const spawned = new Set()
+
+function claimPath(projectDir) {
+  return path.join(projectDir, '.claude', WORKER_NAME)
+}
+
+/**
+ * "지금 이 회사가 대기열을 맡고 있다"고 적는다.
+ *
+ * `session_id`를 함께 적는 이유: 훅의 read_claim()이 이 키가 없는 클레임을 통째로
+ * 버린다. 앱은 세션이 아니므로 pid로 유일한 이름을 만든다.
+ */
+function writeClaim(projectDir) {
+  try {
+    fs.writeFileSync(
+      claimPath(projectDir),
+      JSON.stringify({
+        mode: 'poller',
+        session_id: `teamview-app:${process.pid}`,
+        pid: process.pid,
+        at: Date.now() / 1000,
+      }),
+      'utf8',
+    )
+  } catch {
+    /* .claude가 없는 폴더면 클레임도 의미가 없다 */
+  }
+}
+
+/** 우리 클레임일 때만 지운다. 다른 회사가 이어받았다면 남의 것을 건드리지 않는다. */
+function clearClaim(projectDir) {
+  try {
+    if (JSON.parse(fs.readFileSync(claimPath(projectDir), 'utf8')).pid !== process.pid) return
+    fs.unlinkSync(claimPath(projectDir))
+  } catch {
+    /* 없으면 그만 */
+  }
+}
+
+/**
+ * 회사가 띄운 claude를 모두 죽인다.
+ *
+ * Windows에서는 `shell: true`로 띄운 자식이 **cmd 래퍼**라 그 pid만 죽이면 정작
+ * claude는 살아남는다. taskkill로 트리째 정리한다.
+ */
+function killSpawned() {
+  let killed = 0
+  for (const child of spawned) {
+    try {
+      if (process.platform === 'win32') {
+        spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' })
+      } else {
+        process.kill(child.pid)
+      }
+      killed++
+    } catch {
+      /* 이미 끝난 프로세스 */
+    }
+    spawned.delete(child)
+  }
+  return killed
+}
+
+/**
+ * 대기열에서 **한 건만** 꺼내고 나머지는 파일에 남긴다.
+ *
+ * 통째로 들고 오지 않는 이유: 한 건을 처리하는 동안 취소가 들어오면 아직 시작하지
+ * 않은 나머지는 버려져야 한다. 메모리로 들고 있으면 취소(파일 삭제)가 그것들에
+ * 닿지 못해, 취소를 눌러도 뒤이어 계속 실행된다.
+ */
+function takeOneCommand(claudeDir) {
+  const qf = path.join(claudeDir, COMMANDS_NAME)
+  let lines
+  try {
+    lines = fs
+      .readFileSync(qf, 'utf8')
+      .split(/\r?\n/)
+      .filter((l) => l.trim())
+  } catch {
+    return null // 대기열 없음 — 평상시다
+  }
+  let taken = null
+  const rest = []
+  for (const line of lines) {
+    let c = null
+    try {
+      c = JSON.parse(line)
+    } catch {
+      continue // 깨진 줄 하나 때문에 멈추지 않는다
+    }
+    if (!taken && c.status === 'pending') taken = c
+    else rest.push(line)
+  }
+  if (!taken) return null
+  // **꺼냈으면 반드시 지운다.** 못 지우면 다음 폴에서 같은 지시를 또 집어 두 번
+  // 실행된다. Windows의 공유 위반은 순간적이라 몇 번 다시 해 본다.
+  for (let i = 0; i < 3; i++) {
+    try {
+      if (rest.length) fs.writeFileSync(qf, rest.join('\n') + '\n', 'utf8')
+      else fs.unlinkSync(qf)
+      return taken
+    } catch {
+      /* 곧바로 재시도 */
+    }
+  }
+  return null // 지우지 못했으면 아예 집지 않는다 — 중복 실행보다 지연이 낫다
+}
+
+// 담당을 콕 집어 보내도 **그 역할에 맞는 일인지 먼저 보게 한다.** 프론트를 골라
+// 놓고 기획안 수정을 보내면 프론트가 기획서를 고치고 있었다. 사람이 고른 담당은
+// 지시일 뿐 판단이 아니다.
+const HANDOFF =
+  ` 맡기기 전에 이 일이 그 팀원의 역할에 맞는지 먼저 판단해줘.` +
+  ` 맞지 않으면 억지로 시키지 말고 성격에 맞는 팀원에게 넘겨.` +
+  ` 어느 쪽이든 누구에게 맡겼는지 한 줄로 밝혀줘.`
+
+function promptFor(cmd) {
+  const who = cmd.agent
+  const body = String(cmd.text ?? '')
+  return who && who !== 'lead'
+    ? `다음 지시를 ${who} 서브에이전트에게 맡기려 해.${HANDOFF} 지시: ${body}`
+    : `다음 지시를 읽고 성격에 맞는 서브에이전트에게 위임해서 처리해줘.` +
+        ` 직접 처리하지 말고 Task 도구를 쓰고, 여러 파트가 걸리면 planner로 나눈 뒤 각자에게 넘겨줘.` +
+        ` 지시: ${body}`
+}
+
+/**
+ * 지시 하나를 회사에 태운다.
+ *
+ * `--continue`로 이전 대화를 이어받아 **회사의 기억을 유지한다.** 매번 새 세션이면
+ * "아까 그거 계속해줘"가 통하지 않는다. 다만 이어받을 세션이 없는 첫 실행에는
+ * 붙이지 않는다 — 없는 세션을 이어받으려다 실패하면 그 지시가 통째로 날아간다.
+ *
+ * `TEAMVIEW_POLLER`는 훅이 "이 세션은 회사가 띄운 것"이라고 알아보는 표식이다.
+ * 이게 있어야 그 세션의 활동이 화면에 기록되고, 취소 깃발을 훅이 함부로 내리지 않는다.
+ */
+function runCommand(cmd) {
+  const projectDir = company.projectDir
+  const args = ['-p']
+  if (company.hasSession) args.push('--continue')
+  args.push(promptFor(cmd))
+
+  let child
+  try {
+    child = spawn('claude', args, {
+      cwd: projectDir,
+      shell: true, // Windows에서 claude는 .cmd 래퍼다
+      stdio: 'ignore',
+      env: { ...process.env, TEAMVIEW_POLLER: String(process.pid) },
+    })
+  } catch (err) {
+    logRenderer(`회사 실행 실패: ${err.message}`)
+    return
+  }
+
+  company.child = child
+  spawned.add(child)
+  pumpStatus(projectDir, { force: true })
+
+  child.on('error', (err) => logRenderer(`claude 실행 실패: ${err.message}`))
+  child.on('exit', (code) => {
+    spawned.delete(child)
+    if (company && company.child === child) {
+      company.child = null
+      // 성공했을 때만 다음부터 이어받는다. 실패한 실행을 이어받으면 그 오류 상태가
+      // 계속 따라다닌다.
+      if (code === 0) company.hasSession = true
+    }
+    // 훅은 회사가 띄운 세션에서 취소 깃발을 **지우지 않는다**(지우면 곧바로 다음
+    // 지시를 집어가 "취소했는데 계속 일한다"가 된다). 실행이 끝난 지금 회사가 내린다.
+    try {
+      fs.unlinkSync(path.join(projectDir, '.claude', CANCEL_NAME))
+    } catch {
+      /* 없으면 그만 */
+    }
+    pumpStatus(projectDir, { force: true })
+  })
+}
+
+/** 대기열을 한 번 들여다본다. 회사는 **한 번에 한 건만** 처리한다. */
+function pumpQueue() {
+  if (!company || company.child) return
+  const claudeDir = path.join(company.projectDir, '.claude')
+  // 취소 직후에는 새 지시를 시작하지 않는다. 깃발은 실행이 끝나며 내려간다.
+  if (fs.existsSync(path.join(claudeDir, CANCEL_NAME))) return
+  const cmd = takeOneCommand(claudeDir)
+  if (cmd) runCommand(cmd)
+}
+
+/** 회사 문을 연다. 이미 열려 있으면 닫고 새로 연다(감시 프로젝트가 바뀐 경우). */
+function openCompany(projectDir) {
+  closeCompany()
+  if (!projectDir) return
+  // 훅이 없는 폴더에서는 회사를 열 수 없다 — 지시를 적어도 아무도 읽지 못한다.
+  if (!fs.existsSync(path.join(projectDir, '.claude'))) return
+  company = { projectDir, claimTimer: null, queueTimer: null, child: null, hasSession: false }
+  writeClaim(projectDir)
+  company.claimTimer = setInterval(() => writeClaim(projectDir), CLAIM_REFRESH_MS)
+  company.queueTimer = setInterval(pumpQueue, QUEUE_POLL_MS)
+}
+
+/**
+ * 회사 문을 닫는다. **실행 중이던 일도 멈춘다.**
+ * 앱을 껐는데 백그라운드에서 파일이 계속 고쳐지고 있으면 놀랄 일이다.
+ */
+function closeCompany() {
+  if (!company) return
+  clearInterval(company.claimTimer)
+  clearInterval(company.queueTimer)
+  killSpawned()
+  clearClaim(company.projectDir)
+  company = null
+}
 
 /**
  * 세 가지를 한꺼번에 한다.
  *   1. 아직 안 집어간 대기열을 버린다
- *   2. 앱이 띄운 claude 프로세스를 죽인다
+ *   2. 회사가 띄운 claude 프로세스를 죽인다
  *   3. **이미 돌고 있는 세션**을 멈추도록 취소 깃발을 세운다
  *
  * 3번이 핵심이다. 밖에서 남의 세션을 죽일 수는 없지만, PreToolUse 훅이 이 깃발을
@@ -317,16 +560,8 @@ ipcMain.handle('command:cancel', () => {
       /* 훅이 없는 프로젝트면 깃발도 의미가 없다 */
     }
   }
-  let killed = 0
-  for (const child of spawned) {
-    try {
-      process.kill(child.pid)
-      killed++
-    } catch {
-      /* 이미 끝난 프로세스 */
-    }
-    spawned.delete(child)
-  }
+  const killed = killSpawned()
+  if (company) company.child = null // 죽인 자식의 exit을 기다리지 않고 곧바로 비운다
   if (projectDir) {
     try {
       appendJsonl(eventsFileFor(projectDir), {
@@ -345,12 +580,10 @@ ipcMain.handle('command:cancel', () => {
 // ---------------------------------------------------------------------------
 // 개별 지시 전달
 //
-// 기본 동작은 **대기열에 넣기**다: `.claude/team-commands.jsonl`에 한 줄 쓰고,
-// 그 프로젝트에 설치된 team_events.py 훅이 세션이 한 턴을 끝낼 때(Stop) 집어간다.
-// 즉 지금 돌고 있는 세션에 끼워 넣는 방식이라 새 프로세스가 뜨지 않는다.
-//
-// spawn=true면 `claude -p`로 **새 프로세스를 띄워 즉시** 실행한다. 자율적으로 파일을
-// 고칠 수 있는 동작이라 기본값은 꺼져 있고, 사용자가 체크박스로 켤 때만 실행한다.
+// 하는 일은 하나다: `.claude/team-commands.jsonl`에 한 줄 쓴다. 그 줄을 집어가는
+// 것은 **언제나 회사**다(위 pumpQueue). 보내는 쪽에 고를 것이 없다 — 예전에는
+// "새 세션으로 즉시 실행" 체크박스가 있었고, 끄고 보내면 지시가 그때 마침 턴을
+// 끝내는 아무 세션에게 갔다. 회사가 하나뿐이면 그 갈림길 자체가 없다.
 // ---------------------------------------------------------------------------
 
 function appendJsonl(file, obj) {
@@ -358,7 +591,7 @@ function appendJsonl(file, obj) {
   fs.appendFileSync(file, JSON.stringify(obj) + '\n', 'utf8')
 }
 
-ipcMain.handle('command:send', async (_e, { agent, text, spawn: doSpawn, broadcast }) => {
+ipcMain.handle('command:send', async (_e, { agent, text, broadcast }) => {
   const projectDir = loadConfig().projectDir
   if (!projectDir) return { ok: false, error: '프로젝트가 선택되지 않았습니다' }
   const body = String(text ?? '').trim()
@@ -389,39 +622,9 @@ ipcMain.handle('command:send', async (_e, { agent, text, spawn: doSpawn, broadca
     return { ok: false, error: `기록 실패: ${err.message}` }
   }
 
-  if (!doSpawn) return { ok: true, spawned: false }
-
-  // 새 Claude Code 프로세스로 즉시 실행
-  // 담당이 지정돼 있으면 그 팀원에게, 아니면 **내용을 읽고 알아서** 고르게 한다.
-  // 규칙(정규식)으로 나누던 것을 걷어냈다 - 문장의 뜻을 읽는 일은 모델이 낫다.
-  // 담당을 콕 집어 보내도 **그 역할에 맞는 일인지 먼저 보게 한다.** 프론트를 골라
-  // 놓고 기획안 수정을 보내면 프론트가 기획서를 고치고 있었다. 사람이 고른 담당은
-  // 지시일 뿐 판단이 아니다.
-  const HANDOFF =
-    ` 맡기기 전에 이 일이 그 팀원의 역할에 맞는지 먼저 판단해줘.` +
-    ` 맞지 않으면 억지로 시키지 말고 성격에 맞는 팀원에게 넘겨.` +
-    ` 어느 쪽이든 누구에게 맡겼는지 한 줄로 밝혀줘.`
-
-  const prompt =
-    agent && agent !== 'lead'
-      ? `다음 지시를 ${agent} 서브에이전트에게 맡기려 해.${HANDOFF} 지시: ${body}`
-      : `다음 지시를 읽고 성격에 맞는 서브에이전트에게 위임해서 처리해줘.` +
-        ` 직접 처리하지 말고 Task 도구를 쓰고, 여러 파트가 걸리면 planner로 나눈 뒤 각자에게 넘겨줘.` +
-        ` 지시: ${body}`
-  try {
-    const { spawn } = require('child_process')
-    const child = spawn('claude', ['-p', prompt], {
-      cwd: projectDir,
-      shell: true, // Windows에서 claude는 .cmd 래퍼다
-      detached: true,
-      stdio: 'ignore',
-    })
-    child.on('error', (err) => console.error('claude 실행 실패:', err.message))
-    child.on('exit', () => spawned.delete(child))
-    spawned.add(child)
-    child.unref()
-    return { ok: true, spawned: true }
-  } catch (err) {
-    return { ok: false, error: `claude 실행 실패: ${err.message}` }
-  }
+  // 1초 폴을 기다리지 않고 곧바로 들여다본다. 보내자마자 팀이 움직여야 한다.
+  const open = Boolean(company && company.projectDir === projectDir)
+  if (open) pumpQueue()
+  // 회사가 닫혀 있으면 지시는 파일에 남지만 아무도 집어가지 않는다. 숨기지 않는다.
+  return { ok: true, companyOpen: open, busy: Boolean(company && company.child) }
 })
