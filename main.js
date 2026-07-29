@@ -575,6 +575,21 @@ function promptFor(cmd) {
         ` 지시: ${body}`
 }
 
+// 파일 편집을 물어보지 않고 승인한다.
+//
+// **이건 안전장치를 내리는 설정이다.** 그래도 필요한 이유: 회사는 `claude -p`로
+// 도는 비대화형 세션이라 권한을 물어볼 상대가 없다. 물으면 답이 없어 그냥 멈춘다.
+// 실제로 board 프로젝트에서 리드가 Write를 시도했다가 "파일 쓰기 권한이 없어
+// 중단했습니다"로 두 번 끝났다 — 화면에는 그냥 조용한 것과 구분되지 않았다.
+//
+// 지금까지의 대안은 프로젝트마다 `settings.json`에 허용 목록을 쌓는 것이었는데
+// (한 프로젝트는 그렇게 216줄이 쌓였다) 새 프로젝트를 붙일 때마다 처음부터
+// 다시 겪는다. 팀뷰에 보내는 지시는 애초에 "알아서 해줘"가 전제이므로 여기서 연다.
+//
+// `bypassPermissions`가 아니라 `acceptEdits`인 이유: 파일 편집만 열고 나머지는
+// 평소 규칙을 그대로 따르게 둔다. 열 이유가 없는 것까지 열지 않는다.
+const PERMISSION_MODE = 'acceptEdits'
+
 /**
  * 지시 하나를 회사에 태운다.
  *
@@ -587,7 +602,7 @@ function promptFor(cmd) {
  */
 function runCommand(c, cmd) {
   const dir = c.dir
-  const args = ['-p']
+  const args = ['-p', '--permission-mode', PERMISSION_MODE]
   if (c.hasSession) args.push('--continue')
   args.push(promptFor(cmd))
 
