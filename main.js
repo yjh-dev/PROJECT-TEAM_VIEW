@@ -115,6 +115,56 @@ function companyState(dir) {
   return Date.now() / 1000 - at > WORKER_TTL_S ? 'closed' : 'foreign'
 }
 
+// 붙인 프로젝트가 팀뷰와 일할 준비가 됐는지 검사한 결과를 잠깐 들고 있는다.
+// 이 파일들은 자주 바뀌지 않으므로 상태를 갱신할 때마다 디스크를 뒤질 이유가 없다.
+const healthCache = new Map() // dir -> { at, health }
+const HEALTH_TTL_MS = 10_000
+
+function countAgentFiles(dir) {
+  try {
+    return fs.readdirSync(dir).filter((f) => f.endsWith('.md')).length
+  } catch {
+    return 0
+  }
+}
+
+/**
+ * 이 프로젝트가 팀뷰와 일할 준비가 됐는가.
+ *
+ * 셋 중 하나라도 빠지면 붙여도 원하는 대로 움직이지 않는다. 그런데 지금까지는
+ * **붙여서 지시를 보내보고, 안 움직이는 걸 보고 나서야** 알 수 있었다. 실제로
+ * 어떤 프로젝트는 훅만 깔려 있고 팀원이 없어서 리드가 혼자 일했는데, 그걸
+ * 알아내려고 이벤트 로그를 집계해야 했다. 화면이 미리 말해 줬어야 하는 일이다.
+ *
+ *   hooks  — 훅이 설치되고 settings에 **등록**됐는가. 없으면 활동이 기록되지 않는다.
+ *   agents — 부를 팀원이 있는가. 없으면 **리드가 혼자 다 한다.**
+ *   guide  — CLAUDE.md가 있는가. 없으면 어떤 일이 누구 몫인지 리드가 알 수 없다.
+ */
+function projectHealth(dir) {
+  const hit = healthCache.get(dir)
+  if (hit && Date.now() - hit.at < HEALTH_TTL_MS) return hit.health
+
+  const claudeDir = path.join(dir, '.claude')
+  // 훅은 파일만 있어서는 안 된다 — settings에 등록돼야 실제로 돈다.
+  let hooks = false
+  for (const name of ['settings.json', 'settings.local.json']) {
+    try {
+      const cfg = JSON.parse(fs.readFileSync(path.join(claudeDir, name), 'utf8'))
+      if (JSON.stringify(cfg.hooks ?? {}).includes('team_events')) hooks = true
+    } catch {
+      /* 없거나 깨진 설정은 '없음'으로 본다 */
+    }
+  }
+  // 사용자 전역(~/.claude/agents)에 둔 팀원도 그 프로젝트에서 부를 수 있다.
+  const agents =
+    countAgentFiles(path.join(claudeDir, 'agents')) +
+    countAgentFiles(path.join(app.getPath('home'), '.claude', 'agents'))
+
+  const health = { hooks, agents, guide: fs.existsSync(path.join(dir, 'CLAUDE.md')) }
+  healthCache.set(dir, { at: Date.now(), health })
+  return health
+}
+
 /** 아직 아무도 안 집어간 지시 수. 탭 배지에 "대기 N건"으로 뜬다. */
 function pendingCount(dir) {
   try {
@@ -144,6 +194,7 @@ function pumpStatusAll({ force = false } = {}) {
     exists: watches.get(dir)?.exists ?? false,
     company: companyState(dir),
     queued: pendingCount(dir),
+    health: projectHealth(dir),
   }))
   const payload = { projects, activeDir, max: MAX_PROJECTS }
   const json = JSON.stringify(payload)
@@ -269,6 +320,9 @@ function pump(dir) {
 function activate(dir) {
   if (!dir || !watches.has(dir)) return
   activeDir = dir
+  // 탭을 옮기는 순간은 사람이 그 프로젝트를 들여다보는 순간이다. 캐시가 식기를
+  // 기다리지 말고 다시 검사한다(방금 훅을 깔았을 수도 있다).
+  healthCache.delete(dir)
   saveProjects(loadProjects())
   send('events:reset', { dir })
   const w = watches.get(dir)
@@ -398,7 +452,9 @@ ipcMain.handle('project:add', async () => {
   startWatching(dir, { replay: true })
   send('events:reset', { dir })
   pumpStatusAll({ force: true })
-  return { ok: true, dir, hooked: fs.existsSync(path.join(dir, '.claude')) }
+  // 붙이는 순간 무엇이 빠졌는지 알려준다. 나중에 안 움직이는 걸 보고 찾아내는 것보다
+  // 지금 한 줄 읽는 편이 낫다.
+  return { ok: true, dir, health: projectHealth(dir) }
 })
 
 /** 프로젝트를 뗀다. 그 회사는 문을 닫고 진행 중이던 일도 멈춘다. */

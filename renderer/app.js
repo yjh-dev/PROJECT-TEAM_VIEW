@@ -1154,23 +1154,35 @@ window.teamView.onStatus(({ projects, activeDir: active, max }) => {
   renderTabs(projects, active, max)
 
   const me = projects.find((p) => p.dir === active)
-  // 회사가 닫혀 있거나 남이 쥐고 있으면 보낸 지시를 **아무도 집어가지 않는다.**
-  // 그런데 화면상으로는 그냥 조용한 것과 똑같아서, 지시가 안 먹히는 걸 세 시간
-  // 동안 못 알아챘다. 그래서 상태줄에 드러낸다.
-  const shut = me && (me.company === 'closed' || me.company === 'foreign')
-  statusEl.textContent = !me
-    ? '프로젝트를 추가하세요'
-    : !me.exists
-      ? '훅 설치 대기 중 — .claude/team-events.jsonl 없음'
-      : me.company === 'foreign'
-        ? '다른 창이 이 프로젝트를 맡고 있습니다'
-        : me.company === 'closed'
-          ? '회사가 닫혀 있습니다 — 보낸 지시가 처리되지 않습니다'
-          : me.company === 'busy'
-            ? '회사 운영 중 — 지시 처리 중'
-            : '회사 운영 중 — 대기'
-  statusEl.className = !me || !me.exists || shut ? 'warn' : 'ok'
+  const trouble = me ? diagnose(me) : { text: '프로젝트를 추가하세요', warn: true }
+  statusEl.textContent = trouble.text
+  statusEl.className = trouble.warn ? 'warn' : 'ok'
 })
+
+/**
+ * 이 프로젝트가 지금 왜 그 상태인지 한 줄로.
+ *
+ * 회사가 닫혀 있거나 구성이 빠져 있으면 보낸 지시가 원하는 대로 처리되지 않는데,
+ * 화면상으로는 **그냥 조용한 것과 똑같다.** 지시가 안 먹히는 걸 세 시간 동안
+ * 못 알아챈 적이 있고, 팀원이 없어 리드가 혼자 일하는 것도 이벤트 로그를
+ * 집계하고 나서야 알았다. 둘 다 여기서 먼저 말해 줬어야 하는 일이다.
+ *
+ * 순서는 **치명적인 것부터**다: 아예 안 도는 것 → 혼자 일하는 것 → 배분이 없는 것.
+ */
+function diagnose(p) {
+  const h = p.health ?? {}
+  if (p.company === 'foreign') return { text: '다른 창이 이 프로젝트를 맡고 있습니다', warn: true }
+  if (p.company === 'closed')
+    return { text: '회사가 닫혀 있습니다 — 보낸 지시가 처리되지 않습니다', warn: true }
+  if (!h.hooks)
+    return { text: '훅이 등록되지 않았습니다 — 팀 활동이 화면에 나오지 않습니다', warn: true }
+  if (!h.agents)
+    return { text: '팀원이 없습니다(.claude/agents) — 리드가 혼자 일합니다', warn: true }
+  if (!h.guide)
+    return { text: 'CLAUDE.md가 없습니다 — 어떤 일이 누구 몫인지 리드가 모릅니다', warn: true }
+  if (p.company === 'busy') return { text: '회사 운영 중 — 지시 처리 중', warn: false }
+  return { text: `회사 운영 중 — 대기 · 팀원 ${h.agents}명`, warn: false }
+}
 
 // ---------- 프로젝트 탭 ----------
 //
@@ -1180,16 +1192,27 @@ window.teamView.onStatus(({ projects, activeDir: active, max }) => {
 function renderTabs(projects, active, max) {
   tabsEl.replaceChildren()
   for (const p of projects) {
+    const h = p.health ?? {}
     const tab = document.createElement('div')
     tab.className = `tab${p.dir === active ? ' sel' : ''}`
-    tab.title = p.dir
+    // 마우스를 올리면 진단이 통째로 보인다. 배지 한 칸에는 하나밖에 못 담는다.
+    tab.title = [
+      p.dir,
+      `훅: ${h.hooks ? '등록됨' : '없음 — 활동이 기록되지 않습니다'}`,
+      `팀원: ${h.agents ? `${h.agents}명` : '없음 — 리드가 혼자 일합니다'}`,
+      `CLAUDE.md: ${h.guide ? '있음' : '없음 — 담당 배분을 리드가 모릅니다'}`,
+      `이벤트: ${p.exists ? '기록 중' : '아직 없음'}`,
+    ].join('\n')
 
     const nm = document.createElement('span')
     nm.className = 'nm'
     nm.textContent = baseName(p.dir)
 
+    // 배지 하나에 무엇을 담을지: **진행 중이면 진행을, 조용하면 왜 조용한지**를 보여준다.
+    // 일하고 있는데 '팀원 없음'이 떠 있으면 지금 상태를 가린다.
     const st = document.createElement('span')
     const shut = p.company === 'closed' || p.company === 'foreign'
+    const missing = !h.hooks ? '훅 없음' : !h.agents ? '팀원 없음' : !h.guide ? '지침 없음' : null
     if (shut) {
       st.className = 'st shut'
       st.textContent = p.company === 'foreign' ? '점유됨' : '닫힘'
@@ -1199,6 +1222,9 @@ function renderTabs(projects, active, max) {
     } else if (p.queued) {
       st.className = 'st queued'
       st.textContent = `대기 ${p.queued}건`
+    } else if (missing) {
+      st.className = 'st shut'
+      st.textContent = missing
     } else {
       st.className = 'st'
       st.textContent = '대기'
@@ -1236,9 +1262,15 @@ addBtn.addEventListener('click', async () => {
     if (!res?.canceled && res?.error) hintEl.textContent = res.error
     return
   }
-  if (!res.hooked) {
-    hintEl.textContent = `${baseName(res.dir)}에 .claude 폴더가 없습니다 — 훅을 설치해야 회사가 열립니다`
-  }
+  // 붙인 직후에 빠진 것을 한 줄로 알린다. 안 움직이는 걸 나중에 발견하는 것보다 낫다.
+  const h = res.health ?? {}
+  const missing = []
+  if (!h.hooks) missing.push('훅 미등록')
+  if (!h.agents) missing.push('팀원 없음')
+  if (!h.guide) missing.push('CLAUDE.md 없음')
+  hintEl.textContent = missing.length
+    ? `${baseName(res.dir)} — ${missing.join(' · ')} (탭에 마우스를 올리면 자세히 보입니다)`
+    : `${baseName(res.dir)} 붙였습니다 — 팀원 ${h.agents}명`
 })
 
 // ---------- 작업 취소 ----------
