@@ -27,8 +27,8 @@ import { routeTo, interiorWallSegments, DOORWAYS, SPOTS, setObstacles } from './
 const canvas = document.getElementById('stage')
 const ctx = canvas.getContext('2d')
 const statusEl = document.getElementById('status')
-const projectEl = document.getElementById('project')
-const pickBtn = document.getElementById('pick')
+const tabsEl = document.getElementById('tabs')
+const addBtn = document.getElementById('add')
 const overlay = document.getElementById('overlay')
 const targetsEl = document.getElementById('targets')
 const messagesEl = document.getElementById('messages')
@@ -73,6 +73,32 @@ let target = 'all' // 채팅 대상: 'all' 또는 에이전트 id
 let lastFrame = performance.now()
 const nodes = new Map()
 const lastChatAt = new Map() // 도구 이벤트가 채팅을 도배하지 않도록
+
+// ---------- 여러 프로젝트 ----------
+//
+// 회사는 최대 3개가 동시에 돌지만 **사무실은 한 번에 하나만 그린다.** 셋을 나란히
+// 놓으면 배율이 1/3로 떨어져 도트가 뭉개지고, 통행 격자(layout.js의 nav)도 사무실
+// 마다 따로 들어야 한다. 그래서 화면은 활성 프로젝트 하나만 시뮬레이션한다.
+//
+// 탭을 옮기면 메인이 그 프로젝트를 처음부터 다시 읽어 보내 주므로(events:reset →
+// replay) 지금 모습이 그대로 복원된다. 다만 **채팅만은 replay로 되살아나지 않는다** —
+// 지난 기록으로 채팅을 다시 쓰면 켤 때마다 같은 줄이 쌓이기 때문에 일부러 막아 뒀다.
+// 그래서 대화는 프로젝트별로 여기에 들고 있다가 탭을 옮길 때 다시 그린다.
+
+let activeDir = null
+const chatLogs = new Map() // dir -> [{ kind, who, text }]
+
+function logFor(dir) {
+  if (!dir) return []
+  if (!chatLogs.has(dir)) chatLogs.set(dir, [])
+  return chatLogs.get(dir)
+}
+
+/** 경로에서 폴더 이름만. 탭이 좁아서 전체 경로는 title로 넘긴다. */
+function baseName(dir) {
+  const parts = String(dir).replace(/[\\/]+$/, '').split(/[\\/]/)
+  return parts[parts.length - 1] || dir
+}
 
 function resize() {
   const wrap = document.getElementById('left')
@@ -448,7 +474,25 @@ function applyEvent(ev) {
 
 // ---------- 채팅 ----------
 
+/**
+ * 대화 한 줄을 **기록하고** 화면에 붙인다.
+ * 기록해 두는 이유는 탭을 옮겼다 돌아왔을 때 대화가 사라지지 않게 하기 위해서다.
+ */
 function addMsg(kind, who, text) {
+  const log = logFor(activeDir)
+  log.push({ kind, who, text })
+  while (log.length > 200) log.shift()
+  renderMsg(kind, who, text)
+}
+
+/** 탭을 옮겼을 때 그 프로젝트의 대화를 되살린다. */
+function redrawChat(dir) {
+  messagesEl.replaceChildren()
+  for (const m of logFor(dir)) renderMsg(m.kind, m.who, m.text)
+  messagesEl.scrollTop = messagesEl.scrollHeight
+}
+
+function renderMsg(kind, who, text) {
   const el = document.createElement('div')
   el.className = `msg ${kind}`
   if (kind === 'sys') {
@@ -549,7 +593,9 @@ async function send() {
 
   sendBtn.disabled = true
   hintEl.textContent = '보내는 중…'
+  // 지시는 **지금 보고 있는 프로젝트**로 간다. 다른 탭의 회사는 자기 대기열만 본다.
   const res = await window.teamView.sendCommand({
+    dir: activeDir,
     agent: to,
     text,
     broadcast: target === 'all',
@@ -1075,36 +1121,125 @@ canvas.addEventListener('click', (e) => {
 
 // ---------- 배선 ----------
 
-window.teamView.onEvents((events) => events.forEach(applyEvent))
-window.teamView.onReset(() => {
+// 이벤트에는 어느 프로젝트 것인지가 실려 온다. 보고 있는 사무실 것만 그린다 —
+// 메인도 비활성 프로젝트는 아예 파싱하지 않으므로 여기까지 오지도 않지만,
+// 탭을 막 옮긴 순간의 이전 프로젝트 이벤트가 뒤늦게 닿을 수 있어 한 번 더 거른다.
+window.teamView.onEvents(({ dir, events }) => {
+  if (dir !== activeDir) return
+  events.forEach(applyEvent)
+})
+
+/**
+ * 사무실을 비운다. 탭을 옮겼을 때와 로그가 잘렸을 때 온다.
+ *
+ * 시뮬레이션 상태(팀원·대기 배지·이름표)는 지우지만 **채팅은 지우지 않는다** —
+ * 그 프로젝트에서 오간 대화를 다시 그려 준다. 탭을 옮길 때마다 대화가 사라지면
+ * 무엇을 시켰는지 알 수 없다.
+ */
+window.teamView.onReset(({ dir } = {}) => {
+  if (dir) activeDir = dir
   queuedFor.length = 0
   agents = buildAgents()
   refreshObstacles()
   nodes.clear()
   overlay.replaceChildren()
-  messagesEl.replaceChildren()
+  lastChatAt.clear()
+  target = 'all'
+  renderTargets()
+  redrawChat(activeDir)
 })
-window.teamView.onStatus(({ projectDir, exists, company }) => {
-  projectEl.textContent = projectDir ?? '(선택 안 됨)'
+
+window.teamView.onStatus(({ projects, activeDir: active, max }) => {
+  activeDir = active
+  renderTabs(projects, active, max)
+
+  const me = projects.find((p) => p.dir === active)
   // 회사가 닫혀 있거나 남이 쥐고 있으면 보낸 지시를 **아무도 집어가지 않는다.**
   // 그런데 화면상으로는 그냥 조용한 것과 똑같아서, 지시가 안 먹히는 걸 세 시간
   // 동안 못 알아챘다. 그래서 상태줄에 드러낸다.
-  const shut = company === 'closed' || company === 'foreign'
-  statusEl.textContent = !projectDir
-    ? '프로젝트를 선택하세요'
-    : !exists
+  const shut = me && (me.company === 'closed' || me.company === 'foreign')
+  statusEl.textContent = !me
+    ? '프로젝트를 추가하세요'
+    : !me.exists
       ? '훅 설치 대기 중 — .claude/team-events.jsonl 없음'
-      : company === 'foreign'
+      : me.company === 'foreign'
         ? '다른 창이 이 프로젝트를 맡고 있습니다'
-        : company === 'closed'
+        : me.company === 'closed'
           ? '회사가 닫혀 있습니다 — 보낸 지시가 처리되지 않습니다'
-          : company === 'busy'
+          : me.company === 'busy'
             ? '회사 운영 중 — 지시 처리 중'
             : '회사 운영 중 — 대기'
-  statusEl.className = !projectDir || !exists || shut ? 'warn' : 'ok'
+  statusEl.className = !me || !me.exists || shut ? 'warn' : 'ok'
 })
 
-pickBtn.addEventListener('click', () => window.teamView.pickProject())
+// ---------- 프로젝트 탭 ----------
+//
+// 탭은 '보기 전환'인 동시에 **다른 회사가 지금 일하는지 알려주는 계기판**이다.
+// 사무실이 하나만 보이므로, 배지가 없으면 나머지 둘이 도는지 멈췄는지 알 수 없다.
+
+function renderTabs(projects, active, max) {
+  tabsEl.replaceChildren()
+  for (const p of projects) {
+    const tab = document.createElement('div')
+    tab.className = `tab${p.dir === active ? ' sel' : ''}`
+    tab.title = p.dir
+
+    const nm = document.createElement('span')
+    nm.className = 'nm'
+    nm.textContent = baseName(p.dir)
+
+    const st = document.createElement('span')
+    const shut = p.company === 'closed' || p.company === 'foreign'
+    if (shut) {
+      st.className = 'st shut'
+      st.textContent = p.company === 'foreign' ? '점유됨' : '닫힘'
+    } else if (p.company === 'busy') {
+      st.className = 'st busy'
+      st.textContent = p.queued ? `처리 중 +${p.queued}` : '처리 중'
+    } else if (p.queued) {
+      st.className = 'st queued'
+      st.textContent = `대기 ${p.queued}건`
+    } else {
+      st.className = 'st'
+      st.textContent = '대기'
+    }
+
+    const x = document.createElement('button')
+    x.className = 'x'
+    x.type = 'button'
+    x.title = '이 프로젝트를 뗍니다 (진행 중인 작업은 중단됩니다)'
+    x.textContent = '×'
+    x.addEventListener('click', async (e) => {
+      e.stopPropagation() // 떼려다 탭이 선택되면 곤란하다
+      // 진행 중인 작업이 죽는 동작이라 한 번 물어본다. 되돌릴 방법이 없다.
+      if (p.company === 'busy' && !confirm(`${baseName(p.dir)}에서 작업이 돌고 있습니다. 떼면 중단됩니다. 계속할까요?`)) return
+      chatLogs.delete(p.dir)
+      await window.teamView.removeProject(p.dir)
+    })
+
+    tab.append(nm, st, x)
+    tab.addEventListener('click', () => {
+      if (p.dir === activeDir) return
+      window.teamView.activateProject(p.dir)
+    })
+    tabsEl.append(tab)
+  }
+  addBtn.disabled = projects.length >= max
+  addBtn.title = addBtn.disabled
+    ? `동시에 붙일 수 있는 프로젝트는 ${max}개까지입니다`
+    : `프로젝트를 하나 더 붙입니다 (최대 ${max}개)`
+}
+
+addBtn.addEventListener('click', async () => {
+  const res = await window.teamView.addProject()
+  if (!res?.ok) {
+    if (!res?.canceled && res?.error) hintEl.textContent = res.error
+    return
+  }
+  if (!res.hooked) {
+    hintEl.textContent = `${baseName(res.dir)}에 .claude 폴더가 없습니다 — 훅을 설치해야 회사가 열립니다`
+  }
+})
 
 // ---------- 작업 취소 ----------
 //
@@ -1114,7 +1249,8 @@ pickBtn.addEventListener('click', () => window.teamView.pickProject())
 document.getElementById('chat-cancel').addEventListener('click', async (e) => {
   const btn = e.currentTarget
   btn.disabled = true
-  const res = await window.teamView.cancelAll()
+  // **이 프로젝트만** 취소한다. 다른 탭에서 돌고 있는 작업은 건드리지 않는다.
+  const res = await window.teamView.cancelAll(activeDir)
   btn.disabled = false
   if (!res?.ok) {
     hintEl.textContent = `취소 실패: ${res?.error ?? '알 수 없는 오류'}`

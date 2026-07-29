@@ -1,7 +1,13 @@
 // Electron 메인 프로세스.
-// 하는 일은 세 가지다: (1) 창 띄우기, (2) 감시 대상 프로젝트의
+// 하는 일은 세 가지다: (1) 창 띄우기, (2) 감시 대상 프로젝트들의
 // `.claude/team-events.jsonl`을 tail 해서 새 줄을 렌더러로 보내기,
 // (3) **회사를 운영하기** — 앱에서 보낸 지시를 앱이 직접 받아 실행한다.
+//
+// 프로젝트는 **최대 3개까지 동시에** 붙일 수 있다. 각 프로젝트가 자기 회사를
+// 갖고 독립적으로 일한다. 서로 간섭하지 않는 이유는 규약이 전부 프로젝트 폴더
+// 안에 있기 때문이다 — 클레임·대기열·이벤트가 모두 `<프로젝트>/.claude/` 아래다.
+// 화면(사무실)은 한 번에 하나만 보여 준다. 셋을 나란히 그리면 배율이 1/3로
+// 떨어져 도트가 뭉개지고, 통행 격자(layout.js)도 사무실마다 따로 들어야 한다.
 //
 // 파일 감시는 fs.watch가 아니라 **폴링**이다. Windows에서 fs.watch는 "덧붙이기"를
 // 놓치거나 중복 이벤트를 주는 일이 잦고, 우리가 읽는 건 append-only 로그라
@@ -23,9 +29,16 @@ const WORKER_NAME = 'team-worker.json'
 const CANCEL_NAME = 'team-cancel.flag'
 const COMMANDS_NAME = 'team-commands.jsonl'
 
+// 동시에 붙일 수 있는 프로젝트 수. 늘리기 전에 생각할 것: 회사 하나가 claude를
+// 하나씩 띄우므로 N개면 claude가 N개 동시에 돈다(토큰도 N배).
+const MAX_PROJECTS = 3
+
 let win = null
-let watch = null // { file, offset, timer, tail, exists, company, workerAt }
-let company = null // { projectDir, claimTimer, queueTimer, child, hasSession }
+const watches = new Map() // dir -> { file, offset, tail, exists, replay }
+const companies = new Map() // dir -> { dir, claimTimer, queueTimer, child, hasSession }
+let activeDir = null // 화면에 사무실을 그리고 있는 프로젝트
+let pumpTimer = null // 모든 감시를 한 타이머로 돌린다(프로젝트마다 두지 않는다)
+let lastStatusJson = '' // 상태가 바뀔 때만 렌더러로 보내기 위한 직전 값
 
 function configPath() {
   return path.join(app.getPath('userData'), CONFIG_NAME)
@@ -48,6 +61,28 @@ function saveConfig(cfg) {
   }
 }
 
+/**
+ * 감시 목록.
+ *
+ * 예전 설정은 `projectDir` 하나였다. 그대로 두면 앱을 업데이트한 사람의 목록이
+ * 빈 채로 뜨므로 읽을 때 옮겨 준다(쓸 때 `projectDir`은 지운다).
+ */
+function loadProjects() {
+  const cfg = loadConfig()
+  const list = Array.isArray(cfg.projects)
+    ? cfg.projects
+    : cfg.projectDir
+      ? [cfg.projectDir]
+      : []
+  return list.filter((d) => typeof d === 'string' && d).slice(0, MAX_PROJECTS)
+}
+
+function saveProjects(list) {
+  const cfg = loadConfig()
+  delete cfg.projectDir // 예전 키를 남겨 두면 다음에 또 마이그레이션된다
+  saveConfig({ ...cfg, projects: list, activeDir })
+}
+
 function send(channel, payload) {
   if (win && !win.isDestroyed()) win.webContents.send(channel, payload)
 }
@@ -59,7 +94,7 @@ function eventsFileFor(projectDir) {
 /**
  * 회사가 문을 열었는가 — 즉 앱에서 보낸 지시를 받아 줄 주체가 있는가.
  *
- *   'open'    — 이 앱이 대기열을 맡고 있다. 보낸 지시는 회사가 처리한다.
+ *   'open'    — 이 앱이 그 프로젝트의 대기열을 맡고 있다.
  *   'busy'    — 회사가 열려 있고, 지금 지시 하나를 실행하는 중이다.
  *   'foreign' — 다른 주체(다른 앱 창·예전 방식의 워커 세션)가 클레임을 쥐고 있다.
  *   'closed'  — 아무도 안 맡고 있다. **보낸 지시가 처리되지 않는다.**
@@ -67,106 +102,147 @@ function eventsFileFor(projectDir) {
  * 'closed'를 화면에 드러내는 것이 이 함수의 존재 이유다. 회사가 닫힌 것과 그냥
  * 조용한 것은 화면에서 구분되지 않아, 지시가 안 먹히는 걸 세 시간 동안 못 알아챘다.
  */
-function companyState(projectDir) {
+function companyState(dir) {
   // 우리가 맡고 있으면 파일을 볼 필요가 없다 — 우리가 진실이다.
-  if (company && company.projectDir === projectDir) return company.child ? 'busy' : 'open'
+  const c = companies.get(dir)
+  if (c) return c.child ? 'busy' : 'open'
   let at = 0
   try {
-    at = Number(JSON.parse(fs.readFileSync(claimPath(projectDir), 'utf8')).at) || 0
+    at = Number(JSON.parse(fs.readFileSync(claimPath(dir), 'utf8')).at) || 0
   } catch {
     return 'closed' // 없거나 읽을 수 없는 클레임은 믿지 않는다
   }
   return Date.now() / 1000 - at > WORKER_TTL_S ? 'closed' : 'foreign'
 }
 
-/** 상태줄에 필요한 것이 바뀌었을 때만 렌더러로 보낸다(300ms마다 도배하지 않게). */
-function pumpStatus(projectDir, { force = false } = {}) {
-  if (!watch) return
-  const now = Date.now()
-  if (!force && now - (watch.workerAt ?? 0) < WORKER_POLL_MS) return
-  watch.workerAt = now
-  const state = companyState(projectDir)
-  const exists = fs.existsSync(watch.file)
-  if (!force && state === watch.company && exists === watch.exists) return
-  watch.company = state
-  watch.exists = exists
-  send('watch:status', { projectDir, file: watch.file, exists, company: state })
+/** 아직 아무도 안 집어간 지시 수. 탭 배지에 "대기 N건"으로 뜬다. */
+function pendingCount(dir) {
+  try {
+    return fs
+      .readFileSync(path.join(dir, '.claude', COMMANDS_NAME), 'utf8')
+      .split(/\r?\n/)
+      .filter((l) => l.trim()).length
+  } catch {
+    return 0
+  }
 }
 
-function stopWatching() {
-  if (watch?.timer) clearInterval(watch.timer)
-  watch = null
+let lastStatusAt = 0
+
+/**
+ * 프로젝트 전체의 상태를 렌더러로. **바뀌었을 때만** 보낸다(300ms마다 도배하지 않게).
+ *
+ * 보이지 않는 프로젝트도 여기 담긴다 — 탭 배지가 "저쪽이 지금 일하는 중"을
+ * 보여줘야 하기 때문이다. 그게 없으면 다른 탭이 멈춘 건지 도는 건지 알 수 없다.
+ */
+function pumpStatusAll({ force = false } = {}) {
+  const now = Date.now()
+  if (!force && now - lastStatusAt < WORKER_POLL_MS) return
+  lastStatusAt = now
+  const projects = loadProjects().map((dir) => ({
+    dir,
+    exists: watches.get(dir)?.exists ?? false,
+    company: companyState(dir),
+    queued: pendingCount(dir),
+  }))
+  const payload = { projects, activeDir, max: MAX_PROJECTS }
+  const json = JSON.stringify(payload)
+  if (!force && json === lastStatusJson) return
+  lastStatusJson = json
+  send('projects:status', payload)
+}
+
+/** 감시 타이머는 **하나뿐**이다. 프로젝트마다 두면 3배로 깨어난다. */
+function ensurePump() {
+  if (pumpTimer) return
+  pumpTimer = setInterval(() => {
+    for (const dir of [...watches.keys()]) pump(dir)
+    pumpStatusAll()
+  }, POLL_MS)
+}
+
+function stopWatching(dir) {
+  watches.delete(dir)
+  if (!watches.size && pumpTimer) {
+    clearInterval(pumpTimer)
+    pumpTimer = null
+  }
 }
 
 /**
  * 프로젝트 폴더를 감시한다. 파일이 아직 없어도 실패가 아니다 —
  * 훅이 첫 이벤트를 쓰는 순간부터 따라간다.
  */
-function startWatching(projectDir, { replay = true } = {}) {
-  stopWatching()
-  if (!projectDir) return
-
-  // 감시를 시작한다는 건 이 프로젝트의 회사가 문을 연다는 뜻이다.
-  // 앱이 보고 있는 프로젝트와 지시를 처리하는 프로젝트가 갈라지면 안 된다.
-  openCompany(projectDir)
-
-  const file = eventsFileFor(projectDir)
-  watch = { file, offset: 0, tail: '', timer: null }
-
+function startWatching(dir, { replay = true } = {}) {
+  if (!dir) return
+  const file = eventsFileFor(dir)
+  let offset = 0
   // 앱을 나중에 켰어도 최근 활동은 보여준다. 처음부터 읽되, 렌더러가
   // "지난 것"으로 취급하도록 replay 플래그를 붙인다.
   if (!replay) {
     try {
-      watch.offset = fs.statSync(file).size
+      offset = fs.statSync(file).size
     } catch {
       /* 파일이 없으면 0에서 시작 */
     }
   }
-
-  pumpStatus(projectDir, { force: true })
-
-  watch.timer = setInterval(() => {
-    pump(replay)
-    pumpStatus(projectDir)
-  }, POLL_MS)
-  pump(replay)
-  replay = false
+  watches.set(dir, { file, offset, tail: '', exists: false, replay })
+  ensurePump()
 }
 
-function pump(isReplay) {
-  if (!watch) return
+/**
+ * 새 줄을 읽어 렌더러로 넘긴다.
+ *
+ * **활성 프로젝트가 아니면 파싱하지 않고 오프셋만 넘긴다.** 배지에 필요한 것은
+ * 회사 상태와 대기 건수뿐이고 그 둘은 파일에서 직접 읽는다. 보이지도 않는
+ * 사무실의 시뮬레이션을 셋씩 돌릴 이유가 없다 — 탭을 옮기면 그 프로젝트를
+ * 처음부터 다시 읽어(activate) 현재 모습을 복원한다.
+ */
+function pump(dir) {
+  const w = watches.get(dir)
+  if (!w) return
   let size
   try {
-    size = fs.statSync(watch.file).size
+    size = fs.statSync(w.file).size
   } catch {
+    w.exists = false
     return // 아직 파일 없음 — 조용히 기다린다
   }
+  w.exists = true
 
-  if (size < watch.offset) {
+  if (size < w.offset) {
     // 파일이 잘렸다(새 세션이 로그를 비웠거나 회전). 처음부터 다시 읽는다.
-    watch.offset = 0
-    watch.tail = ''
-    send('events:reset', null)
+    w.offset = 0
+    w.tail = ''
+    if (dir === activeDir) send('events:reset', { dir })
   }
-  if (size === watch.offset) return
+  if (size === w.offset) return
 
   let chunk = ''
   try {
-    const fd = fs.openSync(watch.file, 'r')
-    const len = size - watch.offset
+    const fd = fs.openSync(w.file, 'r')
+    const len = size - w.offset
     const buf = Buffer.alloc(len)
-    fs.readSync(fd, buf, 0, len, watch.offset)
+    fs.readSync(fd, buf, 0, len, w.offset)
     fs.closeSync(fd)
     chunk = buf.toString('utf8')
-    watch.offset = size
-  } catch (e) {
+    w.offset = size
+  } catch {
     return
   }
 
+  if (dir !== activeDir) {
+    w.tail = ''
+    return // 안 보이는 사무실 — 오프셋만 따라간다
+  }
+
+  const isReplay = w.replay
+  w.replay = false
+
   // 훅이 줄을 쓰는 도중에 읽었을 수 있다. 마지막 조각은 다음 턴으로 넘긴다.
-  const text = watch.tail + chunk
+  const text = w.tail + chunk
   const lines = text.split('\n')
-  watch.tail = lines.pop() ?? ''
+  w.tail = lines.pop() ?? ''
 
   const events = []
   for (const line of lines) {
@@ -180,7 +256,27 @@ function pump(isReplay) {
       // 깨진 줄 하나 때문에 멈추지 않는다
     }
   }
-  if (events.length) send('events:new', events)
+  if (events.length) send('events:new', { dir, events })
+}
+
+/**
+ * 화면에 그릴 프로젝트를 바꾼다.
+ *
+ * 비활성 프로젝트는 이벤트를 파싱하지 않으므로(위 pump), 전환하면 그 사무실을
+ * **처음부터 다시 읽어** 지금 모습을 복원한다. 렌더러는 events:reset을 받고
+ * 상태를 비운 뒤 흘러오는 replay를 다시 적용한다.
+ */
+function activate(dir) {
+  if (!dir || !watches.has(dir)) return
+  activeDir = dir
+  saveProjects(loadProjects())
+  send('events:reset', { dir })
+  const w = watches.get(dir)
+  w.offset = 0
+  w.tail = ''
+  w.replay = true
+  pump(dir)
+  pumpStatusAll({ force: true })
 }
 
 /**
@@ -253,10 +349,17 @@ function createWindow() {
 app.whenReady().then(() => {
   createWindow()
 
-  const cfg = loadConfig()
   win.webContents.once('did-finish-load', () => {
-    if (cfg.projectDir) startWatching(cfg.projectDir)
-    else send('watch:status', { projectDir: null, file: null, exists: false })
+    const projects = loadProjects()
+    const saved = loadConfig().activeDir
+    activeDir = projects.includes(saved) ? saved : (projects[0] ?? null)
+    // **보이지 않아도 회사는 연다.** 탭에 없는 프로젝트가 일을 멈추면 "동시에
+    // 세 개"가 성립하지 않는다. 화면만 하나일 뿐이다.
+    for (const dir of projects) {
+      openCompany(dir)
+      startWatching(dir, { replay: dir === activeDir })
+    }
+    pumpStatusAll({ force: true })
   })
 
   app.on('activate', () => {
@@ -265,28 +368,62 @@ app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', () => {
-  stopWatching()
-  closeCompany() // 창을 닫으면 회사도 문을 닫는다
+  for (const dir of [...watches.keys()]) stopWatching(dir)
+  closeAllCompanies() // 창을 닫으면 회사도 문을 닫는다
   if (process.platform !== 'darwin') app.quit()
 })
 
 // 종료 경로가 여럿이라 여기서도 정리한다. 클레임을 남긴 채 죽으면 그 프로젝트는
 // TTL(10분)이 지날 때까지 "다른 회사가 맡고 있음"으로 보여 지시가 멈춘다.
-app.on('before-quit', closeCompany)
+app.on('before-quit', closeAllCompanies)
 
-ipcMain.handle('project:pick', async () => {
+/** 프로젝트를 하나 더 붙인다. 상한(3개)에 걸리면 거절하고 이유를 돌려준다. */
+ipcMain.handle('project:add', async () => {
+  const projects = loadProjects()
+  if (projects.length >= MAX_PROJECTS) {
+    return { ok: false, error: `동시에 붙일 수 있는 프로젝트는 ${MAX_PROJECTS}개까지입니다` }
+  }
   const res = await dialog.showOpenDialog(win, {
-    title: '감시할 프로젝트 폴더 선택',
+    title: '추가할 프로젝트 폴더 선택',
     properties: ['openDirectory'],
   })
-  if (res.canceled || !res.filePaths[0]) return null
-  const projectDir = res.filePaths[0]
-  saveConfig({ ...loadConfig(), projectDir })
-  startWatching(projectDir)
-  return projectDir
+  if (res.canceled || !res.filePaths[0]) return { ok: false, canceled: true }
+  const dir = res.filePaths[0]
+  if (projects.includes(dir)) return { ok: false, error: '이미 붙어 있는 프로젝트입니다' }
+
+  const next = [...projects, dir]
+  activeDir = dir // 방금 고른 것을 바로 보여 준다
+  saveProjects(next)
+  openCompany(dir)
+  startWatching(dir, { replay: true })
+  send('events:reset', { dir })
+  pumpStatusAll({ force: true })
+  return { ok: true, dir, hooked: fs.existsSync(path.join(dir, '.claude')) }
 })
 
-ipcMain.handle('project:current', () => loadConfig().projectDir ?? null)
+/** 프로젝트를 뗀다. 그 회사는 문을 닫고 진행 중이던 일도 멈춘다. */
+ipcMain.handle('project:remove', (_e, dir) => {
+  const next = loadProjects().filter((d) => d !== dir)
+  closeCompany(dir)
+  stopWatching(dir)
+  if (activeDir === dir) activeDir = next[0] ?? null
+  saveProjects(next)
+  if (activeDir) activate(activeDir)
+  else send('events:reset', { dir: null })
+  pumpStatusAll({ force: true })
+  return { ok: true, activeDir }
+})
+
+/** 화면에 보여 줄 프로젝트를 바꾼다(나머지는 계속 일한다). */
+ipcMain.handle('project:activate', (_e, dir) => {
+  activate(dir)
+  return { ok: true, activeDir }
+})
+
+ipcMain.handle('project:list', () => {
+  pumpStatusAll({ force: true })
+  return { projects: loadProjects(), activeDir, max: MAX_PROJECTS }
+})
 
 // 클립보드는 **메인 프로세스**에서 쓴다. 샌드박스가 켜진 preload에서는 electron의
 // clipboard 모듈을 못 불러온다(undefined라 호출 즉시 예외가 났다).
@@ -312,8 +449,9 @@ ipcMain.handle('clipboard:write', (_e, text) => {
 // 이제 클레임을 **앱이** 적는다. 앱은 대화를 하지 않으니 조용해질 일이 없다.
 // ---------------------------------------------------------------------------
 
-// 회사가 띄운 claude 프로세스들. 취소하거나 문을 닫을 때 이걸 정리한다.
-const spawned = new Set()
+// 회사는 프로젝트마다 하나씩이다(companies Map). 진행 중인 claude는 회사가
+// 자기 `child`로 들고 있다 — 예전에는 전역 Set 하나에 모아 뒀는데, 회사가
+// 여럿이면 **A에서 누른 취소가 B·C가 돌리던 작업까지 죽인다.**
 
 function claimPath(projectDir) {
   return path.join(projectDir, '.claude', WORKER_NAME)
@@ -353,27 +491,25 @@ function clearClaim(projectDir) {
 }
 
 /**
- * 회사가 띄운 claude를 모두 죽인다.
+ * 이 회사가 돌리던 claude를 죽인다. **다른 회사 것은 건드리지 않는다.**
  *
  * Windows에서는 `shell: true`로 띄운 자식이 **cmd 래퍼**라 그 pid만 죽이면 정작
  * claude는 살아남는다. taskkill로 트리째 정리한다.
  */
-function killSpawned() {
-  let killed = 0
-  for (const child of spawned) {
-    try {
-      if (process.platform === 'win32') {
-        spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' })
-      } else {
-        process.kill(child.pid)
-      }
-      killed++
-    } catch {
-      /* 이미 끝난 프로세스 */
+function killChild(c) {
+  const child = c?.child
+  if (!child) return 0
+  try {
+    if (process.platform === 'win32') {
+      spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' })
+    } else {
+      process.kill(child.pid)
     }
-    spawned.delete(child)
+  } catch {
+    return 0 // 이미 끝난 프로세스
   }
-  return killed
+  c.child = null
+  return 1
 }
 
 /**
@@ -449,82 +585,90 @@ function promptFor(cmd) {
  * `TEAMVIEW_POLLER`는 훅이 "이 세션은 회사가 띄운 것"이라고 알아보는 표식이다.
  * 이게 있어야 그 세션의 활동이 화면에 기록되고, 취소 깃발을 훅이 함부로 내리지 않는다.
  */
-function runCommand(cmd) {
-  const projectDir = company.projectDir
+function runCommand(c, cmd) {
+  const dir = c.dir
   const args = ['-p']
-  if (company.hasSession) args.push('--continue')
+  if (c.hasSession) args.push('--continue')
   args.push(promptFor(cmd))
 
   let child
   try {
     child = spawn('claude', args, {
-      cwd: projectDir,
+      cwd: dir,
       shell: true, // Windows에서 claude는 .cmd 래퍼다
       stdio: 'ignore',
       env: { ...process.env, TEAMVIEW_POLLER: String(process.pid) },
     })
   } catch (err) {
-    logRenderer(`회사 실행 실패: ${err.message}`)
+    logRenderer(`회사 실행 실패(${dir}): ${err.message}`)
     return
   }
 
-  company.child = child
-  spawned.add(child)
-  pumpStatus(projectDir, { force: true })
+  c.child = child
+  pumpStatusAll({ force: true })
 
-  child.on('error', (err) => logRenderer(`claude 실행 실패: ${err.message}`))
+  child.on('error', (err) => logRenderer(`claude 실행 실패(${dir}): ${err.message}`))
   child.on('exit', (code) => {
-    spawned.delete(child)
-    if (company && company.child === child) {
-      company.child = null
+    if (c.child === child) {
+      c.child = null
       // 성공했을 때만 다음부터 이어받는다. 실패한 실행을 이어받으면 그 오류 상태가
       // 계속 따라다닌다.
-      if (code === 0) company.hasSession = true
+      if (code === 0) c.hasSession = true
     }
     // 훅은 회사가 띄운 세션에서 취소 깃발을 **지우지 않는다**(지우면 곧바로 다음
     // 지시를 집어가 "취소했는데 계속 일한다"가 된다). 실행이 끝난 지금 회사가 내린다.
     try {
-      fs.unlinkSync(path.join(projectDir, '.claude', CANCEL_NAME))
+      fs.unlinkSync(path.join(dir, '.claude', CANCEL_NAME))
     } catch {
       /* 없으면 그만 */
     }
-    pumpStatus(projectDir, { force: true })
+    pumpStatusAll({ force: true })
   })
 }
 
-/** 대기열을 한 번 들여다본다. 회사는 **한 번에 한 건만** 처리한다. */
-function pumpQueue() {
-  if (!company || company.child) return
-  const claudeDir = path.join(company.projectDir, '.claude')
+/** 그 회사의 대기열을 한 번 들여다본다. 회사는 **한 번에 한 건만** 처리한다. */
+function pumpQueue(c) {
+  if (!c || c.child) return
+  const claudeDir = path.join(c.dir, '.claude')
   // 취소 직후에는 새 지시를 시작하지 않는다. 깃발은 실행이 끝나며 내려간다.
   if (fs.existsSync(path.join(claudeDir, CANCEL_NAME))) return
   const cmd = takeOneCommand(claudeDir)
-  if (cmd) runCommand(cmd)
+  if (cmd) runCommand(c, cmd)
 }
 
-/** 회사 문을 연다. 이미 열려 있으면 닫고 새로 연다(감시 프로젝트가 바뀐 경우). */
-function openCompany(projectDir) {
-  closeCompany()
-  if (!projectDir) return
+/**
+ * 그 프로젝트의 회사 문을 연다. 이미 열려 있으면 그대로 둔다.
+ *
+ * 회사들은 서로를 모른다 — 클레임·대기열·이벤트가 전부 자기 프로젝트 폴더 안에
+ * 있어서 간섭할 통로가 없다.
+ */
+function openCompany(dir) {
+  if (!dir || companies.has(dir)) return
   // 훅이 없는 폴더에서는 회사를 열 수 없다 — 지시를 적어도 아무도 읽지 못한다.
-  if (!fs.existsSync(path.join(projectDir, '.claude'))) return
-  company = { projectDir, claimTimer: null, queueTimer: null, child: null, hasSession: false }
-  writeClaim(projectDir)
-  company.claimTimer = setInterval(() => writeClaim(projectDir), CLAIM_REFRESH_MS)
-  company.queueTimer = setInterval(pumpQueue, QUEUE_POLL_MS)
+  if (!fs.existsSync(path.join(dir, '.claude'))) return
+  const c = { dir, claimTimer: null, queueTimer: null, child: null, hasSession: false }
+  companies.set(dir, c)
+  writeClaim(dir)
+  c.claimTimer = setInterval(() => writeClaim(dir), CLAIM_REFRESH_MS)
+  c.queueTimer = setInterval(() => pumpQueue(c), QUEUE_POLL_MS)
 }
 
 /**
  * 회사 문을 닫는다. **실행 중이던 일도 멈춘다.**
  * 앱을 껐는데 백그라운드에서 파일이 계속 고쳐지고 있으면 놀랄 일이다.
  */
-function closeCompany() {
-  if (!company) return
-  clearInterval(company.claimTimer)
-  clearInterval(company.queueTimer)
-  killSpawned()
-  clearClaim(company.projectDir)
-  company = null
+function closeCompany(dir) {
+  const c = companies.get(dir)
+  if (!c) return
+  clearInterval(c.claimTimer)
+  clearInterval(c.queueTimer)
+  killChild(c)
+  clearClaim(c.dir)
+  companies.delete(dir)
+}
+
+function closeAllCompanies() {
+  for (const dir of [...companies.keys()]) closeCompany(dir)
 }
 
 /**
@@ -538,42 +682,41 @@ function closeCompany() {
  * 깃발에 시각을 적어 두고, 훅은 오래된 깃발을 무시한다(눌러 놓고 잊은 취소가
  * 다음 작업을 잡아먹지 않도록).
  */
-ipcMain.handle('command:cancel', () => {
-  const projectDir = loadConfig().projectDir
+ipcMain.handle('command:cancel', (_e, dir) => {
+  const projectDir = dir || activeDir
+  // **그 프로젝트만** 취소한다. 예전에는 앱이 띄운 프로세스를 전역 Set 하나에
+  // 모아 뒀는데, 회사가 여럿이면 A에서 누른 취소가 B·C까지 죽였다.
+  if (!projectDir) return { ok: false, error: '프로젝트가 선택되지 않았습니다' }
   let queued = 0
   let flagged = false
-  if (projectDir) {
-    const claudeDir = path.join(projectDir, '.claude')
-    const qf = path.join(claudeDir, 'team-commands.jsonl')
-    try {
-      if (fs.existsSync(qf)) {
-        queued = fs.readFileSync(qf, 'utf8').split(/\r?\n/).filter((l) => l.trim()).length
-        fs.unlinkSync(qf)
-      }
-    } catch {
-      /* 이미 없으면 그만 */
+  const claudeDir = path.join(projectDir, '.claude')
+  const qf = path.join(claudeDir, COMMANDS_NAME)
+  try {
+    if (fs.existsSync(qf)) {
+      queued = fs.readFileSync(qf, 'utf8').split(/\r?\n/).filter((l) => l.trim()).length
+      fs.unlinkSync(qf)
     }
-    try {
-      fs.writeFileSync(path.join(claudeDir, 'team-cancel.flag'), String(Date.now() / 1000), 'utf8')
-      flagged = true
-    } catch {
-      /* 훅이 없는 프로젝트면 깃발도 의미가 없다 */
-    }
+  } catch {
+    /* 이미 없으면 그만 */
   }
-  const killed = killSpawned()
-  if (company) company.child = null // 죽인 자식의 exit을 기다리지 않고 곧바로 비운다
-  if (projectDir) {
-    try {
-      appendJsonl(eventsFileFor(projectDir), {
-        ts: Date.now() / 1000,
-        type: 'cancel',
-        agent: 'lead',
-        detail: `취소 — 대기 ${queued}건${killed ? ` · 실행 ${killed}건 중단` : ''}`,
-      })
-    } catch {
-      /* 기록 실패가 취소를 막지는 않는다 */
-    }
+  try {
+    fs.writeFileSync(path.join(claudeDir, CANCEL_NAME), String(Date.now() / 1000), 'utf8')
+    flagged = true
+  } catch {
+    /* 훅이 없는 프로젝트면 깃발도 의미가 없다 */
   }
+  const killed = killChild(companies.get(projectDir))
+  try {
+    appendJsonl(eventsFileFor(projectDir), {
+      ts: Date.now() / 1000,
+      type: 'cancel',
+      agent: 'lead',
+      detail: `취소 — 대기 ${queued}건${killed ? ` · 실행 ${killed}건 중단` : ''}`,
+    })
+  } catch {
+    /* 기록 실패가 취소를 막지는 않는다 */
+  }
+  pumpStatusAll({ force: true })
   return { ok: true, queued, killed, flagged }
 })
 
@@ -591,8 +734,8 @@ function appendJsonl(file, obj) {
   fs.appendFileSync(file, JSON.stringify(obj) + '\n', 'utf8')
 }
 
-ipcMain.handle('command:send', async (_e, { agent, text, broadcast }) => {
-  const projectDir = loadConfig().projectDir
+ipcMain.handle('command:send', async (_e, { dir, agent, text, broadcast }) => {
+  const projectDir = dir || activeDir
   if (!projectDir) return { ok: false, error: '프로젝트가 선택되지 않았습니다' }
   const body = String(text ?? '').trim()
   if (!body) return { ok: false, error: '내용이 비어 있습니다' }
@@ -604,7 +747,7 @@ ipcMain.handle('command:send', async (_e, { agent, text, broadcast }) => {
 
   const ts = Date.now() / 1000
   try {
-    appendJsonl(path.join(claudeDir, 'team-commands.jsonl'), {
+    appendJsonl(path.join(claudeDir, COMMANDS_NAME), {
       ts,
       // 전체 지시는 리드가 받아 알아서 팀에 나눈다(특정 서브에이전트를 지정하지 않는다)
       agent: broadcast ? 'lead' : agent,
@@ -623,8 +766,10 @@ ipcMain.handle('command:send', async (_e, { agent, text, broadcast }) => {
   }
 
   // 1초 폴을 기다리지 않고 곧바로 들여다본다. 보내자마자 팀이 움직여야 한다.
-  const open = Boolean(company && company.projectDir === projectDir)
-  if (open) pumpQueue()
+  const c = companies.get(projectDir)
+  const busy = Boolean(c && c.child)
+  if (c) pumpQueue(c)
+  pumpStatusAll({ force: true })
   // 회사가 닫혀 있으면 지시는 파일에 남지만 아무도 집어가지 않는다. 숨기지 않는다.
-  return { ok: true, companyOpen: open, busy: Boolean(company && company.child) }
+  return { ok: true, dir: projectDir, companyOpen: Boolean(c), busy }
 })

@@ -12,8 +12,10 @@
   </head>
   <body>
     <div id="bar">
-      <button id="pick">프로젝트 선택</button>
-      <span id="project">(선택 안 됨)</span>
+      <!-- 프로젝트 탭. 사무실은 한 번에 하나만 보여 주지만 **나머지도 계속 일한다** —
+           그래서 탭마다 상태 배지(처리 중 / 대기 N건 / 닫힘)를 달아 둔다. -->
+      <div id="tabs"></div>
+      <button id="add" title="프로젝트를 하나 더 붙입니다 (최대 3개)">+ 프로젝트</button>
       <span id="status" class="warn">시작 중…</span>
       <!-- 지금 일하는 사람을 한 줄로. 캐릭터를 일일이 쫓지 않아도 보이게. -->
       <span id="now"></span>

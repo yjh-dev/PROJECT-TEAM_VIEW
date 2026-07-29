@@ -44,14 +44,98 @@ button:hover {
   background: #37415a;
 }
 
-#project {
-  color: var(--muted);
-  font-family: Consolas, monospace;
+/* ---------- 프로젝트 탭 ----------
+   사무실은 하나만 보이지만 회사는 최대 3개가 동시에 돈다. 그래서 탭은 '보기
+   전환'인 동시에 **저쪽이 지금 일하는 중인지 알려주는 계기판**이다. */
+
+#tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px 5px 11px;
+  background: #232a3a;
+  border: 1px solid #333c50;
+  border-radius: 6px;
+  cursor: pointer;
+  min-width: 0;
+  max-width: 260px;
+}
+
+.tab:hover {
+  background: #2b3446;
+}
+
+.tab.sel {
+  background: #2f3a52;
+  border-color: #4a90d9;
+}
+
+.tab .nm {
   font-size: 13px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  flex: 1;
+}
+
+/* 배지 — 그 프로젝트가 지금 무엇을 하고 있는지. 색이 상태를 대신한다. */
+.tab .st {
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  white-space: nowrap;
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--muted);
+}
+
+.tab .st.busy {
+  color: #7aa2f7;
+  background: rgba(122, 162, 247, 0.16);
+}
+
+.tab .st.queued {
+  color: #e0af68;
+  background: rgba(224, 175, 104, 0.16);
+}
+
+.tab .st.shut {
+  color: #f7768e;
+  background: rgba(247, 118, 142, 0.16);
+}
+
+/* 떼기 버튼 — 평소엔 흐리게. 실수로 누르기 쉬운 자리라 확인을 한 번 받는다. */
+.tab .x {
+  background: none;
+  border: 0;
+  padding: 0 3px;
+  color: #5c6780;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.tab .x:hover {
+  color: #f7768e;
+  background: none;
+}
+
+#add {
+  padding: 6px 11px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+#add:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 #status {
