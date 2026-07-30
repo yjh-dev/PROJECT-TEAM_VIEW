@@ -129,12 +129,31 @@ const lastChatAt = new Map() // 도구 이벤트가 채팅을 도배하지 않�
 
 let activeDir = null
 let lastProjects = [] // 마지막으로 받은 프로젝트 상태(세팅 버튼이 참조한다)
-const chatLogs = new Map() // dir -> [{ kind, who, text }]
+const chatLogs = new Map() // dir -> [{ kind, who, text, tool }]
+// 보관된 대화를 다시 그리는 중인지. 그때 저장하면 켤 때마다 두 배로 쌓인다.
+let restoringChat = false
+const chatLoaded = new Set() // 디스크에서 한 번 읽은 프로젝트
 
 function logFor(dir) {
   if (!dir) return []
   if (!chatLogs.has(dir)) chatLogs.set(dir, [])
   return chatLogs.get(dir)
+}
+
+/**
+ * 그 프로젝트에서 오갔던 대화를 디스크에서 되살린다. 프로젝트당 한 번만 읽는다 —
+ * 그 뒤로는 메모리 쪽이 최신이다.
+ */
+async function restoreChat(dir) {
+  if (!dir || chatLoaded.has(dir)) return
+  chatLoaded.add(dir)
+  const saved = await window.teamView.loadChat(dir)
+  if (!saved?.length) return
+  const log = logFor(dir)
+  // 이미 이번 실행에서 쌓인 줄이 있으면 그 **앞에** 붙인다(지난 것이 먼저다).
+  log.unshift(...saved)
+  while (log.length > 200) log.shift()
+  if (dir === activeDir) redrawChat(dir)
 }
 
 /** 경로에서 폴더 이름만. 탭이 좁아서 전체 경로는 title로 넘긴다. */
@@ -587,18 +606,23 @@ function addMsg(kind, who, text, opts = {}) {
   const item = { kind, who, text, tool: Boolean(opts.tool) }
   log.push(item)
   while (log.length > 200) log.shift()
+  // 디스크에도 남긴다 — 앱을 끄면 사라지던 것을 이어 볼 수 있게. 지난 대화를 다시
+  // 그리는 중(replaying)에는 저장하지 않는다. 안 그러면 켤 때마다 두 배로 쌓인다.
+  if (activeDir && !restoringChat) window.teamView.appendChat(activeDir, item)
   if (item.tool && !showTools) return // 기록은 남기고 화면에만 안 띄운다
   renderMsg(kind, who, text)
 }
 
 /** 탭을 옮겼을 때(또는 도구 활동을 접었다 펼 때) 그 프로젝트의 대화를 다시 그린다. */
 function redrawChat(dir) {
+  restoringChat = true
   messagesEl.replaceChildren()
   for (const m of logFor(dir)) {
     if (m.tool && !showTools) continue
     renderMsg(m.kind, m.who, m.text)
   }
   messagesEl.scrollTop = messagesEl.scrollHeight
+  restoringChat = false
 }
 
 /**
@@ -1357,6 +1381,7 @@ window.teamView.onEvents(({ dir, events }) => {
  */
 window.teamView.onReset(({ dir } = {}) => {
   if (dir) activeDir = dir
+  restoreChat(dir) // 지난 대화를 되살린다(프로젝트당 한 번)
   queuedFor.length = 0
   agents = buildAgents()
   refreshObstacles()
@@ -1380,12 +1405,41 @@ window.teamView.onStatus(({ projects, activeDir: active, max }) => {
   statusEl.className = trouble.warn ? 'warn' : 'ok'
   // 구성이 빠졌을 때만 '세팅하기'를 드러낸다. 회사가 남에게 점유된 것 같은 문제는
   // 세팅으로 풀리지 않으므로 버튼을 띄우지 않는다.
+  renderStack(me?.health?.stack)
   const parts = me ? missingParts(me.health) : []
   setupBtn.hidden = !parts.length
   // 빠진 것을 채우는 것과 낡은 것을 갱신하는 것은 다른 일이다. 버튼이 무엇을 할지
   // 이름으로 밝힌다 — 같은 이름이면 눌러 보고 나서야 알게 된다.
   setupBtn.textContent = parts.some((p) => p.update) ? '팀 갱신' : '세팅하기'
 })
+
+const stackEl = document.getElementById('stack')
+
+/**
+ * 이 프로젝트가 무엇으로 만들어져 있는지 한 줄로.
+ *
+ * 며칠 만에 다시 열면 무슨 스택이었는지 기억나지 않는다. CLAUDE.md에 적어 두면
+ * 좋지만 비어 있는 경우가 많아서, 앱이 실제 파일(package.json·설정 파일)에서
+ * 읽어 낸 것을 보여 준다. **감지된 것이 없으면 아예 띄우지 않는다** — 빈 줄이
+ * 자리를 차지하면 팀원 칩만 밀린다.
+ */
+function renderStack(stack) {
+  const list = Array.isArray(stack) ? stack : []
+  stackEl.hidden = !list.length
+  if (!list.length) return
+  stackEl.replaceChildren()
+  const label = document.createElement('span')
+  label.className = 'st-label'
+  label.textContent = '스택'
+  stackEl.append(label)
+  for (const s of list) {
+    const el = document.createElement('span')
+    el.className = 'st'
+    el.textContent = s
+    stackEl.append(el)
+  }
+  stackEl.title = `이 프로젝트에서 감지된 기술: ${list.join(', ')}\n(package.json과 설정 파일에서 읽었습니다)`
+}
 
 /** 이 프로젝트에 빠진 구성. 순서는 치명적인 것부터. */
 function missingParts(health) {

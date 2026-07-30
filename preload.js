@@ -9,6 +9,9 @@ contextBridge.exposeInMainWorld('teamView', {
   removeProject: (dir) => ipcRenderer.invoke('project:remove', dir),
   activateProject: (dir) => ipcRenderer.invoke('project:activate', dir),
   setupProject: (dir, parts) => ipcRenderer.invoke('project:setup', { dir, parts }),
+  // 대화 보관 — 앱을 껐다 켜도 프로젝트별로 남아 있다
+  loadChat: (dir) => ipcRenderer.invoke('chat:load', dir),
+  appendChat: (dir, msg) => ipcRenderer.invoke('chat:append', { dir, msg }),
   // 실행 환경 — claude 설치·로그인, Figma 연결
   checkEnv: (opts) => ipcRenderer.invoke('env:check', opts),
   // 이 컴퓨터에 필요한 프로그램이 깔려 있는지 / 설치를 돕기

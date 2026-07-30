@@ -166,9 +166,58 @@ function projectHealth(dir) {
     agents,
     guide: fs.existsSync(path.join(dir, 'CLAUDE.md')),
     stale: agents ? staleAgents(dir) : 0, // 팀원이 아예 없으면 '낡음'이 아니라 '없음'이다
+    stack: detectStack(dir),
   }
   healthCache.set(dir, { at: Date.now(), health })
   return health
+}
+
+// ---------------------------------------------------------------------------
+// 대화 보관
+//
+// 지금까지 채팅은 메모리에만 있어서 **앱을 끄면 사라졌다.** 무엇을 시켰고 팀이 뭐라
+// 답했는지가 유일하게 남는 곳인데, 다시 켜면 빈 화면이었다.
+//
+// **프로젝트 폴더에 쓰지 않는다.** 남의 작업 폴더에 앱이 파일을 남기면 커밋에 섞이고
+// 지우기도 애매하다. 앱 데이터 폴더에 프로젝트별로 따로 둔다.
+// ---------------------------------------------------------------------------
+
+const CHAT_KEEP = 200 // 화면이 들고 있는 줄 수와 같게
+const CHAT_MAX_LINES = 2000 // 이보다 커지면 뒤쪽만 남기고 정리한다
+
+function chatPath(dir) {
+  const enc = String(dir).replace(/[^a-zA-Z0-9]/g, '-').slice(-120)
+  return path.join(app.getPath('userData'), 'chats', `${enc}.jsonl`)
+}
+
+function loadChat(dir) {
+  try {
+    const lines = fs.readFileSync(chatPath(dir), 'utf8').split(/\r?\n/).filter((l) => l.trim())
+    return lines.slice(-CHAT_KEEP).map((l) => {
+      try {
+        return JSON.parse(l)
+      } catch {
+        return null
+      }
+    }).filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
+function appendChat(dir, msg) {
+  const file = chatPath(dir)
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.appendFileSync(file, JSON.stringify(msg) + '\n', 'utf8')
+    // 무한정 커지지 않게 가끔 뒤쪽만 남긴다. 매번 세면 비싸니 append 뒤 크기로 가늠한다.
+    if (fs.statSync(file).size > CHAT_MAX_LINES * 400) {
+      const kept = fs.readFileSync(file, 'utf8').split(/\r?\n/).filter((l) => l.trim()).slice(-CHAT_KEEP)
+      fs.writeFileSync(file, kept.join('\n') + '\n', 'utf8')
+    }
+  } catch {
+    /* 대화를 못 남기는 것이 앱을 멈출 이유는 아니다 */
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -476,6 +525,72 @@ function staleAgents(dir) {
     return 0 // 템플릿을 못 읽으면 판단하지 않는다
   }
   return n
+}
+
+/**
+ * 이 프로젝트가 **무엇으로 만들어져 있는지**.
+ *
+ * 팀이 며칠 굴러간 프로젝트를 다시 열면 무슨 스택인지 기억나지 않는다. CLAUDE.md에
+ * 적어 두면 좋지만 비어 있는 경우가 많아서, 실제 파일에서 읽어 낸다 — **짐작하지
+ * 않고 있는 것만** 적는다.
+ */
+function detectStack(dir) {
+  const has = (...p) => fs.existsSync(path.join(dir, ...p))
+  const out = []
+  let pkg = null
+  try {
+    pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'))
+  } catch {
+    /* 노드 프로젝트가 아닐 수 있다 */
+  }
+  if (pkg) {
+    const d = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) }
+    const pick = [
+      ['next', 'Next.js'],
+      ['nuxt', 'Nuxt'],
+      ['@remix-run/react', 'Remix'],
+      ['astro', 'Astro'],
+      ['react', 'React'],
+      ['vue', 'Vue'],
+      ['svelte', 'Svelte'],
+      ['@angular/core', 'Angular'],
+      ['express', 'Express'],
+      ['fastify', 'Fastify'],
+      ['@nestjs/core', 'NestJS'],
+      ['electron', 'Electron'],
+      ['react-native', 'React Native'],
+      ['typescript', 'TypeScript'],
+      ['tailwindcss', 'Tailwind'],
+      ['@supabase/supabase-js', 'Supabase'],
+      ['@supabase/ssr', 'Supabase'],
+      ['@prisma/client', 'Prisma'],
+      ['drizzle-orm', 'Drizzle'],
+      ['mongoose', 'MongoDB'],
+      ['pg', 'PostgreSQL'],
+      ['vitest', 'Vitest'],
+      ['jest', 'Jest'],
+      ['playwright', 'Playwright'],
+    ]
+    // 프레임워크는 가장 위쪽 하나만 — Next.js면 React를 따로 적지 않는다.
+    const framework = pick.slice(0, 10).find(([k]) => d[k])
+    if (framework) out.push(framework[1])
+    for (const [k, name] of pick.slice(10)) if (d[k] && !out.includes(name)) out.push(name)
+  }
+  // 의존성이 하나도 없는 프로젝트도 있다(내장 모듈만 쓰는 경우). 그래도 무엇으로
+  // 도는지는 알려 준다 — 빈칸보다 낫다.
+  if (pkg && !out.length) {
+    const major = String(pkg.engines?.node ?? '').match(/\d+/)
+    out.push(major ? `Node ${major[0]}` : 'Node.js')
+  }
+  if (!out.includes('TypeScript') && has('tsconfig.json')) out.push('TypeScript')
+  if (has('requirements.txt') || has('pyproject.toml')) out.push('Python')
+  if (has('go.mod')) out.push('Go')
+  if (has('Cargo.toml')) out.push('Rust')
+  if (has('pom.xml') || has('build.gradle') || has('build.gradle.kts')) out.push('JVM')
+  if (has('Gemfile')) out.push('Ruby')
+  if (has('composer.json')) out.push('PHP')
+  if (has('Dockerfile') || has('compose.yaml') || has('docker-compose.yml')) out.push('Docker')
+  return out.slice(0, 8)
 }
 
 /** 아직 아무도 안 집어간 지시 수. 탭 배지에 "대기 N건"으로 뜬다. */
@@ -807,6 +922,13 @@ ipcMain.handle('project:setup', (_e, { dir, parts }) => {
 // ---------- 실행 환경 IPC ----------
 
 ipcMain.handle('env:check', (_e, opts) => checkEnv(opts ?? {}))
+
+// 대화 보관 — 앱을 껐다 켜도 그 프로젝트에서 오간 말이 남아 있어야 한다.
+ipcMain.handle('chat:load', (_e, dir) => (dir ? loadChat(dir) : []))
+ipcMain.handle('chat:append', (_e, { dir, msg }) => {
+  if (dir && msg) appendChat(dir, msg)
+  return true
+})
 ipcMain.handle('env:requirements', () => checkRequirements())
 
 /**
