@@ -42,6 +42,47 @@ const BUSY_MS = 2600
 const IDLE_LEAVE_MS = 9000
 const TALK_MS = 3200
 
+// 도구를 손에서 놓은 지 이만큼 지나면 '생각 중'으로 본다.
+//
+// 도구 호출 사이의 공백은 **모델이 답을 만드는 시간**이다. 짧으면 그냥 다음 도구로
+// 이어지지만 길어지면 사람은 멈춘 줄 안다. 실제로 "멈춘 것 같다"는 말을 들었고,
+// 그때 팀원은 기획안을 쓰는 중이었다. 조용한 것이 정상이라는 사실을 화면에 적는다.
+const THINKING_MS = 4000
+
+// 이만큼 조용하면 '생각 중'이 아니라 **막힌 것**으로 본다.
+//
+// 답을 만드는 데 몇 분이 걸리는 일은 있지만, 도구를 한 번도 안 쓴 채 5분이 넘어가면
+// 정상이 아닐 가능성이 크다. 실제로 팀원 하나가 12분 동안 CPU를 4초도 안 쓰고 멈춰
+// 있었는데 화면은 계속 '작업 중'이었다 — 기다릴지 취소할지 판단할 근거가 없었다.
+const STALL_MS = 300_000
+
+/** 초를 사람이 읽는 단위로. 120초는 '120s'보다 '2m 0s'가 빨리 읽힌다. */
+function fmtDur(sec) {
+  if (sec < 60) return `${sec}s`
+  const m = Math.floor(sec / 60)
+  if (m < 60) return `${m}m ${sec % 60}s`
+  return `${Math.floor(m / 60)}h ${m % 60}m`
+}
+
+/**
+ * 지금 이 팀원이 어떤 상태인지 한 덩어리로. 배지와 상단 요약이 같은 판단을 쓴다.
+ * 둘이 따로 계산하면 화면 안에서 서로 다른 말을 하게 된다.
+ */
+function workState(a, now) {
+  const sec = a.startedAt != null ? Math.floor((now - a.startedAt) / 1000) : 0
+  const quietFor = Math.floor((now - a.lastEventAt) / 1000)
+  const thinking = now - a.lastEventAt > THINKING_MS
+  const stalled = now - a.lastEventAt > STALL_MS
+  return {
+    sec,
+    quietFor,
+    thinking,
+    stalled,
+    icon: stalled ? '⚠' : thinking ? '⋯' : (a.act?.icon ?? '◆'),
+    word: stalled ? '응답 없음' : thinking ? '생각 중' : (a.act?.word ?? '작업'),
+  }
+}
+
 const WALL_SEGMENTS = interiorWallSegments()
 
 /**
@@ -783,13 +824,19 @@ function update(dt, now) {
   scheduleIdle(now)
 
   for (const a of agents.values()) {
-    const working = a.active && now < a.busyUntil
+    // **일하는 중인지는 이벤트 간격이 아니라 상태로 판단한다.**
+    //
+    // 예전에는 "마지막 이벤트 + 2.6초" 안에 있어야 일하는 중이었다. 그런데 긴 답을
+    // 만드는 동안에는 도구 호출이 아예 없다 — 기획안을 쓰던 팀원이 2분 넘게 조용한
+    // 적이 있고, 그동안 화면에서는 **모니터가 꺼진 채 앉아 있어** 멈춘 것처럼 보였다.
+    // 시작(agent_start)과 끝(agent_stop) 사이면 일하는 중이 맞다. 리드는 시작
+    // 이벤트가 없지만 첫 도구에서 active가 되고 세션이 쉬면 풀린다.
+    const working = a.active
     a.working = working
-    const quiet = now - a.lastEventAt > IDLE_LEAVE_MS
     if (a.plan && (now >= a.plan.until || working)) a.plan = null
 
     // 일이 없으면 rest(=자기 의자)로 돌아간다. 유휴 행동이 있을 때만 자리를 뜬다.
-    const goal = working || (a.active && !quiet) ? a.work : a.plan ? a.plan.dest : a.rest
+    const goal = working ? a.work : a.plan ? a.plan.dest : a.rest
 
     // 목적지가 바뀌면 경로를 다시 짠다. 방이 나뉘어 있으므로 문을 거쳐야 한다 —
     // 직선으로 가면 벽을 뚫고 지나간다.
@@ -889,14 +936,17 @@ function renderNow(now) {
     nowEl.className = waiting ? 'queued' : ''
     return
   }
-  nowEl.className = 'busy'
+  // 하나라도 막혀 있으면 상단 줄부터 색이 바뀐다. 캐릭터를 일일이 볼 필요 없이
+  // "지금 봐야 할 것이 있다"는 신호가 먼저 온다.
+  const stuck = busy.filter((a) => workState(a, now).stalled)
+  nowEl.className = stuck.length ? 'queued' : 'busy'
   nowEl.textContent =
-    '작업 중 · ' +
+    (stuck.length ? `⚠ ${stuck.map((a) => a.label).join('·')} 응답 없음 — ` : '작업 중 · ') +
     busy
       .sort((p, q) => (p.startedAt ?? 0) - (q.startedAt ?? 0))
       .map((a) => {
-        const sec = a.startedAt != null ? Math.floor((now - a.startedAt) / 1000) : 0
-        return `${a.label}(${a.act ? a.act.word + ' ' : ''}${sec}s)`
+        const w = workState(a, now)
+        return `${a.label}(${w.word} ${fmtDur(w.sec)})`
       })
       .join(' · ')
 }
@@ -922,11 +972,16 @@ function syncOverlay(now) {
     tag.querySelector('.nm').textContent = (erroring ? '❗ ' : '') + a.label
     const meta = tag.querySelector('.meta')
     if (a.active) {
-      const sec = a.startedAt != null ? Math.floor((now - a.startedAt) / 1000) : 0
-      const act = a.act ? `${a.act.icon} ${a.act.word} · ` : ''
-      meta.textContent = ` ${act}${sec}s · 🛠 ${a.toolCount ?? 0}`
+      const w = workState(a, now)
+      // 생각 중일 때는 **얼마나 조용했는지**를 같이 적는다. 그래야 "정상적으로 답을
+      // 만드는 중"과 "뭔가 잘못돼 멈춤"을 사람이 구분할 수 있다.
+      const tail = w.thinking ? ` · 조용 ${fmtDur(w.quietFor)}` : ''
+      meta.textContent = ` ${w.icon} ${w.word} · ${fmtDur(w.sec)} · 🛠 ${a.toolCount ?? 0}${tail}`
+      tag.classList.toggle('thinking', w.thinking && !w.stalled)
+      tag.classList.toggle('stalled', w.stalled)
     } else {
       meta.textContent = ''
+      tag.classList.remove('thinking', 'stalled')
     }
 
     let text = null

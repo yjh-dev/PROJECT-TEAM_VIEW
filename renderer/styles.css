@@ -454,6 +454,36 @@ main {
   font-family: Consolas, monospace;
 }
 
+/* 생각 중 — 도구를 안 쓰고 답을 만드는 구간.
+   조용한 것이 **정상**이라는 걸 알리는 표시다. 멈춘 줄 알고 기다리다 취소해
+   버리는 일이 실제로 있었다. 숨쉬듯 천천히 흐려졌다 돌아온다. */
+.tag.thinking .meta {
+  color: #7aa2f7;
+  opacity: 1;
+  animation: breathe 1.8s ease-in-out infinite;
+}
+
+@keyframes breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+/* 응답 없음 — 도구를 한 번도 안 쓴 채 오래 조용하다.
+   '생각 중'과 색을 갈라 놓아야 기다릴지 취소할지 바로 정할 수 있다. */
+.tag.stalled {
+  border-color: #e0af68;
+}
+
+.tag.stalled .meta {
+  color: #e0af68;
+  opacity: 1;
+}
+
 /* 실패한 팀원 — 멀리서도 눈에 띄어야 한다 */
 .tag.err {
   color: #ffffff;
