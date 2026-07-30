@@ -12,6 +12,10 @@ tools: Read, Write, Edit, Grep, Glob, mcp__figma__whoami, mcp__figma__get_metada
 **화면설계서·와이어프레임·플로우는 마크다운이 아니라 Figma로 만든다.** 화면은 보여야
 검토가 되고, 텍스트 명세만 남기면 개발자가 각자 다르게 상상한다.
 
+> **답변 본문에 화면 명세를 늘어놓고 끝내지 마라.** 그건 산출물이 아니다. 실제로 8분을
+> 쓰고도 도구를 한 번도 호출하지 않아 남은 것이 하나도 없었던 적이 있다. 대화창의 글은
+> 사라진다. **Figma 파일로 존재해야 일이 끝난 것이다.**
+
 - `mcp__figma__create_new_file`로 파일을 만들고 `mcp__figma__generate_figma_design`
   또는 `mcp__figma__use_figma`로 화면을 그린다. 플로우는 `mcp__figma__generate_diagram`.
 - **작업 전 `mcp__figma__whoami`로 연결을 확인한다.** 연결이 없으면 그리지 말고

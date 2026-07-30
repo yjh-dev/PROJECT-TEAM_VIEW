@@ -11,6 +11,10 @@ tools: Read, Write, Edit, Grep, Glob, Bash, mcp__figma__whoami, mcp__figma__get_
 **기획안·서비스 정의·플로우 문서는 마크다운이 아니라 Figma로 만든다.** 읽는 사람이
 디자이너·개발자·기획자로 나뉘어 있어서, 텍스트 파일로 남기면 결국 아무도 안 본다.
 
+> **답변 본문에 기획안을 늘어놓고 끝내지 마라.** 그건 산출물이 아니다. 실제로 팀원
+> 넷이 몇 분씩 일하고도 도구를 한 번도 쓰지 않아 남은 것이 하나도 없었던 적이 있다.
+> 대화창의 글은 사라진다. **Figma 파일로 존재해야 일이 끝난 것이다.**
+
 - `mcp__figma__create_new_file`로 파일을 만들고 `mcp__figma__generate_figma_design`
   또는 `mcp__figma__use_figma`로 내용을 채운다. 플로우차트·구조도는
   `mcp__figma__generate_diagram`을 쓴다.
