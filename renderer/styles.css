@@ -171,6 +171,73 @@ button:hover {
   background: none;
 }
 
+/* ---------- 연결 상태 점 ----------
+   Claude와 Figma가 지금 쓸 수 있는 상태인지. 문제가 있을 때만 보이면 "연결돼 있다"는
+   확인을 할 수 없어서, 정상일 때도 계속 켜 둔다. 마우스를 올리면 계정·플랜까지 보인다. */
+
+#conn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.conn-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 3px 7px;
+  border-radius: 5px;
+}
+
+.conn-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.conn-item .led {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: #5c6780;
+}
+
+.conn-item.ok .led {
+  background: #9ece6a;
+  box-shadow: 0 0 6px rgba(158, 206, 106, 0.8);
+}
+
+.conn-item.warn .led {
+  background: #e0af68;
+  box-shadow: 0 0 6px rgba(224, 175, 104, 0.8);
+}
+
+.conn-item.bad .led {
+  background: #f7768e;
+  box-shadow: 0 0 6px rgba(247, 118, 142, 0.8);
+}
+
+/* 확인하는 동안 깜빡인다 — 멈춘 건지 재는 건지 구분되게. */
+.conn-item.checking .led {
+  background: #7aa2f7;
+  animation: breathe 1s ease-in-out infinite;
+}
+
+.conn-item.ok {
+  color: #9ece6a;
+}
+
+.conn-item.warn {
+  color: #e0af68;
+}
+
+.conn-item.bad {
+  color: #f7768e;
+}
+
 #add {
   padding: 6px 11px;
   font-size: 13px;

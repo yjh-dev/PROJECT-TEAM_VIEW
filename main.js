@@ -193,7 +193,9 @@ function runClaude(args, timeoutMs = 25_000) {
 }
 
 let envCache = null
-const ENV_TTL_MS = 30_000
+// 로그인 상태는 자주 바뀌지 않는다. 반면 `claude mcp list`는 서버마다 헬스 체크를 해
+// 몇 초씩 걸린다 — 상태 점을 계속 켜 두려면 캐시가 넉넉해야 한다.
+const ENV_TTL_MS = 5 * 60_000
 
 /**
  * 지금 이 컴퓨터가 팀뷰를 쓸 수 있는 상태인가.

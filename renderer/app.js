@@ -1446,6 +1446,12 @@ const envEl = document.getElementById('env')
 const envMsgEl = document.getElementById('env-msg')
 const envActEl = document.getElementById('env-act')
 const envAgainEl = document.getElementById('env-again')
+const connEl = document.getElementById('conn')
+
+let lastEnv = null
+// 확인 주기. 메인이 결과를 캐시하므로 대부분은 캐시가 답한다 —
+// `claude mcp list`가 서버마다 헬스 체크를 해서 실제로 부를 때마다 몇 초 걸린다.
+const ENV_POLL_MS = 60_000
 
 /** 지금 가장 먼저 막고 있는 것 하나. 여러 개면 순서대로 하나씩 푼다. */
 function envBlocker(env) {
@@ -1474,7 +1480,60 @@ function envBlocker(env) {
   return null
 }
 
+/**
+ * 연결 상태 두 줄. 배너와 달리 **문제가 없어도 보인다.**
+ *
+ * 배너만 두면 "지금 연결돼 있다"는 확인을 할 수 없다. 지시를 보내기 전에 눈으로
+ * 확인하고 싶은 것이 바로 이 둘이라, 상단에 계속 켜 둔다.
+ */
+function connItems(env) {
+  const c = env?.claude ?? {}
+  const f = env?.figma ?? {}
+  const claude = !c.installed
+    ? { state: 'bad', text: 'Claude 미설치', title: 'claude CLI가 없습니다 — npm i -g @anthropic-ai/claude-code' }
+    : !c.loggedIn
+      ? { state: 'bad', text: 'Claude 로그아웃', title: '로그인해야 팀원이 일할 수 있습니다 (눌러서 로그인)' }
+      : {
+          state: 'ok',
+          text: 'Claude',
+          title: `로그인됨 — ${c.email ?? '계정 정보 없음'}${c.plan ? ` (${c.plan})` : ''}\n눌러서 상태를 다시 확인합니다`,
+        }
+  const figma = f.connected
+    ? { state: 'ok', text: 'Figma', title: '연결됨 — 기획안·화면설계서를 만들 수 있습니다\n눌러서 상태를 다시 확인합니다' }
+    : !c.loggedIn
+      ? { state: 'off', text: 'Figma', title: 'Claude 로그인 후 확인할 수 있습니다' }
+      : {
+          state: 'warn',
+          text: f.present ? 'Figma 인증 필요' : 'Figma 미연결',
+          title: '기획안·화면설계서는 Figma에 만듭니다 (눌러서 연결)',
+        }
+  return [
+    { key: 'claude', ...claude },
+    { key: 'figma', ...figma },
+  ]
+}
+
+function renderConn(env) {
+  connEl.replaceChildren()
+  for (const it of connItems(env)) {
+    const el = document.createElement('span')
+    el.className = `conn-item ${it.state}`
+    el.title = it.title
+    const led = document.createElement('span')
+    led.className = 'led'
+    el.append(led, document.createTextNode(it.text))
+    // 문제가 있으면 누르는 순간 그걸 푸는 절차로, 정상이면 다시 확인으로 간다.
+    el.addEventListener('click', () => {
+      if (it.state === 'ok' || it.state === 'off') recheckEnv()
+      else startLogin(it.key)
+    })
+    connEl.append(el)
+  }
+}
+
 function renderEnv(env) {
+  lastEnv = env
+  renderConn(env)
   const block = envBlocker(env)
   envEl.hidden = !block
   if (!block) return
@@ -1486,12 +1545,21 @@ function renderEnv(env) {
   }
 }
 
-envActEl.addEventListener('click', async () => {
-  const what = envActEl.dataset.what
+/** 상태를 다시 잰다. 재는 동안 점이 깜빡여 '멈춤'과 구분된다. */
+async function recheckEnv() {
+  for (const el of connEl.children) el.classList.add('checking')
+  renderEnv(await window.teamView.checkEnv({ force: true }))
+}
+
+/**
+ * 로그인/연결을 시작한다. 브라우저에서 사람이 마쳐야 하므로 앱은 창을 띄우고
+ * **끝났는지 지켜본다** — 다 하고 나서 다시 눌러 보라고 하면 어디까지 됐는지 모른다.
+ */
+async function startLogin(what) {
   envActEl.disabled = true
   envAgainEl.disabled = true
-  // 로그인은 브라우저에서 사람이 마쳐야 한다. 앱은 창을 띄우고 **끝났는지 지켜본다** —
-  // 다 하고 나서 다시 눌러 보라고 하면 어디까지 됐는지 알 수 없다.
+  for (const el of connEl.children) el.classList.add('checking')
+  envEl.hidden = false
   envMsgEl.textContent = '새 창이 열렸습니다 — 브라우저에서 로그인을 마치면 자동으로 이어집니다…'
   const res = await window.teamView.login(what)
   envActEl.disabled = false
@@ -1502,22 +1570,25 @@ envActEl.addEventListener('click', async () => {
     return
   }
   if (res?.manual) {
+    renderEnv(lastEnv)
+    envEl.hidden = false
     envMsgEl.textContent = `터미널에서 직접 실행하세요: ${res.manual}`
     return
   }
   renderEnv(res?.env)
-  if (res?.timeout) envMsgEl.textContent += '  (아직 완료되지 않았습니다 — 끝났으면 "다시 확인")'
-})
+  if (res?.timeout) {
+    envEl.hidden = false
+    envMsgEl.textContent += '  (아직 완료되지 않았습니다 — 끝났으면 "다시 확인")'
+  }
+}
 
-envAgainEl.addEventListener('click', async () => {
-  envAgainEl.disabled = true
-  envMsgEl.textContent = '확인 중…'
-  renderEnv(await window.teamView.checkEnv({ force: true }))
-  envAgainEl.disabled = false
-})
+envActEl.addEventListener('click', () => startLogin(envActEl.dataset.what))
+envAgainEl.addEventListener('click', recheckEnv)
 
 window.teamView.onEnv(renderEnv)
 window.teamView.checkEnv().then(renderEnv)
+// 로그인이 풀리거나 Figma 연결이 끊기는 일은 앱 밖에서도 일어난다. 계속 지켜본다.
+setInterval(() => window.teamView.checkEnv().then(renderEnv), ENV_POLL_MS)
 
 renderTargets()
 addMsg('sys', '', '캐릭터를 클릭하거나 위 칩으로 대상을 고르고 지시를 보내세요.')
