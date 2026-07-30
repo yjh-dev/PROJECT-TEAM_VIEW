@@ -15,6 +15,7 @@
 
 const { app, BrowserWindow, ipcMain, dialog, clipboard } = require('electron')
 const { spawn } = require('child_process')
+const crypto = require('crypto')
 const fs = require('fs')
 const path = require('path')
 
@@ -35,7 +36,7 @@ const MAX_PROJECTS = 3
 
 let win = null
 const watches = new Map() // dir -> { file, offset, tail, exists, replay }
-const companies = new Map() // dir -> { dir, claimTimer, queueTimer, child, hasSession }
+const companies = new Map() // dir -> { dir, claimTimer, queueTimer, child }
 let activeDir = null // 화면에 사무실을 그리고 있는 프로젝트
 let pumpTimer = null // 모든 감시를 한 타이머로 돌린다(프로젝트마다 두지 않는다)
 let lastStatusJson = '' // 상태가 바뀔 때만 렌더러로 보내기 위한 직전 값
@@ -621,14 +622,59 @@ const HANDOFF =
   ` 맞지 않으면 억지로 시키지 말고 성격에 맞는 팀원에게 넘겨.` +
   ` 어느 쪽이든 누구에게 맡겼는지 한 줄로 밝혀줘.`
 
+// 회사는 프로젝트마다 **세션 하나를 계속 이어 쓴다**(아래 sessionIdFor). 빠른 대신
+// 이전 지시의 맥락이 그대로 남아 있어서, 그냥 두면 하던 일을 계속한다. 실제로
+// "프로젝트 소개해줘"를 보냈는데 직전 세션에서 짜던 테스트 스위트를 계속 만들어
+// 냈다. 그래서 매 지시를 **새 일감으로 못 박는 문장**을 앞에 붙인다.
+const BOUNDARY =
+  `[새 지시] 앞의 대화는 이미 끝난 일이다. **하던 일을 이어서 계속하지 마라.**` +
+  ` 이번 지시가 요구하는 것만 하고, 요청하지 않은 산출물(테스트·리팩터링·문서 등)은 만들지 마라.` +
+  ` 무엇을 할 것인지 한 줄로 밝히고 시작해라.\n\n`
+
 function promptFor(cmd) {
   const who = cmd.agent
   const body = String(cmd.text ?? '')
-  return who && who !== 'lead'
-    ? `다음 지시를 ${who} 서브에이전트에게 맡기려 해.${HANDOFF} 지시: ${body}`
-    : `다음 지시를 읽고 성격에 맞는 서브에이전트에게 위임해서 처리해줘.` +
+  const task =
+    who && who !== 'lead'
+      ? `다음 지시를 ${who} 서브에이전트에게 맡기려 해.${HANDOFF} 지시: ${body}`
+      : `다음 지시를 읽고 성격에 맞는 서브에이전트에게 위임해서 처리해줘.` +
         ` 직접 처리하지 말고 Task 도구를 쓰고, 여러 파트가 걸리면 planner로 나눈 뒤 각자에게 넘겨줘.` +
         ` 지시: ${body}`
+  return BOUNDARY + task
+}
+
+/**
+ * 이 프로젝트가 쓸 **고정 세션 id**. 없으면 만들어 설정에 적어 둔다.
+ *
+ * 예전에는 `--continue`를 썼다. 그건 "그 폴더의 **가장 최근** 대화를 잇는다"라서
+ * 두 가지가 깨졌다. 첫째, 사람이 같은 폴더에서 따로 claude를 띄워 두면 **그 대화를
+ * 물어 간다.** 둘째, 회사가 만든 세션이 여럿이면 어느 것을 잇는지 알 수 없다
+ * (실제로 한 프로젝트에 세션 파일이 5개 쌓여 있었다).
+ *
+ * 프로젝트마다 id를 하나 고정하면 회사는 **자기 세션만** 잇는다.
+ */
+function sessionIdFor(dir) {
+  const cfg = loadConfig()
+  const map = cfg.sessions ?? {}
+  if (!map[dir]) {
+    map[dir] = crypto.randomUUID()
+    saveConfig({ ...cfg, sessions: map })
+  }
+  return map[dir]
+}
+
+/**
+ * 그 고정 세션이 이미 만들어졌는가. 있으면 `--resume`, 없으면 `--session-id`다.
+ *
+ * exit code로 판단하지 않는 이유: 작업이 중간에 끊기거나 오류로 끝나면 code가 0이
+ * 아니고, 그러면 다음에도 '세션 없음'으로 봐서 처음부터 다시 시작했다. 세션은 이미
+ * 있는데도 **매번 프로젝트 전체를 다시 읽었다**(README·package.json·src 전부).
+ * 세션 파일이 있느냐가 사실이므로 그걸 본다.
+ */
+function sessionExists(dir, sessionId) {
+  const enc = dir.replace(/[^a-zA-Z0-9]/g, '-')
+  const p = path.join(app.getPath('home'), '.claude', 'projects', enc, `${sessionId}.jsonl`)
+  return fs.existsSync(p)
 }
 
 // 파일 편집을 물어보지 않고 승인한다.
@@ -649,27 +695,37 @@ const PERMISSION_MODE = 'acceptEdits'
 /**
  * 지시 하나를 회사에 태운다.
  *
- * `--continue`로 이전 대화를 이어받아 **회사의 기억을 유지한다.** 매번 새 세션이면
- * "아까 그거 계속해줘"가 통하지 않는다. 다만 이어받을 세션이 없는 첫 실행에는
- * 붙이지 않는다 — 없는 세션을 이어받으려다 실패하면 그 지시가 통째로 날아간다.
+ * **고정 세션을 이어 쓴다.** 매번 새 세션이면 그때마다 프로젝트를 처음부터 다시
+ * 읽는다 — 로그를 재보니 README·package.json·src 전부를 읽는 데만 매번 15초가
+ * 들었고, 지시 사이에 아무것도 기억하지 못했다. 세션을 이으면 그 비용이 사라지고
+ * "아까 그거 계속해줘"도 통한다.
+ *
+ * 다만 맥락이 남는 만큼 지시가 서로 섞일 수 있어 프롬프트 앞에 경계를 못 박는다(BOUNDARY).
  *
  * `TEAMVIEW_POLLER`는 훅이 "이 세션은 회사가 띄운 것"이라고 알아보는 표식이다.
  * 이게 있어야 그 세션의 활동이 화면에 기록되고, 취소 깃발을 훅이 함부로 내리지 않는다.
  */
 function runCommand(c, cmd) {
   const dir = c.dir
+  const sid = sessionIdFor(dir)
   const args = ['-p', '--permission-mode', PERMISSION_MODE]
-  if (c.hasSession) args.push('--continue')
-  args.push(promptFor(cmd))
+  // 이미 있는 세션이면 잇고, 처음이면 그 id로 새로 만든다.
+  args.push(sessionExists(dir, sid) ? '--resume' : '--session-id', sid)
 
   let child
   try {
     child = spawn('claude', args, {
       cwd: dir,
-      shell: true, // Windows에서 claude는 .cmd 래퍼다
-      stdio: 'ignore',
+      shell: true, // Windows에서 claude는 .cmd 래퍼라 셸이 필요하다
+      // **프롬프트는 인자가 아니라 stdin으로 보낸다.** 셸을 거치면 인자가 공백마다
+      // 쪼개지고 줄바꿈 뒤는 통째로 잘린다 — 실측으로 프롬프트 하나가 인자 35개가
+      // 되고 정작 지시 내용("지시: ...")은 사라졌다. 그동안 리드가 엉뚱한 일을 한
+      // 이유가 여기 있었다. stdin은 셸 파싱을 거치지 않으므로 그대로 도착한다.
+      stdio: ['pipe', 'ignore', 'ignore'],
       env: { ...process.env, TEAMVIEW_POLLER: String(process.pid) },
     })
+    child.stdin.on('error', () => {}) // 자식이 먼저 죽으면 EPIPE가 난다 — 무시
+    child.stdin.end(promptFor(cmd), 'utf8')
   } catch (err) {
     logRenderer(`회사 실행 실패(${dir}): ${err.message}`)
     return
@@ -680,12 +736,8 @@ function runCommand(c, cmd) {
 
   child.on('error', (err) => logRenderer(`claude 실행 실패(${dir}): ${err.message}`))
   child.on('exit', (code) => {
-    if (c.child === child) {
-      c.child = null
-      // 성공했을 때만 다음부터 이어받는다. 실패한 실행을 이어받으면 그 오류 상태가
-      // 계속 따라다닌다.
-      if (code === 0) c.hasSession = true
-    }
+    if (c.child === child) c.child = null
+    if (code !== 0) logRenderer(`회사 실행이 코드 ${code}로 끝남 (${dir})`)
     // 훅은 회사가 띄운 세션에서 취소 깃발을 **지우지 않는다**(지우면 곧바로 다음
     // 지시를 집어가 "취소했는데 계속 일한다"가 된다). 실행이 끝난 지금 회사가 내린다.
     try {
@@ -717,7 +769,7 @@ function openCompany(dir) {
   if (!dir || companies.has(dir)) return
   // 훅이 없는 폴더에서는 회사를 열 수 없다 — 지시를 적어도 아무도 읽지 못한다.
   if (!fs.existsSync(path.join(dir, '.claude'))) return
-  const c = { dir, claimTimer: null, queueTimer: null, child: null, hasSession: false }
+  const c = { dir, claimTimer: null, queueTimer: null, child: null }
   companies.set(dir, c)
   writeClaim(dir)
   c.claimTimer = setInterval(() => writeClaim(dir), CLAIM_REFRESH_MS)
