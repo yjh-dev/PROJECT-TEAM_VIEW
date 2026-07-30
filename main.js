@@ -166,6 +166,109 @@ function projectHealth(dir) {
   return health
 }
 
+// ---------------------------------------------------------------------------
+// 세팅 — 빈 프로젝트를 팀이 일할 수 있는 상태로 만든다
+//
+// 지금까지 이 셋을 사람이 손으로 갖춰야 했다. 그래서 훅만 깔고 팀원을 안 둔
+// 프로젝트에서 리드가 혼자 일했고, 아무것도 없는 빈 폴더를 붙였다가 "지시를
+// 보내도 아무 일도 안 일어난다"가 됐다. 붙이는 자리에서 바로 갖추게 한다.
+//
+// **자동으로 하지 않는다.** 남의 폴더에 파일을 쓰는 일이라 무엇을 넣을지 보여주고
+// 확인을 받는다(renderer의 확인 창 → project:setup).
+// ---------------------------------------------------------------------------
+
+/** 팀뷰가 들고 다니는 템플릿 뿌리. 패키징 후에도 같은 위치다(package.json의 files). */
+function templateDir() {
+  return path.join(__dirname, 'templates')
+}
+
+const HOOK_EVENTS = [
+  ['PreToolUse', 'pre'],
+  ['PostToolUse', 'post'],
+  ['SubagentStop', 'subagent_stop'],
+  ['UserPromptSubmit', 'prompt'],
+  ['Stop', 'stop'],
+  ['SessionStart', 'session'],
+]
+
+/**
+ * 훅을 settings.json에 **병합**한다. 기존 설정은 건드리지 않는다.
+ *
+ * 통째로 덮어쓰면 그 프로젝트가 쓰던 다른 훅(포매터·시크릿 가드 등)이 사라진다.
+ * 이미 team_events가 걸려 있는 이벤트는 그대로 두고 없는 것만 채운다.
+ */
+function mergeHooks(claudeDir) {
+  const file = path.join(claudeDir, 'settings.json')
+  let cfg = {}
+  try {
+    cfg = JSON.parse(fs.readFileSync(file, 'utf8'))
+  } catch {
+    /* 없거나 깨졌으면 새로 만든다 */
+  }
+  if (!cfg.hooks || typeof cfg.hooks !== 'object') cfg.hooks = {}
+  let added = 0
+  for (const [event, kind] of HOOK_EVENTS) {
+    const command = `python "$CLAUDE_PROJECT_DIR/.claude/hooks/team_events.py" ${kind}`
+    const groups = Array.isArray(cfg.hooks[event]) ? cfg.hooks[event] : []
+    // 이미 걸려 있으면 두 번 넣지 않는다(같은 이벤트가 두 줄씩 기록된다).
+    if (JSON.stringify(groups).includes('team_events.py')) {
+      cfg.hooks[event] = groups
+      continue
+    }
+    groups.push({ hooks: [{ type: 'command', command, timeout: 10 }] })
+    cfg.hooks[event] = groups
+    added++
+  }
+  fs.mkdirSync(claudeDir, { recursive: true })
+  fs.writeFileSync(file, JSON.stringify(cfg, null, 2), 'utf8')
+  return added
+}
+
+/**
+ * 빠진 것을 채운다. 이미 있는 파일은 **덮어쓰지 않는다** — 사람이 고쳐 둔 것을
+ * 되돌리면 안 된다.
+ */
+function setupProject(dir, parts = {}) {
+  const claudeDir = path.join(dir, '.claude')
+  const done = []
+  try {
+    if (parts.hooks) {
+      fs.mkdirSync(path.join(claudeDir, 'hooks'), { recursive: true })
+      fs.copyFileSync(
+        path.join(__dirname, 'hooks', 'team_events.py'),
+        path.join(claudeDir, 'hooks', 'team_events.py'),
+      )
+      const added = mergeHooks(claudeDir)
+      done.push(`훅 설치 (settings.json에 ${added}개 등록)`)
+    }
+    if (parts.agents) {
+      const src = path.join(templateDir(), 'agents')
+      const dst = path.join(claudeDir, 'agents')
+      fs.mkdirSync(dst, { recursive: true })
+      let n = 0
+      for (const f of fs.readdirSync(src)) {
+        if (!f.endsWith('.md')) continue
+        const target = path.join(dst, f)
+        if (fs.existsSync(target)) continue // 이미 있는 팀원은 그대로 둔다
+        fs.copyFileSync(path.join(src, f), target)
+        n++
+      }
+      done.push(`팀원 ${n}명 추가`)
+    }
+    if (parts.guide) {
+      const target = path.join(dir, 'CLAUDE.md')
+      if (!fs.existsSync(target)) {
+        fs.copyFileSync(path.join(templateDir(), 'CLAUDE.md'), target)
+        done.push('CLAUDE.md 생성 (개요·스택·명령어는 비어 있음)')
+      }
+    }
+  } catch (err) {
+    return { ok: false, error: err.message, done }
+  }
+  healthCache.delete(dir) // 방금 바꿨으니 다시 검사한다
+  return { ok: true, done }
+}
+
 /** 아직 아무도 안 집어간 지시 수. 탭 배지에 "대기 N건"으로 뜬다. */
 function pendingCount(dir) {
   try {
@@ -475,6 +578,21 @@ ipcMain.handle('project:remove', (_e, dir) => {
 ipcMain.handle('project:activate', (_e, dir) => {
   activate(dir)
   return { ok: true, activeDir }
+})
+
+/**
+ * 빠진 구성을 채운다. 훅이 깔리면 그 자리에서 회사를 연다 —
+ * 세팅해 놓고 앱을 다시 켜야 한다면 반쪽짜리다.
+ */
+ipcMain.handle('project:setup', (_e, { dir, parts }) => {
+  if (!dir) return { ok: false, error: '프로젝트가 지정되지 않았습니다' }
+  const res = setupProject(dir, parts ?? { hooks: true, agents: true, guide: true })
+  if (res.ok) {
+    openCompany(dir) // .claude가 방금 생겼을 수 있다
+    if (!watches.has(dir)) startWatching(dir, { replay: true })
+    pumpStatusAll({ force: true })
+  }
+  return { ...res, health: projectHealth(dir) }
 })
 
 ipcMain.handle('project:list', () => {
@@ -865,7 +983,8 @@ ipcMain.handle('command:send', async (_e, { dir, agent, text, broadcast }) => {
 
   const claudeDir = path.join(projectDir, '.claude')
   if (!fs.existsSync(claudeDir)) {
-    return { ok: false, error: `.claude 폴더가 없습니다: ${claudeDir}` }
+    // 여기서 막히면 지시가 어디에도 남지 않는다. 무엇을 해야 하는지까지 알려준다.
+    return { ok: false, error: '아직 세팅되지 않은 프로젝트입니다 — 상단 "세팅하기"를 누르세요' }
   }
 
   const ts = Date.now() / 1000

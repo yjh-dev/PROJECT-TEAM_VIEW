@@ -33,6 +33,7 @@
       "preload.js",
       "renderer/**",
       "hooks/**",
+      "templates/**",
       "package.json"
     ],
     "win": {

@@ -29,6 +29,7 @@ const ctx = canvas.getContext('2d')
 const statusEl = document.getElementById('status')
 const tabsEl = document.getElementById('tabs')
 const addBtn = document.getElementById('add')
+const setupBtn = document.getElementById('setup')
 const overlay = document.getElementById('overlay')
 const targetsEl = document.getElementById('targets')
 const messagesEl = document.getElementById('messages')
@@ -86,6 +87,7 @@ const lastChatAt = new Map() // 도구 이벤트가 채팅을 도배하지 않�
 // 그래서 대화는 프로젝트별로 여기에 들고 있다가 탭을 옮길 때 다시 그린다.
 
 let activeDir = null
+let lastProjects = [] // 마지막으로 받은 프로젝트 상태(세팅 버튼이 참조한다)
 const chatLogs = new Map() // dir -> [{ kind, who, text }]
 
 function logFor(dir) {
@@ -1179,12 +1181,56 @@ window.teamView.onReset(({ dir } = {}) => {
 
 window.teamView.onStatus(({ projects, activeDir: active, max }) => {
   activeDir = active
+  lastProjects = projects
   renderTabs(projects, active, max)
 
   const me = projects.find((p) => p.dir === active)
   const trouble = me ? diagnose(me) : { text: '프로젝트를 추가하세요', warn: true }
   statusEl.textContent = trouble.text
   statusEl.className = trouble.warn ? 'warn' : 'ok'
+  // 구성이 빠졌을 때만 '세팅하기'를 드러낸다. 회사가 남에게 점유된 것 같은 문제는
+  // 세팅으로 풀리지 않으므로 버튼을 띄우지 않는다.
+  setupBtn.hidden = !(me && missingParts(me.health).length)
+})
+
+/** 이 프로젝트에 빠진 구성. 순서는 치명적인 것부터. */
+function missingParts(health) {
+  const h = health ?? {}
+  const out = []
+  if (!h.hooks) out.push({ key: 'hooks', label: '훅 — 팀 활동을 화면에 기록합니다' })
+  if (!h.agents) out.push({ key: 'agents', label: '팀원 9명 — 없으면 리드가 혼자 일합니다' })
+  if (!h.guide) out.push({ key: 'guide', label: 'CLAUDE.md — 어떤 일이 누구 몫인지 알려줍니다' })
+  return out
+}
+
+/**
+ * 빠진 구성을 채운다. **묻지 않고 넣지 않는다** — 남의 폴더에 파일을 쓰는 일이다.
+ * 무엇이 들어가는지 먼저 보여주고, 이미 있는 파일은 건드리지 않는다고 밝힌다.
+ */
+async function runSetup(dir, health) {
+  const parts = missingParts(health)
+  if (!parts.length) return
+  const list = parts.map((p) => `  · ${p.label}`).join('\n')
+  const ok = confirm(
+    `${baseName(dir)}에 다음이 없습니다.\n\n${list}\n\n` +
+      `지금 넣을까요?\n` +
+      `· 기존 settings.json은 덮어쓰지 않고 훅만 덧붙입니다\n` +
+      `· 이미 있는 파일은 그대로 둡니다`,
+  )
+  if (!ok) return
+  hintEl.textContent = '세팅 중…'
+  const res = await window.teamView.setupProject(
+    dir,
+    Object.fromEntries(parts.map((p) => [p.key, true])),
+  )
+  hintEl.textContent = res?.ok
+    ? `${baseName(dir)} 세팅 완료 — ${res.done.join(' · ')}`
+    : `세팅 실패: ${res?.error ?? '알 수 없는 오류'}`
+}
+
+setupBtn.addEventListener('click', () => {
+  const p = lastProjects.find((x) => x.dir === activeDir)
+  if (p) runSetup(p.dir, p.health)
 })
 
 /**
@@ -1290,15 +1336,11 @@ addBtn.addEventListener('click', async () => {
     if (!res?.canceled && res?.error) hintEl.textContent = res.error
     return
   }
-  // 붙인 직후에 빠진 것을 한 줄로 알린다. 안 움직이는 걸 나중에 발견하는 것보다 낫다.
-  const h = res.health ?? {}
-  const missing = []
-  if (!h.hooks) missing.push('훅 미등록')
-  if (!h.agents) missing.push('팀원 없음')
-  if (!h.guide) missing.push('CLAUDE.md 없음')
-  hintEl.textContent = missing.length
-    ? `${baseName(res.dir)} — ${missing.join(' · ')} (탭에 마우스를 올리면 자세히 보입니다)`
-    : `${baseName(res.dir)} 붙였습니다 — 팀원 ${h.agents}명`
+  // **붙이는 자리에서 바로 갖추게 한다.** 예전에는 여기서 "빠졌습니다"라고 알리기만
+  // 했고, 그러면 사람이 손으로 훅을 깔고 팀원을 넣어야 했다. 빈 폴더를 붙였다가
+  // "지시를 보내도 아무 일도 안 일어난다"가 된 적이 있다.
+  if (missingParts(res.health).length) await runSetup(res.dir, res.health)
+  else hintEl.textContent = `${baseName(res.dir)} 붙였습니다 — 팀원 ${res.health.agents}명`
 })
 
 // ---------- 작업 취소 ----------

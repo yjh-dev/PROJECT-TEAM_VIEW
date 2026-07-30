@@ -16,6 +16,8 @@
            그래서 탭마다 상태 배지(처리 중 / 대기 N건 / 닫힘)를 달아 둔다. -->
       <div id="tabs"></div>
       <button id="add" title="프로젝트를 하나 더 붙입니다 (최대 3개)">+ 프로젝트</button>
+      <!-- 구성이 빠졌을 때만 나타난다. 붙일 때 거절했거나 나중에 갖추고 싶을 때의 자리. -->
+      <button id="setup" hidden title="빠진 구성(훅·팀원·CLAUDE.md)을 채웁니다">세팅하기</button>
       <span id="status" class="warn">시작 중…</span>
       <!-- 지금 일하는 사람을 한 줄로. 캐릭터를 일일이 쫓지 않아도 보이게. -->
       <span id="now"></span>

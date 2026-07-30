@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('teamView', {
   addProject: () => ipcRenderer.invoke('project:add'),
   removeProject: (dir) => ipcRenderer.invoke('project:remove', dir),
   activateProject: (dir) => ipcRenderer.invoke('project:activate', dir),
+  setupProject: (dir, parts) => ipcRenderer.invoke('project:setup', { dir, parts }),
   listProjects: () => ipcRenderer.invoke('project:list'),
   sendCommand: (payload) => ipcRenderer.invoke('command:send', payload),
   // 클립보드는 메인 프로세스에 맡긴다. 샌드박스 preload에서는 electron의 clipboard가
