@@ -1359,7 +1359,11 @@ window.teamView.onStatus(({ projects, activeDir: active, max }) => {
   statusEl.className = trouble.warn ? 'warn' : 'ok'
   // 구성이 빠졌을 때만 '세팅하기'를 드러낸다. 회사가 남에게 점유된 것 같은 문제는
   // 세팅으로 풀리지 않으므로 버튼을 띄우지 않는다.
-  setupBtn.hidden = !(me && missingParts(me.health).length)
+  const parts = me ? missingParts(me.health) : []
+  setupBtn.hidden = !parts.length
+  // 빠진 것을 채우는 것과 낡은 것을 갱신하는 것은 다른 일이다. 버튼이 무엇을 할지
+  // 이름으로 밝힌다 — 같은 이름이면 눌러 보고 나서야 알게 된다.
+  setupBtn.textContent = parts.some((p) => p.update) ? '팀 갱신' : '세팅하기'
 })
 
 /** 이 프로젝트에 빠진 구성. 순서는 치명적인 것부터. */
@@ -1367,8 +1371,17 @@ function missingParts(health) {
   const h = health ?? {}
   const out = []
   if (!h.hooks) out.push({ key: 'hooks', label: '훅 — 팀 활동을 화면에 기록합니다' })
-  if (!h.agents) out.push({ key: 'agents', label: '팀원 9명 — 없으면 리드가 혼자 일합니다' })
+  if (!h.agents) out.push({ key: 'agents', label: '팀원 — 없으면 리드가 혼자 일합니다' })
   if (!h.guide) out.push({ key: 'guide', label: 'CLAUDE.md — 어떤 일이 누구 몫인지 알려줍니다' })
+  // 빠진 건 없지만 **팀원 정의가 앱보다 낡은** 경우. 팀뷰를 고쳐도 이미 세팅된
+  // 프로젝트는 옛 규칙 그대로라, 알려 주지 않으면 왜 다르게 도는지 알 수 없다.
+  if (!out.length && h.stale > 0) {
+    out.push({
+      key: 'agents',
+      update: true,
+      label: `팀원 정의 ${h.stale}개가 앱보다 낡았습니다 — 갱신하면 최신 규칙으로 일합니다`,
+    })
+  }
   return out
 }
 
@@ -1379,19 +1392,24 @@ function missingParts(health) {
 async function runSetup(dir, health) {
   const parts = missingParts(health)
   if (!parts.length) return
+  const isUpdate = parts.some((p) => p.update)
   const list = parts.map((p) => `  · ${p.label}`).join('\n')
   const ok = confirm(
-    `${baseName(dir)}에 다음이 없습니다.\n\n${list}\n\n` +
-      `지금 넣을까요?\n` +
-      `· 기존 settings.json은 덮어쓰지 않고 훅만 덧붙입니다\n` +
-      `· 이미 있는 파일은 그대로 둡니다`,
+    isUpdate
+      ? `${baseName(dir)}의 팀원 정의를 최신으로 갱신할까요?\n\n${list}\n\n` +
+          `· 팀원 파일(.claude/agents/*.md)을 앱이 들고 있는 것으로 덮어씁니다\n` +
+          `· 그 파일을 직접 고쳐 두셨다면 그 내용은 사라집니다\n` +
+          `· CLAUDE.md와 settings.json은 건드리지 않습니다`
+      : `${baseName(dir)}에 다음이 없습니다.\n\n${list}\n\n` +
+          `지금 넣을까요?\n` +
+          `· 기존 settings.json은 덮어쓰지 않고 훅만 덧붙입니다\n` +
+          `· 이미 있는 파일은 그대로 둡니다`,
   )
   if (!ok) return
-  hintEl.textContent = '세팅 중…'
-  const res = await window.teamView.setupProject(
-    dir,
-    Object.fromEntries(parts.map((p) => [p.key, true])),
-  )
+  hintEl.textContent = isUpdate ? '갱신 중…' : '세팅 중…'
+  const opts = Object.fromEntries(parts.map((p) => [p.key, true]))
+  if (isUpdate) opts.update = true
+  const res = await window.teamView.setupProject(dir, opts)
   hintEl.textContent = res?.ok
     ? `${baseName(dir)} 세팅 완료 — ${res.done.join(' · ')}`
     : `세팅 실패: ${res?.error ?? '알 수 없는 오류'}`

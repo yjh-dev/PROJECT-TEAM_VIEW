@@ -161,7 +161,12 @@ function projectHealth(dir) {
     countAgentFiles(path.join(claudeDir, 'agents')) +
     countAgentFiles(path.join(app.getPath('home'), '.claude', 'agents'))
 
-  const health = { hooks, agents, guide: fs.existsSync(path.join(dir, 'CLAUDE.md')) }
+  const health = {
+    hooks,
+    agents,
+    guide: fs.existsSync(path.join(dir, 'CLAUDE.md')),
+    stale: agents ? staleAgents(dir) : 0, // 팀원이 아예 없으면 '낡음'이 아니라 '없음'이다
+  }
   healthCache.set(dir, { at: Date.now(), health })
   return health
 }
@@ -406,15 +411,24 @@ function setupProject(dir, parts = {}) {
       const src = path.join(templateDir(), 'agents')
       const dst = path.join(claudeDir, 'agents')
       fs.mkdirSync(dst, { recursive: true })
-      let n = 0
+      let added = 0
+      let updated = 0
       for (const f of fs.readdirSync(src)) {
         if (!f.endsWith('.md')) continue
         const target = path.join(dst, f)
-        if (fs.existsSync(target)) continue // 이미 있는 팀원은 그대로 둔다
+        const exists = fs.existsSync(target)
+        // 평소에는 있는 파일을 건드리지 않는다. 다만 **갱신을 고른 경우**에는 덮어쓴다 —
+        // 그러지 않으면 오래 쓴 프로젝트가 새 규칙을 영영 받지 못한다.
+        if (exists && !parts.update) continue
+        const norm = (s) => s.replace(/\r\n/g, '\n')
+        if (exists && norm(fs.readFileSync(target, 'utf8')) === norm(fs.readFileSync(path.join(src, f), 'utf8'))) continue
         fs.copyFileSync(path.join(src, f), target)
-        n++
+        exists ? updated++ : added++
       }
-      done.push(`팀원 ${n}명 추가`)
+      const bits = []
+      if (added) bits.push(`팀원 ${added}명 추가`)
+      if (updated) bits.push(`팀원 ${updated}명 갱신`)
+      done.push(bits.join(' · ') || '팀원 변경 없음')
     }
     if (parts.guide) {
       const target = path.join(dir, 'CLAUDE.md')
@@ -428,6 +442,40 @@ function setupProject(dir, parts = {}) {
   }
   healthCache.delete(dir) // 방금 바꿨으니 다시 검사한다
   return { ok: true, done }
+}
+
+/**
+ * 템플릿과 **내용이 다른** 팀원 파일 수.
+ *
+ * 팀뷰를 고치면 앱 동작은 바로 바뀌지만 **이미 세팅된 프로젝트의 팀원 정의는 그대로**다.
+ * 세팅은 "이미 있는 파일을 건드리지 않는" 원칙이라 다시 눌러도 갱신되지 않았다. 그래서
+ * 오래 쓴 프로젝트일수록 새 규칙(묻는 말 예외·Figma 강제 같은)을 못 받는다.
+ *
+ * CLAUDE.md는 비교하지 않는다 — 개요·스택을 사람이 채우는 파일이라 다른 게 정상이다.
+ */
+function staleAgents(dir) {
+  const src = path.join(templateDir(), 'agents')
+  const dst = path.join(dir, '.claude', 'agents')
+  let n = 0
+  try {
+    for (const f of fs.readdirSync(src)) {
+      if (!f.endsWith('.md')) continue
+      const want = fs.readFileSync(path.join(src, f), 'utf8')
+      let have = null
+      try {
+        have = fs.readFileSync(path.join(dst, f), 'utf8')
+      } catch {
+        /* 없으면 다른 것으로 친다 */
+      }
+      // 줄바꿈은 비교에서 뺀다. git이 체크아웃할 때 CRLF로 바꾸는 탓에, 방금 복사한
+      // 파일도 전부 '다름'으로 잡혔다(6개 중 6개가 줄바꿈만 달랐다). 그대로 두면
+      // 갱신 버튼이 영영 사라지지 않는다.
+      if (have === null || have.replace(/\r\n/g, '\n') !== want.replace(/\r\n/g, '\n')) n++
+    }
+  } catch {
+    return 0 // 템플릿을 못 읽으면 판단하지 않는다
+  }
+  return n
 }
 
 /** 아직 아무도 안 집어간 지시 수. 탭 배지에 "대기 N건"으로 뜬다. */
