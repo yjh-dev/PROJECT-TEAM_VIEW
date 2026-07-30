@@ -867,14 +867,44 @@ function runCommand(c, cmd) {
   })
 }
 
+// 취소 깃발이 이보다 오래됐으면 무시하고 치운다. 훅의 CANCEL_TTL과 같은 값.
+const CANCEL_TTL_S = 300
+
 /** 그 회사의 대기열을 한 번 들여다본다. 회사는 **한 번에 한 건만** 처리한다. */
 function pumpQueue(c) {
   if (!c || c.child) return
   const claudeDir = path.join(c.dir, '.claude')
   // 취소 직후에는 새 지시를 시작하지 않는다. 깃발은 실행이 끝나며 내려간다.
-  if (fs.existsSync(path.join(claudeDir, CANCEL_NAME))) return
+  //
+  // **다만 실행이 없으면 내려갈 기회도 없다.** 큐가 빈 상태에서 취소를 누르면 깃발만
+  // 남고, 그 뒤로 보내는 지시가 전부 여기서 막힌다(깃발을 지우는 곳이 실행 종료
+  // 핸들러뿐이라 영원히 풀리지 않는다). 오래된 깃발은 치우고 진행한다.
+  const flag = path.join(claudeDir, CANCEL_NAME)
+  if (fs.existsSync(flag)) {
+    if (flagAge(flag) <= CANCEL_TTL_S) return
+    try {
+      fs.unlinkSync(flag)
+    } catch {
+      return // 못 지웠으면 이번엔 넘어간다
+    }
+  }
   const cmd = takeOneCommand(claudeDir)
   if (cmd) runCommand(c, cmd)
+}
+
+/** 깃발이 세워진 지 몇 초 지났는지. 파일 안의 시각을 먼저 믿고, 없으면 mtime. */
+function flagAge(file) {
+  try {
+    const v = Number(fs.readFileSync(file, 'utf8').trim())
+    if (Number.isFinite(v) && v > 0) return Date.now() / 1000 - v
+  } catch {
+    /* 읽기 실패는 아래 mtime으로 */
+  }
+  try {
+    return (Date.now() - fs.statSync(file).mtimeMs) / 1000
+  } catch {
+    return 0
+  }
 }
 
 /**
