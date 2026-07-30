@@ -213,7 +213,13 @@ const ACTIVITY = {
   Grep: { icon: '⌕', word: '검색' },
   Glob: { icon: '⌕', word: '검색' },
   Bash: { icon: '▸', word: '실행' },
+  // Windows에서는 Bash 대신 이쪽이 온다. 없으면 '◆ PowerShell'이라는 날것으로 보인다.
+  PowerShell: { icon: '▸', word: '실행' },
   Task: { icon: '↗', word: '위임' },
+  // **위임 도구 이름이 Task가 아니라 Agent로 오기도 한다**(훅의 DELEGATE_TOOLS도 둘 다
+  // 처리한다). 여기 빠져 있어서, 팀원에게 일을 넘기는 중인 리드가 '↗ 위임'이 아니라
+  // '◆ Agent'로 보였다. 화면에서 가장 중요한 순간이 가장 안 읽히는 표시로 나온 셈이다.
+  Agent: { icon: '↗', word: '위임' },
   WebFetch: { icon: '⇩', word: '조회' },
   WebSearch: { icon: '⌕', word: '웹 검색' },
   TodoWrite: { icon: '☑', word: '계획 정리' },
@@ -344,6 +350,20 @@ function showHandoff(from, to, now) {
   addMsg('sys', '', `— ${from.label}에게 보냈지만 ${to.label}이(가) 맡았습니다 —`)
 }
 
+/**
+ * 놀던 팀원이 **일을 시작하는 순간**을 찍는다. 이미 일하는 중이면 아무것도 하지 않는다.
+ *
+ * 서브에이전트는 `agent_start`가 오지만 **리드는 오지 않는다** — 훅은 서브에이전트에게만
+ * 시작을 낸다(team_events.py의 note_start가 name == "lead"를 걸러낸다). 그래서 리드의
+ * startedAt이 영영 비어 있었고, 경과 시간이 `0s`로 굳었다. 도구를 107번 쓴 리드가
+ * `🛠 107 · 0s`로 보이는 모순이 그래서 생겼다.
+ */
+function beginWork(agent, now) {
+  if (agent.active) return
+  agent.startedAt = now
+  agent.toolCount = 0
+}
+
 function applyEvent(ev) {
   const now = performance.now()
   const known = agents.size
@@ -406,6 +426,7 @@ function applyEvent(ev) {
       if (history) break
       // 화면만 봐도 문제를 알아채는 것이 목적이다. 당사자에게 느낌표를 띄우고
       // 디버거를 그 자리로 보낸다(실제로 디버거가 호출되지 않아도 '봐야 할 곳'을 가리킨다).
+      beginWork(agent, now)
       agent.active = true
       agent.busyUntil = now + BUSY_MS
       agent.errorUntil = now + 12000
@@ -427,8 +448,10 @@ function applyEvent(ev) {
         for (const a of agents.values()) {
           a.active = false
           a.busyUntil = 0
+          a.startedAt = null // 다음 작업은 그때부터 새로 잰다
         }
       } else if (!history) {
+        beginWork(agent, now)
         agent.active = true
         agent.busyUntil = now + BUSY_MS
       }
@@ -440,8 +463,13 @@ function applyEvent(ev) {
       if (!ev._replay) addMsg('agent', `${agent.label} · 답변`, String(ev.detail ?? ''))
       return
     default:
+      if (history) {
+        if (ev.type === 'tool') agent.toolCount = (agent.toolCount ?? 0) + 1
+        break
+      }
+      // 시계와 카운터를 먼저 세운 뒤 이번 도구를 센다(순서가 바뀌면 첫 도구가 빠진다).
+      beginWork(agent, now)
       if (ev.type === 'tool') agent.toolCount = (agent.toolCount ?? 0) + 1
-      if (history) break
       agent.active = true
       agent.busyUntil = now + BUSY_MS
   }
@@ -865,7 +893,7 @@ function renderNow(now) {
     busy
       .sort((p, q) => (p.startedAt ?? 0) - (q.startedAt ?? 0))
       .map((a) => {
-        const sec = a.startedAt ? Math.floor((now - a.startedAt) / 1000) : 0
+        const sec = a.startedAt != null ? Math.floor((now - a.startedAt) / 1000) : 0
         return `${a.label}(${a.act ? a.act.word + ' ' : ''}${sec}s)`
       })
       .join(' · ')
@@ -892,7 +920,7 @@ function syncOverlay(now) {
     tag.querySelector('.nm').textContent = (erroring ? '❗ ' : '') + a.label
     const meta = tag.querySelector('.meta')
     if (a.active) {
-      const sec = a.startedAt ? Math.floor((now - a.startedAt) / 1000) : 0
+      const sec = a.startedAt != null ? Math.floor((now - a.startedAt) / 1000) : 0
       const act = a.act ? `${a.act.icon} ${a.act.word} · ` : ''
       meta.textContent = ` ${act}${sec}s · 🛠 ${a.toolCount ?? 0}`
     } else {
