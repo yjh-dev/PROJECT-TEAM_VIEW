@@ -62,10 +62,17 @@
       <!-- 채팅: 전체 지시와 팀원별 대화를 한곳에서 -->
       <aside id="chat">
         <header>
-          <div id="targets"></div>
+          <!-- 도구 버튼을 칩과 같은 줄에 두면 칩이 밀려 한 줄 더 차지한다.
+               위아래로 나눠 칩이 패널 폭을 온전히 쓰게 한다. -->
           <div class="chat-tools">
+            <!-- 도구 활동은 한 작업에 100줄이 넘어 지시·답변을 묻어 버린다.
+                 지우지는 않고 접을 수 있게 둔다 — 상세를 봐야 할 때가 있다. -->
+            <button id="toggle-tools" type="button" class="on" title="파일 읽기·명령 실행 같은 도구 활동을 접거나 폅니다">
+              도구 활동
+            </button>
             <button id="copy-all" type="button" title="대화 전체를 클립보드로">전체 복사</button>
           </div>
+          <div id="targets"></div>
         </header>
         <div id="messages"></div>
         <footer>

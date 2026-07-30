@@ -21,6 +21,8 @@ contextBridge.exposeInMainWorld('teamView', {
   // 클립보드는 메인 프로세스에 맡긴다. 샌드박스 preload에서는 electron의 clipboard가
   // 없어서(undefined) 직접 부르면 예외가 났다. navigator.clipboard도 file://에서는 막힌다.
   copyText: (text) => ipcRenderer.invoke('clipboard:write', text),
+  // 답변에 실려 오는 결과물 링크(Figma 등)를 기본 브라우저로 연다.
+  openExternal: (url) => ipcRenderer.invoke('open:external', url),
   cancelAll: (dir) => ipcRenderer.invoke('command:cancel', dir),
   // 이벤트에는 어느 프로젝트 것인지가 실려 온다. 렌더러는 보고 있는 것만 그린다.
   onEvents: (cb) => ipcRenderer.on('events:new', (_e, payload) => cb(payload)),

@@ -409,7 +409,11 @@ def last_assistant_text(transcript_path):
             parts.append(content)
         text = " ".join(" ".join(parts).split())
         if text:
-            return text[:180]
+            # 180자로 자르던 것을 늘린다. 실측에서 한 시간짜리 작업의 결론이
+            # `https://www.figma.com/design/CudC`에서 끊겼다 — **결과물 링크가
+            # 잘려 접근할 수 없었다.** 답변은 세션이 끝날 때 한 번만 남으므로
+            # 길어도 로그를 크게 늘리지 않는다(도구 이벤트가 대부분이다).
+            return text[:1200]
     return None
 
 

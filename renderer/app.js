@@ -573,22 +573,76 @@ function applyEvent(ev) {
 
 // ---------- 채팅 ----------
 
+// 도구 활동을 채팅에 흘릴지. **지우는 게 아니라 접는다** — 한 작업에서 도구가
+// 120건 나온 적이 있는데, 그게 다 흐르면 정작 지시와 답변이 묻힌다. 반대로 아예
+// 없애면 무슨 파일을 만졌는지 알 수 없다. 보고 싶을 때 펴는 쪽이 맞다.
+let showTools = true
+
 /**
  * 대화 한 줄을 **기록하고** 화면에 붙인다.
  * 기록해 두는 이유는 탭을 옮겼다 돌아왔을 때 대화가 사라지지 않게 하기 위해서다.
  */
-function addMsg(kind, who, text) {
+function addMsg(kind, who, text, opts = {}) {
   const log = logFor(activeDir)
-  log.push({ kind, who, text })
+  const item = { kind, who, text, tool: Boolean(opts.tool) }
+  log.push(item)
   while (log.length > 200) log.shift()
+  if (item.tool && !showTools) return // 기록은 남기고 화면에만 안 띄운다
   renderMsg(kind, who, text)
 }
 
-/** 탭을 옮겼을 때 그 프로젝트의 대화를 되살린다. */
+/** 탭을 옮겼을 때(또는 도구 활동을 접었다 펼 때) 그 프로젝트의 대화를 다시 그린다. */
 function redrawChat(dir) {
   messagesEl.replaceChildren()
-  for (const m of logFor(dir)) renderMsg(m.kind, m.who, m.text)
+  for (const m of logFor(dir)) {
+    if (m.tool && !showTools) continue
+    renderMsg(m.kind, m.who, m.text)
+  }
   messagesEl.scrollTop = messagesEl.scrollHeight
+}
+
+/**
+ * 답변에 실려 오는 마크다운을 **읽히게** 다듬는다.
+ *
+ * 팀의 결론은 세션 기록에서 그대로 퍼 온 글이라 `## 만든 것`, `| 산출물 | 링크 |`,
+ * `|---|---|` 같은 문법이 날것으로 섞여 있다. 채팅 칸에서 그대로 보면 무슨 말인지
+ * 읽을 수 없다. 렌더러를 마크다운 파서로 만들 이유는 없으니 **소음만 걷어낸다.**
+ */
+function tidyMarkdown(text) {
+  return String(text ?? '')
+    .replace(/\|\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|/g, '') // 표 구분선
+    .replace(/^#{1,6}\s*/gm, '') // 헤딩 기호
+    .replace(/#{2,6}\s+/g, '· ') // 한 줄에 섞여 들어온 헤딩
+    .replace(/\*\*(.+?)\*\*/g, '$1') // 굵게
+    .replace(/`([^`]+)`/g, '$1') // 인라인 코드
+    // 표를 표로 그릴 수는 없으니 칸을 가운뎃점으로 잇는다. 파이프를 그대로 두면
+    // `| 산출물 | 링크 | | 1장 기획안(PRD)`처럼 읽다 걸린다.
+    .replace(/\s*\|\s*/g, ' · ')
+    .replace(/(\s*·\s*){2,}/g, ' · ') // 빈 칸이 겹쳐 생긴 연속 점
+    .replace(/^\s*·\s*|\s*·\s*$/gm, '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim()
+}
+
+const URL_RE = /(https?:\/\/[^\s<>"')\]]+)/g
+
+/** 글에 섞인 URL을 눌러서 열 수 있게 만든다. 나머지는 그대로 텍스트다. */
+function appendWithLinks(parent, text) {
+  let last = 0
+  for (const m of String(text).matchAll(URL_RE)) {
+    if (m.index > last) parent.append(document.createTextNode(text.slice(last, m.index)))
+    const a = document.createElement('a')
+    a.className = 'link'
+    a.textContent = m[0]
+    a.title = `${m[0]}\n(눌러서 브라우저로 열기)`
+    a.addEventListener('click', (e) => {
+      e.preventDefault()
+      window.teamView.openExternal(m[0])
+    })
+    parent.append(a)
+    last = m.index + m[0].length
+  }
+  if (last < text.length) parent.append(document.createTextNode(text.slice(last)))
 }
 
 function renderMsg(kind, who, text) {
@@ -602,7 +656,10 @@ function renderMsg(kind, who, text) {
     w.textContent = who
     const body = document.createElement('span')
     body.className = 'body'
-    body.textContent = text
+    // 답변은 세션 기록에서 퍼 온 글이라 마크다운이 섞여 있다. 소음을 걷고,
+    // 결과물 링크는 눌러서 열 수 있게 한다 — 그러지 않으면 손으로 옮겨 적어야 한다.
+    const shown = kind === 'agent' ? tidyMarkdown(text) : String(text)
+    appendWithLinks(body, shown)
     // 복사 버튼 — 평소엔 숨어 있다가 말풍선에 올리면 나타난다
     const copy = document.createElement('button')
     copy.className = 'copy'
@@ -639,7 +696,17 @@ function chatFromEvent(ev, agent) {
     addMsg('sys', '', ev.state === 'idle' ? '— 세션이 대기 상태입니다 —' : '— 세션 시작 —')
     return
   }
-  addMsg('agent', `${agent.label} · ${agent.id}`, describe(ev))
+  // 끝났다는 말만으로는 무엇을 한 건지 알 수 없다. **얼마나 걸렸고 몇 번 손댔는지**를
+  // 같이 남긴다 — 이게 없으면 한 시간짜리 작업의 흔적이 "끝냈습니다" 한 줄이다.
+  if (ev.type === 'agent_stop') {
+    const sec = agent.startedAt != null ? Math.floor((performance.now() - agent.startedAt) / 1000) : 0
+    const detail = sec > 0 ? `끝냈습니다 · ${fmtDur(sec)} · 도구 ${agent.toolCount ?? 0}회` : '끝냈습니다'
+    addMsg('agent', agent.label, detail)
+    return
+  }
+  // id(`backend-dev`)까지 붙이면 380px 칸에서 이름이 잘린다("백엔드 · backend-d").
+  // 이름표와 캐릭터 색으로 이미 누구인지 알 수 있다.
+  addMsg('agent', agent.label, describe(ev), { tool: ev.type === 'tool' })
 }
 
 function renderTargets() {
@@ -1477,6 +1544,16 @@ document.getElementById('chat-cancel').addEventListener('click', async (e) => {
       ? `취소됨 — 대기 ${res.queued}건${res.killed ? ` · 실행 ${res.killed}건 중단` : ''}`
       : '취소할 대기·실행이 없습니다 (이미 도는 세션은 그 터미널에서 Esc)'
   addMsg('sys', '', `— ${hintEl.textContent} —`)
+})
+
+// 도구 활동 접기/펴기 — 기록은 그대로 두고 보이는 것만 바꾼다.
+document.getElementById('toggle-tools').addEventListener('click', (e) => {
+  showTools = !showTools
+  e.currentTarget.classList.toggle('on', showTools)
+  e.currentTarget.title = showTools
+    ? '파일 읽기·명령 실행 같은 도구 활동을 접습니다'
+    : '도구 활동을 다시 폅니다 (기록은 지워지지 않았습니다)'
+  redrawChat(activeDir)
 })
 
 // 대화 전체 복사 — 화면에 보이는 순서 그대로 텍스트로 뽑는다

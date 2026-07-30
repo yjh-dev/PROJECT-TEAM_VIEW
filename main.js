@@ -844,6 +844,20 @@ ipcMain.handle('clipboard:write', (_e, text) => {
   return true
 })
 
+/**
+ * 팀이 만든 결과물 링크를 기본 브라우저로 연다.
+ *
+ * 답변에 Figma 링크가 오는데 지금까지 **텍스트라 열 수가 없었다.** 한 시간짜리
+ * 작업의 산출물을 손으로 옮겨 적어야 했다. http(s)만 연다 — 답변은 모델이 만든
+ * 문자열이라 `file:` 같은 것이 섞여 들어오면 안 된다.
+ */
+ipcMain.handle('open:external', async (_e, url) => {
+  const s = String(url ?? '')
+  if (!/^https?:\/\//i.test(s)) return { ok: false, error: '열 수 없는 주소입니다' }
+  await shell.openExternal(s)
+  return { ok: true }
+})
+
 // ---------------------------------------------------------------------------
 // 회사
 //

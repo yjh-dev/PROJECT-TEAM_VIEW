@@ -426,18 +426,40 @@ main {
   padding: 10px;
   border-bottom: 1px solid var(--line);
   display: flex;
-  align-items: flex-start;
+  flex-direction: column; /* 도구 줄 위, 팀원 칩 아래 — 칩이 폭을 온전히 쓴다 */
+  align-items: stretch;
   gap: 8px;
+}
+
+.chat-tools {
+  justify-content: flex-end;
 }
 
 #targets {
   flex: 1;
 }
 
+.chat-tools {
+  display: flex;
+  gap: 6px;
+}
+
 .chat-tools button {
   padding: 4px 10px;
   font-size: 12px;
   white-space: nowrap;
+}
+
+/* 도구 활동 토글 — 켜져 있으면 눌린 것처럼 보인다. */
+#toggle-tools {
+  opacity: 0.55;
+}
+
+#toggle-tools.on {
+  opacity: 1;
+  background: #2c4670;
+  border-color: #6a8ec4;
+  color: #eaf2ff;
 }
 
 /* 메시지별 복사 버튼 — **항상 보인다.** 숨겨 뒀더니 있는 줄 모르고 지나쳤다. */
@@ -546,6 +568,19 @@ main {
   font-size: 13.5px;
   line-height: 1.45;
   word-break: break-word;
+}
+
+/* 결과물 링크 — 팀이 만든 Figma 파일 등. 눌러서 브라우저로 연다. */
+.msg .link {
+  color: #7dcfff;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  word-break: break-all;
+}
+
+.msg .link:hover {
+  color: #b4f9f8;
 }
 
 .msg .who {
