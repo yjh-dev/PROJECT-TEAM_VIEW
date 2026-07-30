@@ -18,6 +18,9 @@ export const ROSTER = [
   { id: 'qa-tester', label: 'QA', hair: '#8c3b3b', shirt: '#73daca', accent: '#c2fff0' },
   { id: 'debugger', label: '디버거', hair: '#2b2b33', shirt: '#ff9e64', accent: '#ffd0a8' },
   { id: 'release-manager', label: '릴리스', hair: '#5a4b7c', shirt: '#a0a8c0', accent: '#dfe4f5' },
+  // 묻는 말에 답하는 조사역. "어디까지 진행됐어?" 같은 질문에 기획자가 감사를 하고
+  // 디자이너가 Figma 보고서를 만든 적이 있어서 따로 두었다.
+  { id: 'scout', label: '조사', hair: '#3a3226', shirt: '#c99a6e', accent: '#f0d9c0' },
 ]
 
 const UNKNOWN = { hair: '#5a5a68', shirt: '#8a8a99', accent: '#c8c8d4' }
@@ -34,6 +37,9 @@ const DESK_CELLS = [
   { gx: 1, gy: 8 },
   { gx: 4, gy: 8 },
   { gx: 7, gy: 8 },
+  // 조사역 자리. **맨 뒤에 붙인다** — 앞에 끼우면 기존 팀원 자리가 전부 밀린다.
+  // 리드 옆(gy 0)이라 의자가 gy 0.95로 사무실 안에 들어온다.
+  { gx: 7, gy: 0 },
 ]
 
 // 리드는 맨 위에서 팀 전체를 바라본다
