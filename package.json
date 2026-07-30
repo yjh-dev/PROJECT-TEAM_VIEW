@@ -10,7 +10,8 @@
     "demo": "node tools/emit-demo-events.js",
     "check": "node tools/check-refs.js && node --no-warnings tools/check-nav.js",
     "build:dir": "pnpm run check && electron-builder --dir",
-    "build:win": "pnpm run check && electron-builder --win nsis portable"
+    "build:win": "pnpm run check && electron-builder --win nsis portable",
+    "icon": "electron tools/make-icon.js"
   },
   "devDependencies": {
     "electron": "^33.2.0",
@@ -41,13 +42,16 @@
         "nsis",
         "portable"
       ],
-      "signAndEditExecutable": false
+      "signAndEditExecutable": false,
+      "icon": "build/icon.ico"
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
-      "artifactName": "TeamView-Setup-${version}-${arch}.${ext}"
+      "artifactName": "TeamView-Setup-${version}-${arch}.${ext}",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico"
     },
     "portable": {
       "artifactName": "TeamView-Portable-${version}-${arch}.${ext}"
