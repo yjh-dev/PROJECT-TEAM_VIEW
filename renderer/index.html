@@ -11,6 +11,14 @@
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
+    <!-- 실행 환경 배너 — claude가 없거나 로그인이 안 됐거나 Figma가 끊겨 있을 때만 뜬다.
+         팀뷰는 Claude Code 위에서 도는 앱이라 이게 없으면 아무것도 일어나지 않는다. -->
+    <div id="env" hidden>
+      <span id="env-msg"></span>
+      <button id="env-act" type="button"></button>
+      <button id="env-again" type="button" title="상태를 다시 확인합니다">다시 확인</button>
+    </div>
+
     <div id="bar">
       <!-- 프로젝트 탭. 사무실은 한 번에 하나만 보여 주지만 **나머지도 계속 일한다** —
            그래서 탭마다 상태 배지(처리 중 / 대기 N건 / 닫힘)를 달아 둔다. -->

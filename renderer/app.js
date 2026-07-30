@@ -1434,6 +1434,91 @@ document.getElementById('copy-all').addEventListener('click', (e) => {
   }, 1200)
 })
 
+// ---------- 실행 환경 ----------
+//
+// 팀뷰는 Claude Code 위에서 도는 앱이다. claude가 없거나 로그인이 안 돼 있으면
+// 지시를 보내도 **아무 일도 일어나지 않는다.** 그런데 화면상으로는 그냥 조용한
+// 것과 구분되지 않아서 앱이 고장 난 줄 안다. 맨 위에서 먼저 말해 준다.
+//
+// 기획·화면설계는 Figma에 만들므로 Figma 연결도 같은 급으로 본다.
+
+const envEl = document.getElementById('env')
+const envMsgEl = document.getElementById('env-msg')
+const envActEl = document.getElementById('env-act')
+const envAgainEl = document.getElementById('env-again')
+
+/** 지금 가장 먼저 막고 있는 것 하나. 여러 개면 순서대로 하나씩 푼다. */
+function envBlocker(env) {
+  if (!env) return null
+  if (!env.claude.installed) {
+    return {
+      msg: 'Claude Code가 설치되어 있지 않습니다 — 팀원이 일할 수 없습니다.',
+      action: null, // 설치까지 앱이 대신하지는 않는다
+      hint: 'npm i -g @anthropic-ai/claude-code',
+    }
+  }
+  if (!env.claude.loggedIn) {
+    return {
+      msg: 'Claude에 로그인되어 있지 않습니다 — 지시를 보내도 처리되지 않습니다.',
+      action: { what: 'claude', label: 'Claude 로그인' },
+    }
+  }
+  if (!env.figma.connected) {
+    return {
+      msg: env.figma.present
+        ? 'Figma 연결이 끊겼습니다 — 기획안·화면설계서를 만들 수 없습니다.'
+        : 'Figma가 연결되지 않았습니다 — 기획안·화면설계서는 Figma에 만듭니다.',
+      action: { what: 'figma', label: 'Figma 연결' },
+    }
+  }
+  return null
+}
+
+function renderEnv(env) {
+  const block = envBlocker(env)
+  envEl.hidden = !block
+  if (!block) return
+  envMsgEl.textContent = block.hint ? `${block.msg}  (${block.hint})` : block.msg
+  envActEl.hidden = !block.action
+  if (block.action) {
+    envActEl.textContent = block.action.label
+    envActEl.dataset.what = block.action.what
+  }
+}
+
+envActEl.addEventListener('click', async () => {
+  const what = envActEl.dataset.what
+  envActEl.disabled = true
+  envAgainEl.disabled = true
+  // 로그인은 브라우저에서 사람이 마쳐야 한다. 앱은 창을 띄우고 **끝났는지 지켜본다** —
+  // 다 하고 나서 다시 눌러 보라고 하면 어디까지 됐는지 알 수 없다.
+  envMsgEl.textContent = '새 창이 열렸습니다 — 브라우저에서 로그인을 마치면 자동으로 이어집니다…'
+  const res = await window.teamView.login(what)
+  envActEl.disabled = false
+  envAgainEl.disabled = false
+  if (res?.ok) {
+    renderEnv(res.env)
+    hintEl.textContent = what === 'figma' ? 'Figma가 연결됐습니다' : 'Claude에 로그인했습니다'
+    return
+  }
+  if (res?.manual) {
+    envMsgEl.textContent = `터미널에서 직접 실행하세요: ${res.manual}`
+    return
+  }
+  renderEnv(res?.env)
+  if (res?.timeout) envMsgEl.textContent += '  (아직 완료되지 않았습니다 — 끝났으면 "다시 확인")'
+})
+
+envAgainEl.addEventListener('click', async () => {
+  envAgainEl.disabled = true
+  envMsgEl.textContent = '확인 중…'
+  renderEnv(await window.teamView.checkEnv({ force: true }))
+  envAgainEl.disabled = false
+})
+
+window.teamView.onEnv(renderEnv)
+window.teamView.checkEnv().then(renderEnv)
+
 renderTargets()
 addMsg('sys', '', '캐릭터를 클릭하거나 위 칩으로 대상을 고르고 지시를 보내세요.')
 refreshObstacles()

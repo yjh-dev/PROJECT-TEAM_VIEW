@@ -14,7 +14,7 @@
 // 크기 비교가 훨씬 단순하고 정확하다.
 
 const { app, BrowserWindow, ipcMain, dialog, clipboard } = require('electron')
-const { spawn } = require('child_process')
+const { spawn, execFile } = require('child_process')
 const crypto = require('crypto')
 const fs = require('fs')
 const path = require('path')
@@ -164,6 +164,96 @@ function projectHealth(dir) {
   const health = { hooks, agents, guide: fs.existsSync(path.join(dir, 'CLAUDE.md')) }
   healthCache.set(dir, { at: Date.now(), health })
   return health
+}
+
+// ---------------------------------------------------------------------------
+// 실행 환경 — 팀뷰는 Claude Code 위에서 돈다
+//
+// 팀원이 실제로 일하려면 (1) claude CLI가 깔려 있고 (2) 로그인돼 있어야 한다.
+// 기획·화면설계는 Figma에 만들므로 (3) Figma MCP 연결도 필요하다.
+//
+// 셋 다 **명령으로 확인할 수 있다.** 짐작하지 않는다.
+//   claude auth status → {"loggedIn":true,"email":...,"subscriptionType":"max"}
+//   claude mcp list    → "figma: https://mcp.figma.com/mcp (HTTP) - ✔ Connected"
+//
+// 로그인 자체는 앱 안에서 못 한다. 둘 다 **브라우저 OAuth**라 창을 띄워 주고
+// 끝났는지 지켜보는 것이 앱이 할 수 있는 전부다.
+// ---------------------------------------------------------------------------
+
+/** claude CLI를 한 번 돌리고 출력을 받는다. 실패해도 던지지 않는다. */
+function runClaude(args, timeoutMs = 25_000) {
+  return new Promise((resolve) => {
+    execFile(
+      'claude',
+      args,
+      { shell: true, timeout: timeoutMs, windowsHide: true, encoding: 'utf8' },
+      (err, stdout, stderr) => resolve({ err, out: String(stdout ?? ''), errOut: String(stderr ?? '') }),
+    )
+  })
+}
+
+let envCache = null
+const ENV_TTL_MS = 30_000
+
+/**
+ * 지금 이 컴퓨터가 팀뷰를 쓸 수 있는 상태인가.
+ *
+ * `claude mcp list`는 서버마다 헬스 체크를 해서 몇 초 걸린다. 그래서 결과를 캐시하고,
+ * 로그인 창을 띄운 뒤처럼 **바뀌었을 법한 순간에만** 강제로 다시 본다.
+ */
+async function checkEnv({ force = false } = {}) {
+  if (!force && envCache && Date.now() - envCache.at < ENV_TTL_MS) return envCache.value
+
+  const value = {
+    claude: { installed: false, loggedIn: false, email: null, plan: null },
+    figma: { connected: false, present: false },
+  }
+
+  const auth = await runClaude(['auth', 'status'])
+  const combined = auth.out + auth.errOut
+  // 설치 여부는 '명령을 찾을 수 없다'로 가른다. 메시지는 셸·언어마다 다르므로 넓게 본다.
+  const notFound = /not recognized|command not found|ENOENT|없는 명령|찾을 수 없습니다/i.test(combined)
+  value.claude.installed = !notFound
+  if (!notFound) {
+    try {
+      const j = JSON.parse(auth.out.slice(auth.out.indexOf('{'), auth.out.lastIndexOf('}') + 1))
+      value.claude.loggedIn = Boolean(j.loggedIn)
+      value.claude.email = j.email ?? null
+      value.claude.plan = j.subscriptionType ?? j.authMethod ?? null
+    } catch {
+      /* JSON이 아니면 로그인 안 된 것으로 본다 */
+    }
+  }
+
+  // 로그인도 안 된 상태에서 MCP를 물어봐야 의미가 없다(느리기만 하다).
+  if (value.claude.loggedIn) {
+    const mcp = await runClaude(['mcp', 'list'])
+    const line = (mcp.out + mcp.errOut).split(/\r?\n/).find((l) => /^\s*figma\s*:/i.test(l))
+    value.figma.present = Boolean(line)
+    value.figma.connected = Boolean(line && /connected/i.test(line) && !/needs auth/i.test(line))
+  }
+
+  envCache = { at: Date.now(), value }
+  return value
+}
+
+/**
+ * 로그인 창을 띄운다. **새 콘솔 창**으로 여는 이유는 둘 다 사람이 손으로 끝내야 하는
+ * 대화형 절차이기 때문이다(브라우저가 열리고 코드를 붙여넣는 식). 앱이 stdio를
+ * 가로채면 그 과정을 볼 수도 마칠 수도 없다.
+ */
+function openInTerminal(args, title) {
+  if (process.platform === 'win32') {
+    // start "제목" cmd /k claude ... — 창이 남아야 사용자가 결과를 읽는다
+    spawn('cmd.exe', ['/c', 'start', `"${title}"`, 'cmd', '/k', 'claude', ...args], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: false,
+    }).unref()
+    return true
+  }
+  // 다른 OS는 기본 터미널을 특정하기 어렵다 — 명령을 알려 주는 쪽이 정직하다.
+  return false
 }
 
 // ---------------------------------------------------------------------------
@@ -593,6 +683,31 @@ ipcMain.handle('project:setup', (_e, { dir, parts }) => {
     pumpStatusAll({ force: true })
   }
   return { ...res, health: projectHealth(dir) }
+})
+
+// ---------- 실행 환경 IPC ----------
+
+ipcMain.handle('env:check', (_e, opts) => checkEnv(opts ?? {}))
+
+/**
+ * 로그인/연결을 시작한다. 창을 띄운 뒤 **끝났는지 지켜본다** — 사람이 브라우저에서
+ * 마치는 동안 앱이 알아서 알아채야지, 다시 눌러 보라고 하면 안 된다.
+ */
+ipcMain.handle('env:login', async (_e, what) => {
+  const args = what === 'figma' ? ['mcp', 'add', '--transport', 'http', 'figma', 'https://mcp.figma.com/mcp'] : ['auth', 'login']
+  const title = what === 'figma' ? 'Team View - Figma 연결' : 'Team View - Claude 로그인'
+  if (!openInTerminal(args, title)) {
+    return { ok: false, manual: `claude ${args.join(' ')}`, error: '이 OS에서는 터미널을 자동으로 열 수 없습니다' }
+  }
+  // 최대 3분 동안 30초 간격으로 확인한다. 브라우저 로그인은 보통 1분 안에 끝난다.
+  for (let i = 0; i < 6; i++) {
+    await new Promise((r) => setTimeout(r, 30_000))
+    const env = await checkEnv({ force: true })
+    send('env:status', env)
+    const done = what === 'figma' ? env.figma.connected : env.claude.loggedIn
+    if (done) return { ok: true, env }
+  }
+  return { ok: false, timeout: true, env: await checkEnv({ force: true }) }
 })
 
 ipcMain.handle('project:list', () => {

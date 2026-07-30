@@ -21,6 +21,50 @@ body {
   user-select: none;
 }
 
+/* 실행 환경 배너 — 팀뷰가 돌아갈 조건이 빠졌을 때만 나타난다.
+   맨 위에 두는 이유: 이게 안 되면 아래 무엇을 눌러도 아무 일도 일어나지 않는다. */
+#env {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: rgba(224, 175, 104, 0.14);
+  border-bottom: 1px solid rgba(224, 175, 104, 0.35);
+  color: #e0af68;
+  font-size: 13px;
+}
+
+#env[hidden] {
+  display: none;
+}
+
+#env-msg {
+  flex: 1;
+  min-width: 0;
+}
+
+#env button {
+  padding: 5px 12px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+#env-act {
+  background: #e0af68;
+  border-color: #e0af68;
+  color: #1a1d26;
+  font-weight: 600;
+}
+
+#env-act:hover {
+  background: #eec48a;
+}
+
+#env button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 #bar {
   display: flex;
   align-items: center;

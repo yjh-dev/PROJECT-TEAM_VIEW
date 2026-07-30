@@ -9,6 +9,10 @@ contextBridge.exposeInMainWorld('teamView', {
   removeProject: (dir) => ipcRenderer.invoke('project:remove', dir),
   activateProject: (dir) => ipcRenderer.invoke('project:activate', dir),
   setupProject: (dir, parts) => ipcRenderer.invoke('project:setup', { dir, parts }),
+  // 실행 환경 — claude 설치·로그인, Figma 연결
+  checkEnv: (opts) => ipcRenderer.invoke('env:check', opts),
+  login: (what) => ipcRenderer.invoke('env:login', what),
+  onEnv: (cb) => ipcRenderer.on('env:status', (_e, env) => cb(env)),
   listProjects: () => ipcRenderer.invoke('project:list'),
   sendCommand: (payload) => ipcRenderer.invoke('command:send', payload),
   // 클립보드는 메인 프로세스에 맡긴다. 샌드박스 preload에서는 electron의 clipboard가
