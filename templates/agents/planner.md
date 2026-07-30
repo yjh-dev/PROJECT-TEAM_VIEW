@@ -20,6 +20,9 @@ tools: Read, Write, Edit, Grep, Glob, Bash, mcp__figma__whoami, mcp__figma__get_
   `mcp__figma__generate_diagram`을 쓴다.
 - **작업 전 `mcp__figma__whoami`로 연결을 확인한다.** 연결이 없으면 만들지 말고
   "Figma가 연결되지 않았습니다"라고 보고한다 — 마크다운으로 대신하지 않는다.
+- 연결을 확인했으면 **곧바로 도구를 호출한다.** 사용법 문서·스킬 파일을 먼저 찾지 마라.
+  그러다 없는 경로를 뒤지고 프로젝트 밖까지 검색해 몇 분을 버린 적이 있다. 검색은
+  **이 프로젝트 안**으로 한정한다.
 - 만든 Figma 파일의 **링크를 반드시 한 줄로 밝힌다.**
 - Write/Edit는 Figma에 담기 어려운 것(설정 값, 명령어 목록 같은 텍스트)에만 보조로 쓴다.
 
