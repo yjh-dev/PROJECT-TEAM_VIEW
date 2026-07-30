@@ -788,7 +788,10 @@ async function send() {
     return
   }
   addMsg('me', `나 → ${label}`, text)
-  queuedFor.push({ id: to, at: Date.now() / 1000 })
+  // 무엇을 기다리는지 알 수 있게 **내용도 함께** 들고 있는다. 지금까지는 담당과
+  // 시각만 저장해서 화면에 "지시 1건 대기"라고만 뜨고, 그게 무슨 지시인지 볼 방법이
+  // 없었다.
+  queuedFor.push({ id: to, at: Date.now() / 1000, text })
   const a = agents.get(to)
   if (a) a.queued++
   // 회사가 닫혀 있으면 지시는 파일에 남을 뿐 아무도 집어가지 않는다. 그걸 숨기면
@@ -1049,7 +1052,14 @@ function renderNow(now) {
   const busy = [...agents.values()].filter((a) => a.active)
   if (!busy.length) {
     const waiting = [...agents.values()].reduce((n, a) => n + a.queued, 0)
-    nowEl.textContent = waiting ? `지시 ${waiting}건 대기 중` : '조용합니다 — 진행 중인 작업 없음'
+    // 상단에도 내용을 적는다. 여기가 캐릭터를 쫓지 않고 상태를 보는 자리다.
+    const head = queuedFor.find((q) => q.text)?.text?.replace(/\s+/g, ' ').trim()
+    nowEl.textContent = !waiting
+      ? '조용합니다 — 진행 중인 작업 없음'
+      : head
+        ? `대기 중: ${head.slice(0, 30)}${head.length > 30 ? '…' : ''}${waiting > 1 ? ` 외 ${waiting - 1}건` : ''}`
+        : `지시 ${waiting}건 대기 중`
+    nowEl.title = waiting ? queuedFor.filter((q) => q.text).map((q) => `· ${q.text}`).join('\n') : ''
     nowEl.className = waiting ? 'queued' : ''
     return
   }
@@ -1104,7 +1114,14 @@ function syncOverlay(now) {
     let text = null
     let kind = ''
     if (a.queued > 0) {
-      text = `지시 ${a.queued}건 대기`
+      // **무엇을 기다리는지** 보여 준다. 건수만 적어 두면 "1건 대기"가 무슨 지시인지
+      // 확인할 방법이 없었다. 말풍선은 좁으니 앞부분만, 전문은 마우스를 올리면 나온다.
+      const mine = queuedFor.filter((q) => q.id === a.id && q.text)
+      const head = mine[0]?.text?.replace(/\s+/g, ' ').trim()
+      text = head
+        ? `대기: ${head.slice(0, 24)}${head.length > 24 ? '…' : ''}${a.queued > 1 ? ` 외 ${a.queued - 1}건` : ''}`
+        : `지시 ${a.queued}건 대기`
+      bubble.title = mine.length ? mine.map((q) => `· ${q.text}`).join('\n') : ''
       kind = 'queued'
     } else if (a.task && (a.active || now - a.lastEventAt < 6000 || now < (a.talkUntil ?? 0))) {
       // 일하는 동안에는 말풍선을 **끄지 않는다**. 6초 뒤 사라지게 두었더니

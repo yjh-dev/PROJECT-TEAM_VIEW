@@ -1180,6 +1180,21 @@ function runCommand(c, cmd) {
   }
 
   c.child = child
+  // **지시를 집어갔다는 사실을 남긴다.**
+  //
+  // 훅은 회사가 큐를 맡고 있으면 큐에 손대지 않으므로 `command_taken`도 내지 않는다.
+  // 그런데 회사도 안 냈다 — 그래서 화면의 "지시 1건 대기" 배지를 내릴 신호를 아무도
+  // 보내지 않았다. 리드가 팀원을 부르지 않고 바로 답하는 경우(인사·질문)에는
+  // agent_start조차 없어서 배지가 10분(QUEUE_STALE_SEC)씩 남아 있었다.
+  try {
+    appendJsonl(eventsFileFor(dir), {
+      ts: Date.now() / 1000,
+      type: 'command_taken',
+      agent: cmd.agent || 'lead',
+    })
+  } catch {
+    /* 기록 실패가 실행을 막지는 않는다 */
+  }
   pumpStatusAll({ force: true })
 
   child.on('error', (err) => logRenderer(`claude 실행 실패(${dir}): ${err.message}`))
