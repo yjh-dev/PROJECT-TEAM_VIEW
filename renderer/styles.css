@@ -462,10 +462,10 @@ main {
   color: #eaf2ff;
 }
 
-/* 메시지별 복사 버튼 — **항상 보인다.** 숨겨 뒀더니 있는 줄 모르고 지나쳤다. */
-.msg {
-  padding-right: 34px; /* 버튼 자리 — 글자와 겹치지 않게 */
-}
+/* 메시지별 복사 버튼 — **항상 보인다.** 숨겨 뒀더니 있는 줄 모르고 지나쳤다.
+   버튼 자리(오른쪽 여백)는 아래 `.msg`의 padding에 함께 적어 둔다. 여기서 따로
+   `padding-right`를 주면 뒤에 오는 `padding` 한 줄에 덮여 **버튼이 글자 위로 겹친다** —
+   실제로 그렇게 보내는 이의 이름이 아이콘에 가렸다. */
 
 .msg .copy {
   position: absolute;
@@ -563,7 +563,7 @@ main {
 .msg {
   position: relative;
   max-width: 92%;
-  padding: 7px 11px;
+  padding: 7px 34px 7px 11px; /* 오른쪽은 복사 버튼 자리 */
   border-radius: 10px;
   font-size: 13.5px;
   line-height: 1.45;

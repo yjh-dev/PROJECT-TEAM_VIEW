@@ -407,7 +407,15 @@ def last_assistant_text(transcript_path):
                     parts.append(c["text"])
         elif isinstance(content, str):
             parts.append(content)
-        text = " ".join(" ".join(parts).split())
+        # **줄바꿈을 살린다.** 예전에는 `" ".join(text.split())`으로 공백을 통째로
+        # 압축했는데, 그러면 문단도 목록도 사라져 답변이 한 덩어리 글이 된다. 실제
+        # 화면에서 "- 설계는 …입니다. - 다만 package.json이 …" 처럼 항목이 문장
+        # 중간에 섞여 읽기 어려웠다. 가로 공백만 정리하고 줄은 그대로 둔다
+        # (화면은 `white-space: pre-wrap`이라 줄바꿈이 그대로 보인다).
+        text = "\n".join(parts)
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n[ \t]+", "\n", text)
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
         if text:
             # 180자로 자르던 것을 늘린다. 실측에서 한 시간짜리 작업의 결론이
             # `https://www.figma.com/design/CudC`에서 끊겼다 — **결과물 링크가
