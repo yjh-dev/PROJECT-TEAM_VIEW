@@ -21,6 +21,84 @@ body {
   user-select: none;
 }
 
+/* ---------- 설치 안내 ----------
+   다른 PC에 앱만 옮겼을 때를 위한 화면. 무엇이 없고 왜 필요한지 항목마다 적는다. */
+
+#need {
+  padding: 14px 16px;
+  background: rgba(247, 118, 142, 0.1);
+  border-bottom: 1px solid rgba(247, 118, 142, 0.35);
+  font-size: 13px;
+}
+
+#need[hidden] {
+  display: none;
+}
+
+.need-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #f7768e;
+  margin-bottom: 10px;
+}
+
+.need-head strong {
+  flex: 1;
+}
+
+#need-close {
+  background: none;
+  border: 0;
+  color: #f7768e;
+  font-size: 18px;
+  line-height: 1;
+  padding: 0 4px;
+  cursor: pointer;
+}
+
+.need-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.need-row .nm {
+  min-width: 96px;
+  font-weight: 600;
+}
+
+.need-row .why {
+  flex: 1;
+  color: var(--muted);
+  min-width: 0;
+}
+
+.need-row .why .opt {
+  color: #5c6780;
+}
+
+.need-row button {
+  padding: 4px 11px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.need-row .done {
+  color: #9ece6a;
+  font-family: Consolas, monospace;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.need-foot {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 /* 실행 환경 배너 — 팀뷰가 돌아갈 조건이 빠졌을 때만 나타난다.
    맨 위에 두는 이유: 이게 안 되면 아래 무엇을 눌러도 아무 일도 일어나지 않는다. */
 #env {

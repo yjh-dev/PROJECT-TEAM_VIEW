@@ -1549,6 +1549,8 @@ function renderEnv(env) {
 async function recheckEnv() {
   for (const el of connEl.children) el.classList.add('checking')
   renderEnv(await window.teamView.checkEnv({ force: true }))
+  // 설치를 마치고 돌아오는 길목이기도 하다 — 같이 다시 본다.
+  recheckNeeds()
 }
 
 /**
@@ -1585,8 +1587,87 @@ async function startLogin(what) {
 envActEl.addEventListener('click', () => startLogin(envActEl.dataset.what))
 envAgainEl.addEventListener('click', recheckEnv)
 
+// ---------- 설치 안내 ----------
+//
+// 팀뷰는 앱만 있어서는 동작하지 않는다. claude CLI를 띄우고, 그 활동은 python 훅이
+// 기록한다. 다른 PC에 exe만 옮기면 **화면은 뜨지만 아무 일도 일어나지 않는데**
+// 무엇이 없어서인지 알 방법이 없다. 시작할 때 먼저 확인하고 설치를 돕는다.
+//
+// 설치는 남의 컴퓨터를 건드리는 일이라 **반드시 동의를 받는다.** 확인 창은 메인
+// 프로세스가 띄우고(네이티브), 무엇을 왜 넣는지·어떤 명령이 도는지 그대로 보여 준다.
+
+const needEl = document.getElementById('need')
+const needListEl = document.getElementById('need-list')
+
+function renderNeeds(reqs) {
+  const missing = reqs.filter((r) => !r.installed)
+  // 없는 게 없으면 아예 띄우지 않는다. 잘 돌 때 잔소리를 하지 않는다.
+  if (!missing.length) {
+    needEl.hidden = true
+    return
+  }
+  needEl.hidden = false
+  needListEl.replaceChildren()
+  for (const r of reqs) {
+    const row = document.createElement('div')
+    row.className = 'need-row'
+
+    const nm = document.createElement('span')
+    nm.className = 'nm'
+    nm.textContent = r.label
+
+    const why = document.createElement('span')
+    why.className = 'why'
+    why.textContent = r.why
+    if (r.optional) {
+      const o = document.createElement('span')
+      o.className = 'opt'
+      o.textContent = '  (없어도 동작은 합니다)'
+      why.append(o)
+    }
+
+    row.append(nm, why)
+    if (r.installed) {
+      const ok = document.createElement('span')
+      ok.className = 'done'
+      ok.textContent = `✔ ${r.version ?? '설치됨'}`
+      row.append(ok)
+    } else {
+      const btn = document.createElement('button')
+      btn.type = 'button'
+      btn.textContent = r.canInstall ? '설치하기' : '다운로드'
+      btn.addEventListener('click', async () => {
+        btn.disabled = true
+        const res = await window.teamView.install(r.key)
+        btn.disabled = false
+        if (res?.canceled) return
+        if (!res?.ok) {
+          hintEl.textContent = res?.manual
+            ? `터미널에서 직접 실행하세요: ${res.manual}`
+            : `설치를 시작하지 못했습니다: ${res?.error ?? '알 수 없는 오류'}`
+          return
+        }
+        hintEl.textContent = res.started
+          ? `새 창에서 설치 중입니다: ${res.cmd} — 끝나면 "다시 확인"`
+          : '다운로드 페이지를 열었습니다 — 설치 후 "다시 확인"'
+      })
+      row.append(btn)
+    }
+    needListEl.append(row)
+  }
+}
+
+document.getElementById('need-close').addEventListener('click', () => {
+  needEl.hidden = true
+})
+
+async function recheckNeeds() {
+  renderNeeds(await window.teamView.checkRequirements())
+}
+
 window.teamView.onEnv(renderEnv)
 window.teamView.checkEnv().then(renderEnv)
+recheckNeeds()
 // 로그인이 풀리거나 Figma 연결이 끊기는 일은 앱 밖에서도 일어난다. 계속 지켜본다.
 setInterval(() => window.teamView.checkEnv().then(renderEnv), ENV_POLL_MS)
 

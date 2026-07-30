@@ -11,6 +11,9 @@ contextBridge.exposeInMainWorld('teamView', {
   setupProject: (dir, parts) => ipcRenderer.invoke('project:setup', { dir, parts }),
   // 실행 환경 — claude 설치·로그인, Figma 연결
   checkEnv: (opts) => ipcRenderer.invoke('env:check', opts),
+  // 이 컴퓨터에 필요한 프로그램이 깔려 있는지 / 설치를 돕기
+  checkRequirements: () => ipcRenderer.invoke('env:requirements'),
+  install: (key) => ipcRenderer.invoke('env:install', key),
   login: (what) => ipcRenderer.invoke('env:login', what),
   onEnv: (cb) => ipcRenderer.on('env:status', (_e, env) => cb(env)),
   listProjects: () => ipcRenderer.invoke('project:list'),

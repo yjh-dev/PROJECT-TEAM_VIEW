@@ -13,7 +13,7 @@
 // 놓치거나 중복 이벤트를 주는 일이 잦고, 우리가 읽는 건 append-only 로그라
 // 크기 비교가 훨씬 단순하고 정확하다.
 
-const { app, BrowserWindow, ipcMain, dialog, clipboard } = require('electron')
+const { app, BrowserWindow, ipcMain, dialog, clipboard, shell } = require('electron')
 const { spawn, execFile } = require('child_process')
 const crypto = require('crypto')
 const fs = require('fs')
@@ -180,16 +180,86 @@ function projectHealth(dir) {
 // 끝났는지 지켜보는 것이 앱이 할 수 있는 전부다.
 // ---------------------------------------------------------------------------
 
-/** claude CLI를 한 번 돌리고 출력을 받는다. 실패해도 던지지 않는다. */
-function runClaude(args, timeoutMs = 25_000) {
+/** 명령을 한 번 돌리고 출력을 받는다. 실패해도 던지지 않는다. */
+function runCmd(cmd, args, timeoutMs = 25_000) {
   return new Promise((resolve) => {
     execFile(
-      'claude',
+      cmd,
       args,
       { shell: true, timeout: timeoutMs, windowsHide: true, encoding: 'utf8' },
       (err, stdout, stderr) => resolve({ err, out: String(stdout ?? ''), errOut: String(stderr ?? '') }),
     )
   })
+}
+
+const runClaude = (args, t) => runCmd('claude', args, t)
+
+/** 명령을 찾을 수 없다는 응답인가. 메시지는 셸·언어마다 달라 넓게 본다. */
+const NOT_FOUND = /not recognized|command not found|ENOENT|없는 명령|찾을 수 없습니다|is not recognized/i
+
+/**
+ * 팀뷰가 돌려면 이 컴퓨터에 있어야 하는 것들.
+ *
+ * **앱만 복사해서는 동작하지 않는다.** 팀뷰는 claude CLI를 띄우고, 그 활동은 python
+ * 훅이 기록한다. 다른 PC에 exe만 옮기면 화면은 뜨지만 아무 일도 일어나지 않는데,
+ * 무엇이 없어서인지 알 방법이 없다. 그래서 이름을 붙여 하나씩 확인한다.
+ *
+ * `install`이 있는 것만 앱이 대신 실행해 줄 수 있다(그것도 **동의를 받은 뒤**).
+ * 나머지는 설치 프로그램을 받아야 하므로 공식 페이지를 열어 주는 데서 멈춘다 —
+ * 남의 컴퓨터에 설치 파일을 내려받아 실행하는 일까지 앱이 하지는 않는다.
+ */
+const REQUIREMENTS = [
+  {
+    key: 'node',
+    label: 'Node.js',
+    probe: ['node', ['--version']],
+    why: 'Claude Code를 설치·실행하는 데 필요합니다',
+    url: 'https://nodejs.org/ko/download',
+  },
+  {
+    key: 'python',
+    label: 'Python',
+    probe: ['python', ['--version']],
+    why: '팀 활동을 화면에 기록하는 훅이 python으로 돕니다. 없으면 사무실이 조용합니다',
+    url: 'https://www.python.org/downloads/',
+  },
+  {
+    key: 'claude',
+    label: 'Claude Code',
+    probe: ['claude', ['--version']],
+    why: '팀원이 실제로 일하는 실행기입니다',
+    install: ['npm', ['i', '-g', '@anthropic-ai/claude-code']],
+    needs: 'node',
+  },
+  {
+    key: 'git',
+    label: 'Git',
+    probe: ['git', ['--version']],
+    why: '회사는 권한을 묻지 않고 파일을 고칩니다. 되돌릴 수단은 git뿐입니다',
+    url: 'https://git-scm.com/downloads',
+    optional: true,
+  },
+]
+
+/** 설치된 것과 빠진 것을 가른다. */
+async function checkRequirements() {
+  const out = []
+  for (const r of REQUIREMENTS) {
+    const res = await runCmd(r.probe[0], r.probe[1], 10_000)
+    const combined = res.out + res.errOut
+    const ok = !NOT_FOUND.test(combined) && !(res.err && !res.out.trim())
+    out.push({
+      key: r.key,
+      label: r.label,
+      why: r.why,
+      url: r.url ?? null,
+      optional: Boolean(r.optional),
+      canInstall: Boolean(r.install),
+      installed: ok,
+      version: ok ? combined.trim().split(/\r?\n/)[0].slice(0, 40) : null,
+    })
+  }
+  return out
 }
 
 let envCache = null
@@ -213,8 +283,7 @@ async function checkEnv({ force = false } = {}) {
 
   const auth = await runClaude(['auth', 'status'])
   const combined = auth.out + auth.errOut
-  // 설치 여부는 '명령을 찾을 수 없다'로 가른다. 메시지는 셸·언어마다 다르므로 넓게 본다.
-  const notFound = /not recognized|command not found|ENOENT|없는 명령|찾을 수 없습니다/i.test(combined)
+  const notFound = NOT_FOUND.test(combined)
   value.claude.installed = !notFound
   if (!notFound) {
     try {
@@ -244,10 +313,10 @@ async function checkEnv({ force = false } = {}) {
  * 대화형 절차이기 때문이다(브라우저가 열리고 코드를 붙여넣는 식). 앱이 stdio를
  * 가로채면 그 과정을 볼 수도 마칠 수도 없다.
  */
-function openInTerminal(args, title) {
+function openInTerminal(args, title, exe = 'claude') {
   if (process.platform === 'win32') {
-    // start "제목" cmd /k claude ... — 창이 남아야 사용자가 결과를 읽는다
-    spawn('cmd.exe', ['/c', 'start', `"${title}"`, 'cmd', '/k', 'claude', ...args], {
+    // start "제목" cmd /k <exe> ... — 창이 남아야 사용자가 결과를 읽는다
+    spawn('cmd.exe', ['/c', 'start', `"${title}"`, 'cmd', '/k', exe, ...args], {
       detached: true,
       stdio: 'ignore',
       windowsHide: false,
@@ -690,6 +759,57 @@ ipcMain.handle('project:setup', (_e, { dir, parts }) => {
 // ---------- 실행 환경 IPC ----------
 
 ipcMain.handle('env:check', (_e, opts) => checkEnv(opts ?? {}))
+ipcMain.handle('env:requirements', () => checkRequirements())
+
+/**
+ * 빠진 프로그램을 설치하도록 돕는다. **반드시 동의를 먼저 받는다.**
+ *
+ * 남의 컴퓨터에 프로그램을 넣는 일이라 앱이 조용히 처리하면 안 된다. 무엇을 왜 넣는지,
+ * 어떤 명령이 실행되는지 그대로 보여주고 사람이 누른 뒤에만 진행한다.
+ *
+ * 그리고 **앱이 직접 설치하지 않는다.**
+ *   · npm으로 되는 것(claude) → 명령을 새 터미널에 띄운다. 무엇이 도는지 보인다.
+ *   · 설치 프로그램이 필요한 것(Node·Python·Git) → 공식 다운로드 페이지를 연다.
+ * 설치 파일을 대신 내려받아 실행하는 데까지 가지 않는 이유는, 그 순간 앱이 무엇을
+ * 실행하는지 사람이 확인할 방법이 사라지기 때문이다.
+ */
+ipcMain.handle('env:install', async (_e, key) => {
+  const req = REQUIREMENTS.find((r) => r.key === key)
+  if (!req) return { ok: false, error: '알 수 없는 항목입니다' }
+
+  const cmdText = req.install ? `${req.install[0]} ${req.install[1].join(' ')}` : null
+  const detail = req.install
+    ? `아래 명령을 새 터미널 창에서 실행합니다.\n\n    ${cmdText}\n\n${req.why}`
+    : `설치 프로그램이 필요합니다. 공식 다운로드 페이지를 브라우저로 엽니다.\n\n    ${req.url}\n\n${req.why}\n\n내려받아 설치한 뒤 "다시 확인"을 눌러 주세요.`
+
+  const { response } = await dialog.showMessageBox(win, {
+    type: 'question',
+    buttons: ['취소', req.install ? '설치 실행' : '다운로드 페이지 열기'],
+    defaultId: 1,
+    cancelId: 0,
+    title: `${req.label} 설치`,
+    message: `${req.label}이(가) 설치되어 있지 않습니다. 진행할까요?`,
+    detail,
+  })
+  if (response !== 1) return { ok: false, canceled: true }
+
+  if (req.install) {
+    // 선행 조건이 없으면 명령 자체가 실패한다(예: npm 없이 claude 설치).
+    if (req.needs) {
+      const dep = await runCmd(REQUIREMENTS.find((r) => r.key === req.needs).probe[0], ['--version'], 10_000)
+      if (NOT_FOUND.test(dep.out + dep.errOut)) {
+        return { ok: false, error: `${req.needs}가 먼저 필요합니다` }
+      }
+    }
+    if (!openInTerminal(req.install[1], `Team View - ${req.label} 설치`, req.install[0])) {
+      return { ok: false, manual: cmdText }
+    }
+    return { ok: true, started: true, cmd: cmdText }
+  }
+
+  await shell.openExternal(req.url)
+  return { ok: true, opened: req.url }
+})
 
 /**
  * 로그인/연결을 시작한다. 창을 띄운 뒤 **끝났는지 지켜본다** — 사람이 브라우저에서
