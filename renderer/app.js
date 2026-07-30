@@ -268,8 +268,33 @@ const ACTIVITY = {
   TodoWrite: { icon: '☑', word: '계획 정리' },
 }
 
+// MCP 도구는 이름이 `mcp__<서버>__<도구>` 꼴로 온다. 그대로 두면 이름표에
+// `◆ mcp__figma__create_new_file` 같은 날것이 뜬다 — 기획·화면설계를 Figma에
+// 만들라고 해 놓고 정작 그 순간이 화면에서 가장 안 읽히는 표시가 된다.
+const FIGMA_WORDS = {
+  create_new_file: '파일 만드는 중',
+  generate_figma_design: '화면 그리는 중',
+  generate_diagram: '플로우 그리는 중',
+  use_figma: '디자인 작업 중',
+  get_screenshot: '결과 확인 중',
+  get_design_context: '디자인 읽는 중',
+  get_metadata: '구조 보는 중',
+  whoami: '연결 확인 중',
+}
+
+function mcpActivity(tool) {
+  const m = /^mcp__([^_]+(?:_[^_]+)*?)__(.+)$/.exec(tool)
+  if (!m) return null
+  const [, server, name] = m
+  if (server === 'figma') return { icon: '🎨', word: FIGMA_WORDS[name] ?? `Figma ${name}` }
+  // 다른 MCP 서버는 서버 이름만 남긴다. 도구 이름을 통째로 보여 줘 봐야 안 읽힌다.
+  return { icon: '◈', word: `${server} ${name.replace(/_/g, ' ')}` }
+}
+
 function activityOf(ev) {
-  if (ev.type === 'tool') return ACTIVITY[ev.tool] ?? { icon: '◆', word: ev.tool ?? '작업' }
+  if (ev.type === 'tool') {
+    return ACTIVITY[ev.tool] ?? mcpActivity(String(ev.tool ?? '')) ?? { icon: '◆', word: ev.tool ?? '작업' }
+  }
   if (ev.type === 'agent_start') return { icon: '▶', word: '시작' }
   if (ev.type === 'error') return { icon: '❗', word: '실패' }
   if (ev.type === 'prompt') return { icon: '☞', word: '지시 확인' }
@@ -294,7 +319,10 @@ function describe(ev) {
       if (ev.tool === 'Read') return `${d || '파일'} 읽는 중`
       if (ev.tool === 'Bash') return ev.detail ? `$ ${String(ev.detail).slice(0, 34)}` : '명령 실행 중'
       if (ev.tool === 'Grep' || ev.tool === 'Glob') return '코드 찾는 중'
-      if (ev.tool === 'Task') return '팀원 부르는 중'
+      if (ev.tool === 'Task' || ev.tool === 'Agent') return '팀원 부르는 중'
+      // MCP 도구는 이름을 그대로 쓰면 `mcp__figma__create_new_file 실행 중`이 된다.
+      const mcp = mcpActivity(String(ev.tool ?? ''))
+      if (mcp) return mcp.word
       return `${ev.tool} 실행 중`
     }
     case 'prompt':
@@ -647,6 +675,17 @@ function renderTargets() {
  * 보는 사람은 모른 채 계속 그 팀원에게 보내고 있었다.
  */
 function updateComposer() {
+  // 붙인 프로젝트가 없으면 **보낼 곳이 없다.** 그런데도 버튼이 살아 있어서, 눌러 보고
+  // 실패 메시지를 읽은 뒤에야 그 사실을 알게 된다. 먼저 할 일을 입력창에 적어 준다.
+  if (!activeDir) {
+    sendBtn.disabled = true
+    sendBtn.textContent = '보내기'
+    inputEl.disabled = true
+    inputEl.placeholder = '먼저 위의 "+ 프로젝트"로 작업할 폴더를 붙이세요.'
+    return
+  }
+  sendBtn.disabled = false
+  inputEl.disabled = false
   const label = target === 'all' ? '전체' : (agents.get(target)?.label ?? target)
   sendBtn.textContent = `${label}에게 보내기`
   inputEl.placeholder =
@@ -748,6 +787,13 @@ const SOLO = [
 let nextIdleAt = 0
 
 function scheduleIdle(now) {
+  // **붙인 프로젝트가 없으면 사무실은 조용하다.**
+  //
+  // 유휴 연출(커피·잡담)은 "일이 없는 팀"을 보여주는 것이지 "아직 출근하지 않은 팀"이
+  // 아니다. 프로젝트를 하나도 안 붙인 첫 화면에서 캐릭터들이 "이번 스프린트 일정
+  // 어떻게 돼요?"라고 떠들면, 무엇을 해야 하는지(프로젝트 추가) 알려 주는 대신
+  // 이미 굴러가는 것처럼 보인다.
+  if (!activeDir) return
   if (now < nextIdleAt) return
   nextIdleAt = now + 2200 + Math.random() * 2800
 
@@ -1239,6 +1285,7 @@ window.teamView.onStatus(({ projects, activeDir: active, max }) => {
   lastProjects = projects
   renderTabs(projects, active, max)
 
+  updateComposer() // 프로젝트가 붙고 떨어질 때마다 입력창이 따라가야 한다
   const me = projects.find((p) => p.dir === active)
   const trouble = me ? diagnose(me) : { text: '프로젝트를 추가하세요', warn: true }
   statusEl.textContent = trouble.text
@@ -1373,9 +1420,19 @@ function renderTabs(projects, active, max) {
     })
 
     tab.append(nm, st, x)
-    tab.addEventListener('click', () => {
+    // 탭은 div라서 그냥 두면 **키보드로 프로젝트를 바꿀 수 없다.** 버튼처럼 만든다.
+    tab.tabIndex = 0
+    tab.setAttribute('role', 'button')
+    tab.setAttribute('aria-current', p.dir === active ? 'true' : 'false')
+    const go = () => {
       if (p.dir === activeDir) return
       window.teamView.activateProject(p.dir)
+    }
+    tab.addEventListener('click', go)
+    tab.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return
+      e.preventDefault()
+      go()
     })
     tabsEl.append(tab)
   }
@@ -1523,9 +1580,18 @@ function renderConn(env) {
     led.className = 'led'
     el.append(led, document.createTextNode(it.text))
     // 문제가 있으면 누르는 순간 그걸 푸는 절차로, 정상이면 다시 확인으로 간다.
-    el.addEventListener('click', () => {
+    const act = () => {
       if (it.state === 'ok' || it.state === 'off') recheckEnv()
       else startLogin(it.key)
+    }
+    // span이라 키보드로는 닿지 않았다. 상태를 확인하고 로그인까지 가는 통로라 열어 둔다.
+    el.tabIndex = 0
+    el.setAttribute('role', 'button')
+    el.addEventListener('click', act)
+    el.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return
+      e.preventDefault()
+      act()
     })
     connEl.append(el)
   }
@@ -1535,8 +1601,14 @@ function renderEnv(env) {
   lastEnv = env
   renderConn(env)
   const block = envBlocker(env)
-  envEl.hidden = !block
-  if (!block) return
+  // **설치 안내가 떠 있으면 배너를 겹쳐 띄우지 않는다.**
+  //
+  // claude가 없으면 설치 안내(무엇을 깔아야 하는지)와 이 배너(로그인하라)가 같은 말을
+  // 두 번 하게 된다. 상태 점까지 세면 세 번이다. 실측하니 그 상태에서 화면 위쪽
+  // 311px가 경고로만 채워졌다. 설치가 먼저이므로 그쪽에 자리를 내준다.
+  const needShown = !needEl.hidden
+  envEl.hidden = !block || needShown
+  if (!block || needShown) return
   envMsgEl.textContent = block.hint ? `${block.msg}  (${block.hint})` : block.msg
   envActEl.hidden = !block.action
   if (block.action) {
@@ -1663,6 +1735,8 @@ document.getElementById('need-close').addEventListener('click', () => {
 
 async function recheckNeeds() {
   renderNeeds(await window.teamView.checkRequirements())
+  // 안내가 사라졌다면 그동안 눌러 뒀던 배너가 다시 나올 자리다.
+  if (lastEnv) renderEnv(lastEnv)
 }
 
 window.teamView.onEnv(renderEnv)
