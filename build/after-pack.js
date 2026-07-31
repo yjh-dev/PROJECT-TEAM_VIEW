@@ -39,13 +39,27 @@ exports.default = async (context) => {
 
   const info = context.packager.appInfo
   const exe = path.join(context.appOutDir, `${info.productFilename}.exe`)
-  const ico = path.join(context.outDir, '.icon-ico', 'icon.ico')
   const rcedit = findRcedit()
+
+  // **우리가 만든 아이콘을 먼저 쓴다.**
+  //
+  // 예전에는 electron-builder가 변환해 두는 `<out>/.icon-ico/icon.ico`만 봤는데,
+  // 그 파일은 **이 훅이 돈 뒤에** 만들어진다(nsis 타깃을 빌드할 때). 이전 빌드가
+  // 남긴 파일이 우연히 있어서 그동안 통했을 뿐이고, release/를 청소하자마자
+  // "변환된 아이콘이 없습니다"로 건너뛰며 exe가 `ProductName: Electron`으로 나갔다.
+  //
+  // `build/icon.ico`는 tools/make-icon.js가 만들어 저장소에 두는 파일이라 순서에
+  // 걸리지 않는다. 크기도 6종(16~256)이라 변환본보다 낫다.
+  const ours = path.join(__dirname, 'icon.ico')
+  const converted = path.join(context.outDir, '.icon-ico', 'icon.ico')
+  const ico = fs.existsSync(ours) ? ours : converted
 
   // **조용히 넘어가지 않는다.** 아이콘이 빠진 채로 배포되는 것이 이번 문제의
   // 시작이었다. 무엇이 없어서 건너뛰는지 빌드 로그에 남긴다.
   if (!rcedit) return console.warn('  ⚠ rcedit를 찾지 못해 아이콘·버전 정보를 건너뜁니다')
-  if (!fs.existsSync(ico)) return console.warn(`  ⚠ 변환된 아이콘이 없습니다: ${ico}`)
+  if (!fs.existsSync(ico)) {
+    return console.warn(`  ⚠ 아이콘 파일이 없습니다: ${ico} — \`pnpm run icon\`으로 만드세요`)
+  }
   if (!fs.existsSync(exe)) return console.warn(`  ⚠ 실행파일이 없습니다: ${exe}`)
 
   const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'))
@@ -59,5 +73,16 @@ exports.default = async (context) => {
     '--set-file-version', info.version,
     '--set-product-version', `${info.version}.0`,
   ])
-  console.log(`  ✓ 아이콘·버전 정보 적용 (${info.productName} ${info.version})`)
+  // **넣었다고 믿지 말고 도로 읽어 본다.**
+  //
+  // 이 훅이 건너뛰어도 남는 것은 로그 한 줄짜리 경고뿐이라, 긴 빌드 출력에 묻히면
+  // `ProductName: Electron`인 exe가 그대로 나간다(실제로 그렇게 나갔다). 값을 도로
+  // 읽어 확인하고, 안 박혔으면 빌드를 세운다.
+  const got = execFileSync(rcedit, [exe, '--get-version-string', 'ProductName'], {
+    encoding: 'utf8',
+  }).trim()
+  if (got !== info.productName) {
+    throw new Error(`아이콘·버전 정보가 적용되지 않았습니다 (ProductName="${got}", 기대="${info.productName}")`)
+  }
+  console.log(`  ✓ 아이콘·버전 정보 적용 (${info.productName} ${info.version}) — 되읽어 확인함`)
 }
