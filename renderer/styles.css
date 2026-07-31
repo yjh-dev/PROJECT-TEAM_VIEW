@@ -726,6 +726,73 @@ main {
   pointer-events: none;
 }
 
+/* 처음 열었을 때 — 사무실을 가리고 "무엇을 해야 하는지"를 화면 한가운데 둔다.
+   빈 사무실을 보여 주는 것보다, 다음 한 걸음을 크게 보여 주는 편이 낫다. */
+#welcome {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 24px;
+  text-align: center;
+  /* 아래 사무실이 비쳐 보이게 — 이 앱이 무엇인지는 그대로 전해진다 */
+  background: radial-gradient(ellipse at center, rgba(17, 19, 26, 0.94) 40%, rgba(17, 19, 26, 0.72));
+}
+
+#welcome[hidden] {
+  display: none;
+}
+
+/* 안내가 떠 있는 동안은 이름표·말풍선을 내린다 */
+#stage-wrap.empty #overlay {
+  display: none;
+}
+
+#welcome h2 {
+  margin: 0;
+  font-size: 21px;
+  color: var(--text);
+}
+
+#welcome p {
+  margin: 0;
+  max-width: 42ch;
+  font-size: 13px;
+  line-height: 1.65;
+  /* 뒤로 사무실이 비쳐 배경이 고르지 않다. --muted보다 한 단계 밝혀 둔다. */
+  color: #9aa4ba;
+}
+
+#welcome-add {
+  margin-top: 4px;
+  padding: 11px 26px;
+  font-size: 15px;
+  font-weight: 700;
+  color: #10131b;
+  background: #7dcfff;
+  border: 0;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+#welcome-add:hover {
+  background: #9bdbff;
+}
+
+#welcome .hint {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #5f6779;
+}
+
+#welcome .hint b {
+  color: var(--muted);
+  font-weight: 700;
+}
+
 /* 이름표 — 캐릭터 **머리 위**에 뜬다 */
 .tag {
   position: absolute;

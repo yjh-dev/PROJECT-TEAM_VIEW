@@ -29,6 +29,9 @@ const ctx = canvas.getContext('2d')
 const statusEl = document.getElementById('status')
 const tabsEl = document.getElementById('tabs')
 const addBtn = document.getElementById('add')
+const welcomeEl = document.getElementById('welcome')
+const stageWrapEl = document.getElementById('stage-wrap')
+const welcomeAddEl = document.getElementById('welcome-add')
 const setupBtn = document.getElementById('setup')
 const overlay = document.getElementById('overlay')
 const targetsEl = document.getElementById('targets')
@@ -1393,6 +1396,7 @@ window.teamView.onReset(({ dir } = {}) => {
   redrawChat(activeDir)
 })
 
+let seeded = false // 첫 안내를 한 번만 띄우기 위한 표시
 window.teamView.onStatus(({ projects, activeDir: active, max }) => {
   activeDir = active
   lastProjects = projects
@@ -1411,6 +1415,14 @@ window.teamView.onStatus(({ projects, activeDir: active, max }) => {
   // 빠진 것을 채우는 것과 낡은 것을 갱신하는 것은 다른 일이다. 버튼이 무엇을 할지
   // 이름으로 밝힌다 — 같은 이름이면 눌러 보고 나서야 알게 된다.
   setupBtn.textContent = parts.some((p) => p.update) ? '팀 갱신' : '세팅하기'
+
+  // 첫 안내는 **프로젝트가 있는지 알고 난 뒤에** 띄운다. 예전에는 시작하자마자
+  // "캐릭터를 클릭하고 지시를 보내세요"라고 했는데, 보낼 프로젝트가 없을 때도
+  // 똑같이 나와서 화면 한가운데의 안내와 어긋났다.
+  if (!seeded) {
+    seeded = true
+    if (me) addMsg('sys', '', '캐릭터를 클릭하거나 위 칩으로 대상을 고르고 지시를 보내세요.')
+  }
 })
 
 const stackEl = document.getElementById('stack')
@@ -1600,9 +1612,16 @@ function renderTabs(projects, active, max) {
   addBtn.title = addBtn.disabled
     ? `동시에 붙일 수 있는 프로젝트는 ${max}개까지입니다`
     : `프로젝트를 하나 더 붙입니다 (최대 ${max}개)`
+
+  // 붙인 것이 하나도 없으면 사무실 대신 안내를 보여 준다. 상단 구석의 작은 배지와
+  // 버튼만으로는 처음 여는 사람이 다음 걸음을 찾지 못했다.
+  welcomeEl.hidden = projects.length > 0
+  // 이름표까지 같이 떠 있으면 안내문 위로 흰 딱지 열한 개가 겹친다. 보낼 곳도 없는
+  // 이름들이라 지금은 알려 줄 것이 없다.
+  stageWrapEl.classList.toggle('empty', projects.length === 0)
 }
 
-addBtn.addEventListener('click', async () => {
+async function attachProject() {
   const res = await window.teamView.addProject()
   if (!res?.ok) {
     if (!res?.canceled && res?.error) hintEl.textContent = res.error
@@ -1613,7 +1632,10 @@ addBtn.addEventListener('click', async () => {
   // "지시를 보내도 아무 일도 안 일어난다"가 된 적이 있다.
   if (missingParts(res.health).length) await runSetup(res.dir, res.health)
   else hintEl.textContent = `${baseName(res.dir)} 붙였습니다 — 팀원 ${res.health.agents}명`
-})
+}
+
+addBtn.addEventListener('click', attachProject)
+welcomeAddEl.addEventListener('click', attachProject)
 
 // ---------- 작업 취소 ----------
 //
@@ -1916,7 +1938,6 @@ recheckNeeds()
 setInterval(() => window.teamView.checkEnv().then(renderEnv), ENV_POLL_MS)
 
 renderTargets()
-addMsg('sys', '', '캐릭터를 클릭하거나 위 칩으로 대상을 고르고 지시를 보내세요.')
 refreshObstacles()
 resize()
 requestAnimationFrame(loop)
