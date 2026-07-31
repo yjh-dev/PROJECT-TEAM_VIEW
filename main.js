@@ -828,26 +828,48 @@ function createWindow() {
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'))
 }
 
-app.whenReady().then(() => {
-  createWindow()
-
-  win.webContents.once('did-finish-load', () => {
-    const projects = loadProjects()
-    const saved = loadConfig().activeDir
-    activeDir = projects.includes(saved) ? saved : (projects[0] ?? null)
-    // **보이지 않아도 회사는 연다.** 탭에 없는 프로젝트가 일을 멈추면 "동시에
-    // 세 개"가 성립하지 않는다. 화면만 하나일 뿐이다.
-    for (const dir of projects) {
-      openCompany(dir)
-      startWatching(dir, { replay: dir === activeDir })
-    }
-    pumpStatusAll({ force: true })
+/**
+ * **팀뷰는 한 번에 하나만 뜬다.**
+ *
+ * 앱 하나가 프로젝트를 셋까지 다루므로 창을 여러 개 띄울 이유가 없다. 반면 두 개가
+ * 뜨면 조용히 망가진다 — `openCompany`는 남의 클레임을 확인하지 않고 덮어쓰기 때문에
+ * **둘 다 자기가 회사라고 믿고 같은 대기열을 집어간다.** 같은 지시가 두 번 실행될 수
+ * 있다. 설정(config.json)·대화 기록·세션 id도 전부 한 벌뿐이라 서로 덮어쓴다.
+ *
+ * 두 번째 실행은 창을 새로 만들지 않고 **이미 떠 있는 창을 앞으로 가져온 뒤** 스스로
+ * 종료한다. 바로가기를 두 번 눌렀을 때 아무 반응이 없으면 안 켜진 줄 알기 때문이다.
+ */
+if (!app.requestSingleInstanceLock()) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    if (!win || win.isDestroyed()) return
+    if (win.isMinimized()) win.restore()
+    win.show()
+    win.focus()
   })
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+  app.whenReady().then(() => {
+    createWindow()
+
+    win.webContents.once('did-finish-load', () => {
+      const projects = loadProjects()
+      const saved = loadConfig().activeDir
+      activeDir = projects.includes(saved) ? saved : (projects[0] ?? null)
+      // **보이지 않아도 회사는 연다.** 탭에 없는 프로젝트가 일을 멈추면 "동시에
+      // 세 개"가 성립하지 않는다. 화면만 하나일 뿐이다.
+      for (const dir of projects) {
+        openCompany(dir)
+        startWatching(dir, { replay: dir === activeDir })
+      }
+      pumpStatusAll({ force: true })
+    })
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    })
   })
-})
+}
 
 app.on('window-all-closed', () => {
   for (const dir of [...watches.keys()]) stopWatching(dir)
