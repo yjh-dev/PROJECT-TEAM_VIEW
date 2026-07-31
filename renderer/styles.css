@@ -825,6 +825,22 @@ main {
   padding: 2px;
 }
 
+/* 되돌릴 수 없는 명령(rm -rf, git reset --hard, DROP TABLE …).
+   회사는 권한을 묻지 않고 지운다. 나중에 무엇이 지워졌는지 따질 수 있어야 해서
+   줄이지도, '도구 활동' 토글로 감추지도 않고 눈에 띄게 남긴다. */
+.msg.warn {
+  align-self: flex-start;
+  background: #3a2222;
+  border: 1px solid #7a3b3b;
+  color: #ffd9d4;
+  /* 명령은 길다. 잘라 보여 주면 이 줄을 남기는 의미가 없다. */
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
 #chat footer {
   padding: 10px;
   border-top: 1px solid var(--line);
@@ -901,6 +917,29 @@ main {
   min-height: 1.1em;
   font-size: 12px;
   color: #e0af68;
+}
+
+/* 로컬 실행 버튼 — 돌고 있으면 초록으로 확실히 구분한다 */
+#run {
+  white-space: nowrap;
+}
+
+#run.on {
+  color: #0f1a12;
+  background: #7ddb9a;
+  border-color: #7ddb9a;
+}
+
+#run-url {
+  font-size: 12px;
+  color: #7dcfff;
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+#run-url:hover {
+  text-decoration: underline;
 }
 
 #stage-wrap {

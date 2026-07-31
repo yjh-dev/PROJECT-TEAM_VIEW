@@ -72,6 +72,17 @@ SECRETISH = re.compile(
     r"AKIA|ASIA|gh[posur]_|github_pat_|xox[baprse]-|AIza|sk-|_live_|BEGIN [A-Z ]*PRIVATE KEY",
 )
 
+# 되돌릴 수 없는 명령. 이런 건 **끝까지 기록한다** — 무엇을 지웠는지가 전부다.
+DESTRUCTIVE = re.compile(
+    r"\brm\s+-[a-zA-Z]*[rf]|\brmdir\b|\bdel\s+/|\bRemove-Item\b|\bmv\s+|\bMove-Item\b"
+    r"|\bgit\s+(reset\s+--hard|clean\s+-[a-zA-Z]*[fdx]|checkout\s+--|push\s+.*--force)"
+    r"|\bDROP\s+(TABLE|DATABASE|SCHEMA)\b|\bTRUNCATE\b"
+    r"|\bmigrate\s+reset\b|\bdb\s+push\s+.*--accept-data-loss",
+    re.IGNORECASE,
+)
+CMD_KEEP = 120           # 보통 명령
+DESTRUCTIVE_KEEP = 600   # 지우는 명령 — 대상이 전부 보여야 한다
+
 
 def agent_of(payload):
     """이 호출의 주인. **추측하지 않는다** — 페이로드가 직접 알려준다.
@@ -428,11 +439,17 @@ def last_assistant_text(transcript_path):
 def detail_for(tool, ti):
     if not isinstance(ti, dict):
         return None
-    if tool == "Bash":
+    if tool == "Bash" or tool == "PowerShell":
         cmd = " ".join(str(ti.get("command") or "").split())  # 줄바꿈·연속 공백 정리
         if SECRETISH.search(cmd):
             return "(민감한 명령 — 생략)"
-        return cmd[:44]
+        # **지우는 명령은 자르지 않는다.**
+        #
+        # 44자에서 잘랐더니 `rm -rf board-scaffold-tmp`와 `rm -rf board`가 화면에서
+        # 똑같이 `rm -rf boar`로 보였다. 회사는 권한을 묻지 않고 지우는데, 무엇을
+        # 지웠는지 확인할 방법이 없으면 사고가 나도 알 수가 없다. 실제로 무엇이
+        # 지워졌는지 알아내려고 세션 기록을 직접 파헤쳐야 했다.
+        return cmd[:DESTRUCTIVE_KEEP if DESTRUCTIVE.search(cmd) else CMD_KEEP]
     for key in ("file_path", "notebook_path", "path", "pattern"):
         v = ti.get(key)
         if isinstance(v, str) and v:

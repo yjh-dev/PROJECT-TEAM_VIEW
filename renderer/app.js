@@ -585,6 +585,15 @@ function applyEvent(ev) {
 // 이벤트에 이미 다 들어 있다 — `{type:'tool', tool:'Write', detail:'<경로>', agent}`.
 // 새로 기록할 것은 없고 모아서 보여 주기만 하면 된다.
 
+// 되돌릴 수 없는 명령. 훅의 DESTRUCTIVE와 짝이다 — 훅은 자르지 않고 남기고,
+// 여기서는 솎아내지 않고 눈에 띄게 보여 준다.
+const DESTRUCTIVE_CMD =
+  /\brm\s+-[a-zA-Z]*[rf]|\brmdir\b|\bdel\s+\/|\bRemove-Item\b|\bMove-Item\b|\bgit\s+(reset\s+--hard|clean\s+-[a-zA-Z]*[fdx]|checkout\s+--|push\s+.*--force)|\bDROP\s+(TABLE|DATABASE|SCHEMA)\b|\bTRUNCATE\b|\bmigrate\s+reset\b/i
+
+function isDestructive(ev) {
+  return (ev.tool === 'Bash' || ev.tool === 'PowerShell') && DESTRUCTIVE_CMD.test(String(ev.detail ?? ''))
+}
+
 const FILE_TOOLS = { Write: '작성', Edit: '수정', MultiEdit: '수정', NotebookEdit: '수정' }
 const FIGMA_URL = /https:\/\/(?:www\.)?figma\.com\/[^\s)>\]"']+/g
 
@@ -787,6 +796,15 @@ function renderMsg(kind, who, text) {
 }
 
 function chatFromEvent(ev, agent) {
+  // **지우는 명령은 줄이지도 접지도 않는다.**
+  //
+  // 도구 줄은 시끄러워서 2.5초에 한 줄로 솎고 '도구 활동'을 끄면 아예 감춘다.
+  // 그런데 그 규칙에 `rm -rf`까지 걸려서, 무엇을 지웠는지가 화면에서 통째로
+  // 사라질 수 있었다. 회사는 권한을 묻지 않고 지운다 — 이것만은 항상 남긴다.
+  if (ev.type === 'tool' && isDestructive(ev)) {
+    addMsg('warn', agent.label, `⚠ ${ev.detail}`)
+    return
+  }
   // 도구 이벤트는 시끄러우므로 에이전트당 2.5초에 한 줄로 줄인다
   if (ev.type === 'tool') {
     const last = lastChatAt.get(agent.id) ?? 0
@@ -1492,6 +1510,8 @@ window.teamView.onStatus(({ projects, activeDir: active, max }) => {
   // 이름으로 밝힌다 — 같은 이름이면 눌러 보고 나서야 알게 된다.
   setupBtn.textContent = parts.some((p) => p.update) ? '팀 갱신' : '세팅하기'
 
+  renderRun(me)
+
   // 첫 안내는 **프로젝트가 있는지 알고 난 뒤에** 띄운다. 예전에는 시작하자마자
   // "캐릭터를 클릭하고 지시를 보내세요"라고 했는데, 보낼 프로젝트가 없을 때도
   // 똑같이 나와서 화면 한가운데의 안내와 어긋났다.
@@ -1543,6 +1563,15 @@ function missingParts(health) {
       key: 'agents',
       update: true,
       label: `팀원 정의 ${h.stale}개가 앱보다 낡았습니다 — 갱신하면 최신 규칙으로 일합니다`,
+    })
+  }
+  // 훅이 낡으면 **화면에 찍히는 내용 자체가 옛 규칙**이다. 지우는 명령이 잘려
+  // 나오던 문제를 고쳐도 옛 훅을 쓰는 프로젝트에는 닿지 않는다.
+  if (!out.some((p) => p.key === 'hooks') && h.hookStale) {
+    out.push({
+      key: 'hooks',
+      update: true,
+      label: '훅이 앱보다 낡았습니다 — 갱신하면 지우는 명령이 잘리지 않고 기록됩니다',
     })
   }
   return out
@@ -1757,6 +1786,60 @@ document.getElementById('copy-all').addEventListener('click', (e) => {
   setTimeout(() => {
     btn.textContent = before
   }, 1200)
+})
+
+// ---------- 로컬 실행 ----------
+//
+// **앱이 서버를 든다.** 팀원에게 "실행시켜줘"라고 하면 그 세션 안에서 띄우는데,
+// 지시가 끝나면 세션과 함께 죽는다(실측). 화면에서 켜고 끄면 그런 일이 없다.
+
+const runBtn = document.getElementById('run')
+const runUrlEl = document.getElementById('run-url')
+
+function renderRun(p) {
+  const r = p?.run
+  // 띄우는 방법을 모르는 프로젝트(package.json에 dev·start가 없음)면 버튼도 없다.
+  if (!r?.script) {
+    runBtn.hidden = true
+    runUrlEl.hidden = true
+    return
+  }
+  runBtn.hidden = false
+  runBtn.className = r.running ? 'on' : ''
+  runBtn.textContent = r.running ? '■ 실행 중지' : `▶ 실행`
+  runBtn.title = r.running
+    ? `npm run ${r.script} 를 멈춥니다`
+    : `npm run ${r.script} 로 띄웁니다 (앱이 관리하므로 지시가 끝나도 살아 있습니다)`
+
+  // 주소는 자식이 뱉는 줄에서 주워 온다 — 포트를 우리가 정하지 않기 때문이다.
+  const ready = r.running && r.url
+  runUrlEl.hidden = !ready
+  if (ready) {
+    runUrlEl.textContent = r.url.replace(/^https?:\/\//, '')
+    runUrlEl.title = `${r.url} 를 브라우저에서 엽니다`
+  } else if (r.running) {
+    runUrlEl.hidden = false
+    runUrlEl.textContent = '준비 중…'
+    runUrlEl.removeAttribute('title')
+  }
+  runUrlEl.dataset.url = ready ? r.url : ''
+}
+
+runBtn.addEventListener('click', async () => {
+  const me = lastProjects.find((p) => p.dir === activeDir)
+  if (!me) return
+  runBtn.disabled = true
+  const res = me.run?.running
+    ? await window.teamView.runStop(activeDir)
+    : await window.teamView.runStart(activeDir)
+  runBtn.disabled = false
+  if (!res?.ok) hintEl.textContent = res?.error ?? '실행에 실패했습니다'
+})
+
+runUrlEl.addEventListener('click', (e) => {
+  e.preventDefault()
+  const u = runUrlEl.dataset.url
+  if (u) window.teamView.openExternal(u)
 })
 
 // ---------- 결과물 패널 그리기 ----------
