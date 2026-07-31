@@ -2,3 +2,6 @@ node_modules/
 dist/
 release/
 .env
+
+# 작업용 git worktree — 저장소 안의 별도 체크아웃이라 커밋 대상이 아니다.
+.claude/worktrees/
