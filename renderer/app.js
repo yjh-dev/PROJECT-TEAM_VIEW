@@ -458,6 +458,7 @@ function beginWork(agent, now) {
 }
 
 function applyEvent(ev) {
+  collectOutput(ev) // 결과물 패널은 지난 기록에서도 쌓는다 — 켤 때마다 다시 세워야 한다
   const now = performance.now()
   const known = agents.size
   const agent = agentOrCreate(agents, ev.agent || LEAD_ID)
@@ -573,6 +574,76 @@ function applyEvent(ev) {
   // 그 팀원을 클릭하면 볼 수 있다(흐린 말풍선).
   agent.lastEventAt = history ? now - IDLE_LEAVE_MS - 1000 : now
   if (!ev._replay) chatFromEvent(ev, agent)
+}
+
+// ---------- 결과물 ----------
+//
+// 한 시간짜리 작업이 끝나고 **무엇이 만들어졌는지** 보려면 도구 로그 100줄을
+// 거슬러 올라가야 했다. 지난 작업에서 파일 18개와 Figma 4개가 나왔는데 그걸
+// 확인할 방법이 채팅 스크롤뿐이었다.
+//
+// 이벤트에 이미 다 들어 있다 — `{type:'tool', tool:'Write', detail:'<경로>', agent}`.
+// 새로 기록할 것은 없고 모아서 보여 주기만 하면 된다.
+
+const FILE_TOOLS = { Write: '작성', Edit: '수정', MultiEdit: '수정', NotebookEdit: '수정' }
+const FIGMA_URL = /https:\/\/(?:www\.)?figma\.com\/[^\s)>\]"']+/g
+
+// 지시 한 건 = 묶음 하나. 최근 것이 앞에 온다.
+let runs = []
+
+/** 결과물 수집. 지시(command)마다 새 묶음을 열고, 그 뒤 파일·링크를 담는다. */
+function collectOutput(ev) {
+  if (!ev || typeof ev !== 'object') return
+
+  if (ev.type === 'command') {
+    runs.unshift({ text: String(ev.detail ?? '').trim(), ts: ev.ts, files: new Map(), figma: new Map() })
+    if (runs.length > 30) runs.length = 30 // 오래된 것까지 들고 있을 이유는 없다
+    return
+  }
+
+  // 지시 기록보다 앞선 활동도 있다(앱 밖에서 시작한 세션). 받아 줄 묶음을 만들어 둔다.
+  if (!runs.length) runs.unshift({ text: '', ts: ev.ts, files: new Map(), figma: new Map() })
+  const run = runs[0]
+
+  if (ev.type === 'tool') {
+    const kind = FILE_TOOLS[ev.tool]
+    if (kind && ev.detail) {
+      const p = String(ev.detail)
+      const prev = run.files.get(p)
+      // 같은 파일을 여러 번 고치면 한 줄로 접고 횟수만 센다. 안 그러면 한 파일이
+      // 목록을 열 줄씩 차지한다(실제로 마이그레이션 파일 하나가 그랬다).
+      if (prev) {
+        prev.count += 1
+        prev.ts = ev.ts
+        // 만들어 놓고 고친 것은 '작성'으로 남긴다 — 새로 생긴 파일인지가 더 중요하다.
+        if (kind === '작성') prev.kind = '작성'
+      } else {
+        run.files.set(p, { path: p, kind, agent: ev.agent || LEAD_ID, ts: ev.ts, count: 1 })
+      }
+    }
+  }
+
+  // Figma 주소는 도구 이벤트에 없다 — 만들고 나서 답변에 적어 준다. 거기서 줍는다.
+  const text = ev.type === 'reply' || ev.type === 'command' ? String(ev.detail ?? '') : ''
+  for (const url of text.match(FIGMA_URL) ?? []) {
+    const clean = url.replace(/[.,)]+$/, '')
+    if (!run.figma.has(clean)) run.figma.set(clean, { url: clean, ts: ev.ts, agent: ev.agent || LEAD_ID })
+  }
+}
+
+/** 이 프로젝트에서 나온 결과물 수(파일 + Figma). 탭 배지에 쓴다. */
+function outputCount() {
+  let n = 0
+  for (const r of runs) n += r.files.size + r.figma.size
+  return n
+}
+
+/** 프로젝트 폴더를 기준으로 줄인 경로. 절대경로는 길어서 목록에서 읽히지 않는다. */
+function relPath(p, dir) {
+  const a = String(p).replace(/\\/g, '/')
+  const b = String(dir ?? '').replace(/\\/g, '/')
+  if (b && a.toLowerCase().startsWith(b.toLowerCase() + '/')) return a.slice(b.length + 1)
+  return a
 }
 
 // ---------- 담당 배정 ----------
@@ -1373,6 +1444,7 @@ canvas.addEventListener('click', (e) => {
 window.teamView.onEvents(({ dir, events }) => {
   if (dir !== activeDir) return
   events.forEach(applyEvent)
+  refreshOutCount() // 묶음 단위로 한 번만 — 이벤트마다 다시 그리면 목록이 깜빡인다
 })
 
 /**
@@ -1391,6 +1463,10 @@ window.teamView.onReset(({ dir } = {}) => {
   nodes.clear()
   overlay.replaceChildren()
   lastChatAt.clear()
+  // 결과물은 **프로젝트마다 다르다.** 탭을 옮기면 비우고, 이어서 들어오는 재생
+  // 기록으로 그 프로젝트 것을 다시 세운다.
+  runs = []
+  refreshOutCount()
   target = 'all'
   renderTargets()
   redrawChat(activeDir)
@@ -1682,6 +1758,185 @@ document.getElementById('copy-all').addEventListener('click', (e) => {
     btn.textContent = before
   }, 1200)
 })
+
+// ---------- 결과물 패널 그리기 ----------
+
+const outputsEl = document.getElementById('outputs')
+const tabChatEl = document.getElementById('tab-chat')
+const tabOutEl = document.getElementById('tab-out')
+const outCountEl = document.getElementById('out-count')
+const toolsBtnEl = document.getElementById('toggle-tools')
+const copyAllEl = document.getElementById('copy-all')
+let outView = false // 결과물 탭을 보고 있는가
+
+function showPanel(out) {
+  outView = out
+  messagesEl.hidden = out
+  outputsEl.hidden = !out
+  tabChatEl.classList.toggle('sel', !out)
+  tabOutEl.classList.toggle('sel', out)
+  tabChatEl.setAttribute('aria-selected', String(!out))
+  tabOutEl.setAttribute('aria-selected', String(out))
+  // 도구 활동·전체 복사는 대화에만 걸리는 기능이다. 결과물을 보는 동안 눌러 봐야
+  // 아무 일도 안 일어나므로 감춘다.
+  toolsBtnEl.hidden = out
+  copyAllEl.hidden = out
+  if (out) renderOutputs()
+}
+
+tabChatEl.addEventListener('click', () => showPanel(false))
+tabOutEl.addEventListener('click', () => showPanel(true))
+
+/** 탭 배지 — 결과물이 몇 개 쌓였는지. 대화를 보는 중에도 알 수 있어야 한다. */
+function refreshOutCount() {
+  const n = outputCount()
+  outCountEl.hidden = !n
+  outCountEl.textContent = n ? ` ${n}` : ''
+  if (outView) renderOutputs()
+}
+
+function renderOutputs() {
+  outputsEl.replaceChildren()
+
+  if (!activeDir) return outputsEl.append(emptyNote('프로젝트를 붙이면 여기에 결과가 쌓입니다.'))
+  const live = runs.filter((r) => r.files.size || r.figma.size)
+  if (!live.length) {
+    return outputsEl.append(
+      emptyNote('아직 만들어진 것이 없습니다. 지시를 보내면 팀이 만든 파일과 Figma 링크가 여기 모입니다.'),
+    )
+  }
+
+  live.forEach((run, i) => {
+    const box = document.createElement('section')
+    box.className = 'out-run'
+
+    const head = document.createElement('button')
+    head.type = 'button'
+    head.className = 'out-head'
+    // 가장 최근 것만 펼쳐 둔다. 전부 펼치면 스크롤이 감당이 안 된다.
+    let open = i === 0
+    const caret = document.createElement('span')
+    caret.className = 'caret'
+    const title = document.createElement('span')
+    title.className = 'out-title'
+    title.textContent = run.text ? firstLine(run.text) : '(앱 밖에서 시작한 작업)'
+    const meta = document.createElement('span')
+    meta.className = 'out-meta'
+    const bits = []
+    if (run.files.size) bits.push(`파일 ${run.files.size}`)
+    if (run.figma.size) bits.push(`Figma ${run.figma.size}`)
+    meta.textContent = bits.join(' · ')
+    head.append(caret, title, meta)
+
+    const body = document.createElement('div')
+    body.className = 'out-body'
+
+    // 새로 만든 것을 위로. "뭐가 생겼나"가 "뭐가 바뀌었나"보다 먼저 궁금하다.
+    const files = [...run.files.values()].sort(
+      (a, b) => (a.kind === b.kind ? b.ts - a.ts : a.kind === '작성' ? -1 : 1),
+    )
+    for (const f of files) body.append(fileRow(f))
+    for (const g of run.figma.values()) body.append(figmaRow(g))
+
+    const sync = () => {
+      body.hidden = !open
+      caret.textContent = open ? '▾' : '▸'
+      head.setAttribute('aria-expanded', String(open))
+    }
+    head.addEventListener('click', () => {
+      open = !open
+      sync()
+    })
+    sync()
+
+    box.append(head, body)
+    outputsEl.append(box)
+  })
+}
+
+function emptyNote(text) {
+  const p = document.createElement('p')
+  p.className = 'out-empty'
+  p.textContent = text
+  return p
+}
+
+function firstLine(text) {
+  const s = String(text).split('\n').find((l) => l.trim()) ?? ''
+  return s.length > 64 ? s.slice(0, 64) + '…' : s
+}
+
+function fileRow(f) {
+  const row = document.createElement('button')
+  row.type = 'button'
+  row.className = 'out-file'
+  // 눌러서 무슨 일이 일어나는지 미리 밝힌다. 파일을 여는 줄 알고 눌렀다가
+  // 탐색기가 뜨면 당황한다.
+  row.title = `${f.path}\n눌러서 탐색기에서 보기`
+
+  const mark = document.createElement('span')
+  mark.className = `out-kind ${f.kind === '작성' ? 'new' : 'mod'}`
+  mark.textContent = f.kind
+
+  const name = pathCell(relPath(f.path, activeDir))
+
+  const who = document.createElement('span')
+  who.className = 'out-who'
+  who.textContent = labelFor(f.agent) + (f.count > 1 ? ` · ${f.count}회` : '')
+
+  row.append(mark, name, who)
+  row.addEventListener('click', async () => {
+    const res = await window.teamView.revealFile(f.path)
+    // 팀이 만든 뒤 사람이 지웠거나 옮겼을 수 있다. 조용히 아무 일도 안 일어나면
+    // 앱이 고장 난 것처럼 보인다.
+    if (!res?.ok) hintEl.textContent = res?.error ?? '파일을 찾지 못했습니다'
+  })
+  return row
+}
+
+/** 경로를 폴더/이름으로 나눠 담는다. 좁아지면 폴더 쪽만 줄어든다. */
+function pathCell(rel) {
+  const cell = document.createElement('span')
+  cell.className = 'out-path'
+  const i = rel.lastIndexOf('/')
+  if (i >= 0) {
+    const dir = document.createElement('span')
+    dir.className = 'out-dir'
+    dir.textContent = rel.slice(0, i + 1)
+    cell.append(dir)
+  }
+  const base = document.createElement('span')
+  base.className = 'out-base'
+  base.textContent = i >= 0 ? rel.slice(i + 1) : rel
+  cell.append(base)
+  return cell
+}
+
+function figmaRow(g) {
+  const row = document.createElement('button')
+  row.type = 'button'
+  row.className = 'out-file figma'
+  row.title = `${g.url}\n눌러서 브라우저에서 열기`
+
+  const mark = document.createElement('span')
+  mark.className = 'out-kind fig'
+  mark.textContent = '🎨'
+
+  const name = pathCell(g.url.replace(/^https:\/\/(www\.)?figma\.com\//, 'figma.com/'))
+
+  const who = document.createElement('span')
+  who.className = 'out-who'
+  who.textContent = labelFor(g.agent)
+
+  row.append(mark, name, who)
+  row.addEventListener('click', () => window.teamView.openExternal(g.url))
+  return row
+}
+
+/** 팀원 id를 화면에 쓰는 이름으로. 명단에 없으면 id를 그대로 쓴다. */
+function labelFor(id) {
+  return ROSTER.find((r) => r.id === id)?.label ?? String(id ?? '')
+}
 
 // ---------- 실행 환경 ----------
 //

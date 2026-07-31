@@ -1084,6 +1084,25 @@ ipcMain.handle('open:external', async (_e, url) => {
   return { ok: true }
 })
 
+/**
+ * 팀이 만든 파일을 탐색기에서 보여 준다.
+ *
+ * **붙여 놓은 프로젝트 안의 파일만** 연다. 결과물 목록은 이벤트 로그에서 읽은
+ * 경로로 만들어지는데, 그 로그는 프로젝트 폴더에 있는 파일이라 사람이 손으로
+ * 고칠 수 있다. 아무 경로나 받아 열어 주면 앱이 남의 심부름을 하게 된다.
+ */
+ipcMain.handle('file:reveal', (_e, target) => {
+  const p = path.resolve(String(target ?? ''))
+  const inProject = loadProjects().some((dir) => {
+    const rel = path.relative(path.resolve(dir), p)
+    return rel && !rel.startsWith('..') && !path.isAbsolute(rel)
+  })
+  if (!inProject) return { ok: false, error: '붙여 놓은 프로젝트 밖의 파일입니다' }
+  if (!fs.existsSync(p)) return { ok: false, error: '파일이 없습니다 — 옮겼거나 지운 것 같습니다' }
+  shell.showItemInFolder(p)
+  return { ok: true }
+})
+
 // ---------------------------------------------------------------------------
 // 회사
 //

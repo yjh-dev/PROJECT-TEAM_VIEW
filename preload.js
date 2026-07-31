@@ -26,6 +26,7 @@ contextBridge.exposeInMainWorld('teamView', {
   copyText: (text) => ipcRenderer.invoke('clipboard:write', text),
   // 답변에 실려 오는 결과물 링크(Figma 등)를 기본 브라우저로 연다.
   openExternal: (url) => ipcRenderer.invoke('open:external', url),
+  revealFile: (p) => ipcRenderer.invoke('file:reveal', p),
   cancelAll: (dir) => ipcRenderer.invoke('command:cancel', dir),
   // 이벤트에는 어느 프로젝트 것인지가 실려 온다. 렌더러는 보고 있는 것만 그린다.
   onEvents: (cb) => ipcRenderer.on('events:new', (_e, payload) => cb(payload)),

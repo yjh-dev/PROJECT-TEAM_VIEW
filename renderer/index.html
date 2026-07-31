@@ -79,6 +79,14 @@
           <!-- 도구 버튼을 칩과 같은 줄에 두면 칩이 밀려 한 줄 더 차지한다.
                위아래로 나눠 칩이 패널 폭을 온전히 쓰게 한다. -->
           <div class="chat-tools">
+            <!-- 대화와 결과물. 한 시간짜리 작업이 끝나고 "뭐가 만들어졌나"를 보려면
+                 도구 로그 100줄을 거슬러 올라가야 했다. 결과만 따로 모아 둔다. -->
+            <div class="panel-tabs" role="tablist">
+              <button id="tab-chat" type="button" class="sel" role="tab" aria-selected="true">대화</button>
+              <button id="tab-out" type="button" role="tab" aria-selected="false" title="팀이 만들거나 고친 파일과 Figma 링크">
+                결과물<span id="out-count" hidden></span>
+              </button>
+            </div>
             <!-- 도구 활동은 한 작업에 100줄이 넘어 지시·답변을 묻어 버린다.
                  지우지는 않고 접을 수 있게 둔다 — 상세를 봐야 할 때가 있다. -->
             <button id="toggle-tools" type="button" class="on" title="파일 읽기·명령 실행 같은 도구 활동을 접거나 폅니다">
@@ -92,6 +100,9 @@
           <div id="targets"></div>
         </header>
         <div id="messages"></div>
+        <!-- 결과물 — 지시 한 건마다 그때 만들어지거나 고쳐진 파일과 Figma 링크를 묶는다.
+             파일을 누르면 탐색기에서 그 파일이 선택된 채로 열린다. -->
+        <div id="outputs" hidden></div>
         <footer>
           <textarea
             id="chat-input"

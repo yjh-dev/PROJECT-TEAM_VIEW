@@ -568,6 +568,187 @@ main {
   vertical-align: middle;
 }
 
+/* ---------- 결과물 패널 ---------- */
+
+/* 대화 ↔ 결과물 탭. 왼쪽에 붙여 도구 버튼(오른쪽)과 역할을 구분한다. */
+.panel-tabs {
+  display: flex;
+  gap: 2px;
+  margin-right: auto;
+}
+
+.panel-tabs button {
+  padding: 4px 11px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.panel-tabs button:hover {
+  color: var(--text);
+}
+
+.panel-tabs button.sel {
+  color: var(--text);
+  background: #1f2532;
+  border-color: var(--line);
+}
+
+#out-count {
+  color: #7dcfff;
+}
+
+#outputs {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+#outputs[hidden] {
+  display: none;
+}
+
+.out-empty {
+  margin: 18px 10px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+.out-run {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+/* 묶음 머리 — 어떤 지시였고 무엇이 몇 개 나왔는지 */
+.out-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 10px;
+  text-align: left;
+  background: #1a1f2b;
+  border: 0;
+  cursor: pointer;
+}
+
+.out-head:hover {
+  background: #1f2634;
+}
+
+.out-head .caret {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.out-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.out-meta {
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.out-body {
+  display: flex;
+  flex-direction: column;
+}
+
+.out-body[hidden] {
+  display: none;
+}
+
+/* 파일 한 줄 — 종류 · 경로 · 담당 */
+.out-file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-top: 1px solid #1e2430;
+  cursor: pointer;
+}
+
+.out-file:hover {
+  background: #1c222e;
+}
+
+.out-kind {
+  flex: none;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+/* 새로 생긴 것과 고친 것을 색으로 가른다 — "뭐가 생겼나"가 먼저 궁금하다 */
+.out-kind.new {
+  color: #0f1a12;
+  background: #7ddb9a;
+}
+
+.out-kind.mod {
+  color: #1a170f;
+  background: #e0af68;
+}
+
+.out-kind.fig {
+  background: transparent;
+  font-size: 13px;
+  padding: 0;
+}
+
+/* 경로는 길어서 그대로 두면 잘린다. 파일 이름은 **끝에** 있으므로 폴더 쪽을
+   줄이고 이름은 온전히 남긴다. (direction:rtl로 뒤에서 자르는 방법도 있지만
+   경로의 슬래시 순서가 뒤바뀌어 보인다.) */
+.out-path {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  font-size: 12px;
+}
+
+.out-dir {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+.out-base {
+  flex: none;
+  color: var(--text);
+}
+
+.out-who {
+  flex: none;
+  font-size: 11px;
+  color: var(--muted);
+}
+
 #messages {
   flex: 1;
   overflow-y: auto;
@@ -579,6 +760,12 @@ main {
      읽고 복사하는 영역이므로 여기서만 되돌린다. */
   user-select: text;
   cursor: auto;
+}
+
+/* `display:flex`가 `[hidden]`의 기본 `display:none`을 이긴다. 결과물 탭으로
+   옮겨도 대화가 그대로 남아 화면을 차지했다 — 숨김을 따로 적어 준다. */
+#messages[hidden] {
+  display: none;
 }
 
 #messages ::selection {
