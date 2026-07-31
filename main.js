@@ -169,6 +169,10 @@ function projectHealth(dir) {
     agents,
     guide: fs.existsSync(path.join(dir, 'CLAUDE.md')),
     stale: agents ? staleAgents(dir) : 0, // 팀원이 아예 없으면 '낡음'이 아니라 '없음'이다
+    // 훅도 낡는다. **팀원 정의만 보고 있었더니 훅 수정이 기존 프로젝트에 영영
+    // 닿지 않았다** — `rm -rf`가 44자에서 잘리던 문제를 고쳐도, 이미 세팅된
+    // 프로젝트는 옛 훅 그대로라 화면에는 여전히 잘린 명령이 찍힌다.
+    hookStale: staleHook(dir),
     stack: detectStack(dir),
   }
   healthCache.set(dir, { at: Date.now(), health })
@@ -505,6 +509,26 @@ function setupProject(dir, parts = {}) {
  *
  * CLAUDE.md는 비교하지 않는다 — 개요·스택을 사람이 채우는 파일이라 다른 게 정상이다.
  */
+/**
+ * 프로젝트에 깔린 훅이 앱이 들고 있는 것보다 낡았는가.
+ *
+ * 훅은 **우리 파일이라 사람이 고칠 일이 없다** — 다르면 낡은 것이고 덮어써도 된다.
+ * (CLAUDE.md는 사람이 개요·스택을 채워 넣는 파일이라 이렇게 다루면 안 된다.
+ * 그래서 지침 변경은 매 지시에 붙는 프롬프트 쪽에도 같이 적어 둔다.)
+ */
+function staleHook(dir) {
+  const src = path.join(__dirname, 'hooks', 'team_events.py')
+  const dst = path.join(dir, '.claude', 'hooks', 'team_events.py')
+  try {
+    if (!fs.existsSync(dst)) return false // 없는 건 '낡음'이 아니라 '없음'이다
+    const a = fs.readFileSync(src, 'utf8').replace(/\r\n/g, '\n')
+    const b = fs.readFileSync(dst, 'utf8').replace(/\r\n/g, '\n')
+    return a !== b
+  } catch {
+    return false
+  }
+}
+
 function staleAgents(dir) {
   const src = path.join(templateDir(), 'agents')
   const dst = path.join(dir, '.claude', 'agents')
@@ -626,6 +650,7 @@ function pumpStatusAll({ force = false } = {}) {
     company: companyState(dir),
     queued: pendingCount(dir),
     health: projectHealth(dir),
+    run: runState(dir),
   }))
   const payload = { projects, activeDir, max: MAX_PROJECTS }
   const json = JSON.stringify(payload)
@@ -1084,6 +1109,133 @@ ipcMain.handle('open:external', async (_e, url) => {
   return { ok: true }
 })
 
+// ---------------------------------------------------------------------------
+// 로컬 실행
+//
+// **"로컬에서 실행시켜줘"는 회사가 할 수 없는 일이다.**
+//
+// 회사는 지시 하나를 `claude -p`(비대화형)로 돌리고 끝나면 프로세스를 접는다.
+// dev 서버처럼 끝나지 않는 프로세스를 그 안에서 띄우면 세션이 끝날 때 같이 죽는다.
+// 실제로 그렇게 됐다 — 팀원이 서버를 띄우고 `/` 200까지 확인해 "실행 중입니다"라고
+// 보고했는데, 그 보고가 화면에 뜰 무렵엔 이미 서버가 없었다. 사람이 "안 열리는데"
+// 라고 알려 주기 전까지 아무도 몰랐다.
+//
+// 그래서 **오래 사는 프로세스는 앱이 직접 든다.** 지시 세션과 수명을 분리하고,
+// 화면에 주소와 끄는 버튼을 둔다. 팀원에게 시키고 뒷정리를 못 하는 것보다 낫다.
+
+const runners = new Map() // dir -> { child, script, port, url, startedAt, lines }
+
+/** 이 프로젝트를 띄우는 명령. package.json의 스크립트에서 고른다. */
+function runScriptFor(dir) {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'))
+    const s = pkg.scripts || {}
+    for (const name of ['dev', 'start', 'serve']) if (s[name]) return name
+  } catch {
+    /* 노드 프로젝트가 아니면 띄울 방법을 모른다 */
+  }
+  return null
+}
+
+function runState(dir) {
+  const r = runners.get(dir)
+  return {
+    script: runScriptFor(dir), // 없으면 버튼을 숨긴다
+    running: !!r,
+    url: r?.url ?? null,
+    startedAt: r?.startedAt ?? null,
+  }
+}
+
+/** 자식이 뱉는 줄에서 주소를 줍는다. 포트는 우리가 정하지 않는다(3000이 차 있으면 밀린다). */
+function sniffUrl(text) {
+  const m = /https?:\/\/(?:localhost|127\.0\.0\.1)(?::(\d+))?[^\s]*/i.exec(text)
+  return m ? m[0].replace(/[.,)]+$/, '') : null
+}
+
+function startRun(dir) {
+  if (runners.get(dir)) return { ok: true, already: true, ...runState(dir) }
+  const script = runScriptFor(dir)
+  if (!script) return { ok: false, error: 'package.json에 dev·start 스크립트가 없어 실행 방법을 모릅니다' }
+
+  let child
+  try {
+    child = spawn('npm', ['run', script], {
+      cwd: dir,
+      shell: true, // Windows에서 npm은 .cmd다
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    })
+  } catch (err) {
+    return { ok: false, error: `실행 실패: ${err.message}` }
+  }
+
+  const r = { child, script, url: null, port: null, startedAt: Date.now(), lines: [] }
+  runners.set(dir, r)
+
+  const take = (buf) => {
+    const s = String(buf)
+    // 마지막 200줄만 들고 있는다. 실패했을 때 무엇 때문인지 보여 주려는 것이지
+    // 로그 뷰어를 만들려는 게 아니다.
+    r.lines.push(...s.split(/\r?\n/).filter(Boolean))
+    if (r.lines.length > 200) r.lines.splice(0, r.lines.length - 200)
+    if (!r.url) {
+      const u = sniffUrl(s)
+      if (u) {
+        r.url = u
+        logRenderer(`실행 준비됨 — ${path.basename(dir)} ${u}`)
+        pumpStatusAll({ force: true })
+      }
+    }
+  }
+  child.stdout.on('data', take)
+  child.stderr.on('data', take)
+  child.on('exit', (code) => {
+    runners.delete(dir)
+    if (code) logRenderer(`실행이 코드 ${code}로 끝남 (${path.basename(dir)})`)
+    pumpStatusAll({ force: true })
+  })
+  child.on('error', (err) => {
+    runners.delete(dir)
+    logRenderer(`실행 실패(${path.basename(dir)}): ${err.message}`)
+    pumpStatusAll({ force: true })
+  })
+
+  pumpStatusAll({ force: true })
+  return { ok: true, ...runState(dir) }
+}
+
+/**
+ * 실행을 멈춘다.
+ *
+ * `child.kill()`로는 부족하다 — `npm run dev`는 자기 밑에 진짜 서버(node)를 두고,
+ * 껍데기만 죽이면 포트를 쥔 자식이 남는다. Windows에서는 taskkill로 트리를 끊는다.
+ */
+function stopRun(dir) {
+  const r = runners.get(dir)
+  if (!r) return { ok: true, already: true }
+  const pid = r.child.pid
+  try {
+    if (process.platform === 'win32') execFile('taskkill', ['/PID', String(pid), '/T', '/F'], () => {})
+    else process.kill(-pid, 'SIGTERM')
+  } catch (err) {
+    return { ok: false, error: `중지 실패: ${err.message}` }
+  }
+  runners.delete(dir)
+  pumpStatusAll({ force: true })
+  return { ok: true }
+}
+
+ipcMain.handle('run:start', (_e, dir) => (loadProjects().includes(dir) ? startRun(dir) : { ok: false, error: '붙어 있지 않은 프로젝트입니다' }))
+ipcMain.handle('run:stop', (_e, dir) => stopRun(dir))
+ipcMain.handle('run:log', (_e, dir) => ({ ok: true, lines: runners.get(dir)?.lines ?? [] }))
+
+// 앱을 닫으면 띄워 둔 서버도 같이 내린다. 안 그러면 포트를 쥔 프로세스가 남아
+// 다음에 띄울 때 "포트가 이미 쓰이는 중"이 되고, 아무도 그 주인을 모른다.
+app.on('before-quit', () => {
+  for (const dir of [...runners.keys()]) stopRun(dir)
+})
+
 /**
  * 팀이 만든 파일을 탐색기에서 보여 준다.
  *
@@ -1263,7 +1415,19 @@ const DELIVERABLE =
   // 진행됐어?"라는 질문 하나에 기획자가 전체를 감사하고 디자이너가 Figma 보고서를
   // 만들기 시작했다. 예외를 같은 자리에 못 박는다 — 떨어뜨려 두면 앞 문장만 읽는다.
   `\n\n[묻는 말은 예외] **질문에는 답이 곧 결과다.** 현황·상태·구조·이유를 묻는 말에는` +
-  ` 파일도 Figma도 만들지 마라. 보고서로 남기지도 마라. 짧게 답하고 끝내라.`
+  ` 파일도 Figma도 만들지 마라. 보고서로 남기지도 마라. 짧게 답하고 끝내라.` +
+  // 프로젝트의 CLAUDE.md에도 같은 규칙을 적어 두지만, 그건 복사본이라 낡을 수 있다.
+  // **매번 붙는 이 프롬프트가 최신이다.** 아래 셋은 실제로 사고가 났던 자리다.
+  `\n\n[만드는 순서] 새 기능·화면을 만드는 지시면 구현부터 들어가지 마라.` +
+  ` 기획(planner) → 화면설계(ux-designer, Figma) → 구현 → 리뷰(code-reviewer) 순서다.` +
+  ` 버그 수정·설정 변경·화면 없는 작업·이미 화면 구성까지 받은 경우는 건너뛰어도 되지만,` +
+  ` **건너뛰었다면 왜 건너뛰었는지 답변에 한 줄로 밝혀라.** 만든 사람이 자기 것을 확인한 건 리뷰가 아니다.` +
+  `\n\n[오래 사는 프로세스] dev 서버·watch·데몬은 **네가 띄우지 마라.**` +
+  ` 지시가 끝나면 세션과 함께 죽어서 "실행 중"이라는 보고만 남고 실제로는 접속이 안 된다.` +
+  ` 실행이 필요하면 Team View 상단의 \`▶ 실행\` 버튼을 쓰라고 안내해라 — 앱이 들고 있어서 지시가 끝나도 살아 있다.` +
+  ` 잠깐 확인이 필요하면 확인 즉시 내리고, 띄워 둔 채로 보고하지 마라.` +
+  `\n\n[지우는 명령] rm -rf·Remove-Item·git reset --hard·DROP TABLE은 대상을 정확히 적어라.` +
+  ` 상위 폴더로 올라가 지우지 마라 — 옆에 다른 프로젝트가 있다. 임시 폴더는 프로젝트 안에 만들어라.`
 
 function promptFor(cmd) {
   const who = cmd.agent
