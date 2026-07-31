@@ -13,7 +13,7 @@
 // 놓치거나 중복 이벤트를 주는 일이 잦고, 우리가 읽는 건 append-only 로그라
 // 크기 비교가 훨씬 단순하고 정확하다.
 
-const { app, BrowserWindow, ipcMain, dialog, clipboard, shell } = require('electron')
+const { app, BrowserWindow, ipcMain, dialog, clipboard, shell, Notification } = require('electron')
 const { spawn, execFile } = require('child_process')
 const crypto = require('crypto')
 const fs = require('fs')
@@ -35,6 +35,9 @@ const COMMANDS_NAME = 'team-commands.jsonl'
 const MAX_PROJECTS = 3
 
 let win = null
+// 창이 지금 사용자 눈앞에 있는지. 창 이벤트로만 갱신한다(getter는 못 믿는다 —
+// notifyDone의 주석 참고).
+let winFocused = false
 const watches = new Map() // dir -> { file, offset, tail, exists, replay }
 const companies = new Map() // dir -> { dir, claimTimer, queueTimer, child }
 let activeDir = null // 화면에 사무실을 그리고 있는 프로젝트
@@ -801,6 +804,34 @@ function createWindow() {
       backgroundThrottling: false,
     },
   })
+  // **창이 눈앞에 있는지는 이벤트로 따라간다.**
+  //
+  // `win.isFocused()`를 그때그때 물어보면 안 된다 — 창을 최소화해 둔 상태에서도
+  // `focus=true visible=true min=false`를 돌려주는 것을 실측으로 확인했다(같은 순간
+  // Win32는 `IsIconic=true, foreground=false`였다). 그 값을 믿으면 자리를 비운
+  // 사람에게 알림이 가지 않는다 — 알림이 필요한 바로 그 상황에서.
+  win.on('focus', () => {
+    winFocused = true
+    try {
+      // 보러 온 순간 깜빡임은 제 몫을 다했다. 계속 깜빡이면 성가시기만 하다.
+      win.flashFrame(false)
+    } catch {
+      /* 지원하지 않는 플랫폼 */
+    }
+  })
+  win.on('blur', () => {
+    winFocused = false
+  })
+  // **최소화는 blur를 동반하지 않는다** — 최소화만 했을 때 `minimize`는 오고 `blur`는
+  // 오지 않는 것을 실측으로 확인했다. blur 하나만 듣고 있었으면 최소화해 둔 사람은
+  // 알림을 못 받았다.
+  win.on('minimize', () => {
+    winFocused = false
+  })
+  win.on('hide', () => {
+    winFocused = false
+  })
+
   // 렌더러가 죽으면 창은 그냥 까맣게 남고 아무 단서도 없다. 세 번 당했다.
   // 콘솔 오류와 로드 실패를 메인 stdout으로 끌어와 터미널에서 바로 보이게 한다.
   // Electron 버전에 따라 (event, level, message, line, source)로도, event 하나로도 온다.
@@ -850,6 +881,9 @@ if (!app.requestSingleInstanceLock()) {
   })
 
   app.whenReady().then(() => {
+    // Windows는 이 값이 있어야 알림에 앱 이름과 아이콘이 붙는다. 없으면 알림이
+    // "electron.app.Electron" 이름으로 뜨거나 아예 뜨지 않는다.
+    if (process.platform === 'win32') app.setAppUserModelId('dev.yjh.teamview')
     createWindow()
 
     win.webContents.once('did-finish-load', () => {
@@ -1353,7 +1387,51 @@ function runCommand(c, cmd) {
       /* 없으면 그만 */
     }
     pumpStatusAll({ force: true })
+    // 뒤에 붙은 지시가 있으면 아직 끝난 게 아니다 — 그건 곧바로 이어서 돈다.
+    if (!pendingCount(dir)) notifyDone(dir)
   })
+}
+
+/**
+ * 지시 하나가 끝났다고 알린다.
+ *
+ * 팀 작업은 20분에서 한 시간까지 간다. 그동안 이 창을 보고 있는 사람은 없다 —
+ * 다른 일을 하다가 "끝났나?" 하고 가끔 들여다보게 되는데, 앱은 끝나도 아무 신호를
+ * 주지 않았다. 창이 앞에 있으면 화면으로 이미 보이므로 그때는 조용히 있는다.
+ */
+function notifyDone(dir) {
+  const name = path.basename(dir)
+  if (!win || win.isDestroyed()) return
+  // 창이 눈앞에 있으면 화면으로 이미 보인다 — 그때 깜빡이면 성가시기만 하다.
+  if (winFocused) return logRenderer(`작업 종료 — ${name} (창이 앞에 있어 알리지 않음)`)
+
+  // 작업표시줄 깜빡임. 알림 배너를 꺼 둔 사람에게도 남는 신호다.
+  try {
+    win.flashFrame(true)
+  } catch {
+    /* 플랫폼이 지원하지 않으면 그만 */
+  }
+  try {
+    if (!Notification.isSupported()) return logRenderer(`작업 종료 — ${name} (깜빡임만)`)
+    const n = new Notification({
+      title: `${name} — 작업이 끝났습니다`,
+      body: '눌러서 결과를 확인하세요',
+    })
+    // 알림을 누르면 그 프로젝트를 띄운 채로 창을 앞에 올린다. 세 개를 붙여 놓고
+    // 다른 탭을 보던 중이면 끝난 쪽을 직접 찾아 들어가야 했다.
+    n.on('click', () => {
+      activate(dir)
+      if (win.isMinimized()) win.restore()
+      win.show()
+      win.focus()
+    })
+    n.show()
+    logRenderer(`작업 종료 — ${name} (알림·깜빡임)`)
+  } catch (err) {
+    // 알림이 막혀 있어도 깜빡임은 이미 줬다. 다만 **조용히 넘기지는 않는다** —
+    // 알림이 안 뜨는데 이유를 알 수 없으면 고칠 방법이 없다.
+    logRenderer(`알림 실패(${name}): ${err.message} — 깜빡임만`)
+  }
 }
 
 // 취소 깃발이 이보다 오래됐으면 무시하고 치운다. 훅의 CANCEL_TTL과 같은 값.
