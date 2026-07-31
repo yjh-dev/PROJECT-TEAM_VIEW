@@ -42,7 +42,6 @@
         "nsis",
         "portable"
       ],
-      "signAndEditExecutable": false,
       "icon": "build/icon.png"
     },
     "nsis": {
