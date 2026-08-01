@@ -116,6 +116,8 @@ contextBridge.exposeInMainWorld('teamView', {
   openExternal: async () => ({ ok: true }),
   revealFile: async () => ({ ok: true }),
   setChatWidth: async () => ({ ok: true }),
+  vitals: async () => ({ ok: true }),
+  reportError: async () => ({ ok: true }),
   gitInit: async () => ({ ok: true, done: ['저장소 생성', '첫 커밋 (1개)'] }),
   snapshotDiff: async () => ({ ok: true, items: [{ status: 'A', path: 'src/new.tsx' }] }),
   snapshotRestore: async () => ({ ok: true, removed: 1, restored: 0 }),

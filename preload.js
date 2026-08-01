@@ -28,6 +28,8 @@ contextBridge.exposeInMainWorld('teamView', {
   openExternal: (url) => ipcRenderer.invoke('open:external', url),
   revealFile: (p) => ipcRenderer.invoke('file:reveal', p),
   setChatWidth: (px) => ipcRenderer.invoke('ui:chat-width', px),
+  vitals: (v) => ipcRenderer.invoke('ui:vitals', v),
+  reportError: (info) => ipcRenderer.invoke('ui:error', info),
   gitInit: (dir) => ipcRenderer.invoke('git:init', dir),
   snapshotDiff: (dir, ref) => ipcRenderer.invoke('snapshot:diff', { dir, ref }),
   snapshotRestore: (dir, ref) => ipcRenderer.invoke('snapshot:restore', { dir, ref }),
