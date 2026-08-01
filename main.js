@@ -1046,6 +1046,29 @@ function pump(dir) {
     return
   }
 
+  // **팀원이 바뀌는 지점마다 되돌릴 지점을 남긴다.**
+  //
+  // 지시 시작에만 남기면 116분 5단계 작업에 스냅샷이 하나뿐이다. "리뷰 수정만
+  // 되돌리고 싶다"가 안 되고 통째로 처음으로 돌아가야 한다.
+  //
+  // 보고 있지 않은 사무실도 남긴다 — 되돌리기는 나중에 탭을 옮겨서 하게 된다.
+  // 다시 읽는 중(replay)에는 남기지 않는다. 탭을 옮길 때마다 옛 이벤트로
+  // 스냅샷이 쌓이면 보관 한도를 옛것으로 채워 버린다.
+  if (!w.replay && chunk.includes('"agent_start"')) {
+    const who = []
+    for (const line of chunk.split('\n')) {
+      if (!line.includes('agent_start')) continue
+      try {
+        const ev = JSON.parse(line.trim())
+        if (ev.type === 'agent_start' && ev.agent) who.push(ev.agent)
+      } catch {
+        /* 깨진 줄은 넘긴다 */
+      }
+    }
+    // 한 번에 여러 명이 시작해도 스냅샷은 하나면 된다(그 시점 상태는 하나다).
+    if (who.length) takeSnapshot(dir, `${who.join('·')} 시작 전`)
+  }
+
   if (dir !== activeDir) {
     w.tail = ''
     return // 안 보이는 사무실 — 오프셋만 따라간다
@@ -1345,6 +1368,8 @@ if (!app.requestSingleInstanceLock()) {
     // Windows는 이 값이 있어야 알림에 앱 이름과 아이콘이 붙는다. 없으면 알림이
     // "electron.app.Electron" 이름으로 뜨거나 아예 뜨지 않는다.
     if (process.platform === 'win32') app.setAppUserModelId('dev.yjh.teamview')
+    // 지난번에 앱이 강제로 끝났다면 서버가 남아 있을 수 있다.
+    cleanupOrphanRunners()
     createWindow()
 
     win.webContents.once('did-finish-load', () => {
@@ -1562,6 +1587,60 @@ ipcMain.handle('open:external', async (_e, url) => {
 const runners = new Map() // dir -> { child, script, port, url, startedAt, lines }
 const stopping = new Set() // 사용자가 끈 것. 그 exit는 실패로 치지 않는다.
 
+// 띄워 둔 서버를 디스크에도 적어 둔다.
+//
+// 앱을 정상으로 닫으면 before-quit이 서버를 내린다. 그런데 **강제 종료되거나
+// 크래시하면 그 핸들러가 돌지 않아** 서버가 주인 없이 남는다(실제로 겪었다 —
+// 포트를 쥔 프로세스가 남아 다음에 띄울 때 3001로 밀렸고, 아무도 그 주인을
+// 몰랐다). 다음 실행 때 이 기록으로 찾아 정리한다.
+function runnersFile() {
+  return path.join(app.getPath('userData'), 'runners.json')
+}
+
+function saveRunners() {
+  const rows = [...runners.entries()].map(([dir, r]) => ({ dir, pid: r.child.pid, at: r.startedAt }))
+  try {
+    fs.writeFileSync(runnersFile(), JSON.stringify(rows), 'utf8')
+  } catch {
+    /* 못 적어도 실행 자체는 된다 */
+  }
+}
+
+/**
+ * 지난번에 남은 서버를 정리한다.
+ *
+ * **PID만 보고 죽이지 않는다.** 그 사이 다른 프로그램이 같은 번호를 받았을 수
+ * 있다. 그 프로세스의 명령줄에 우리가 띄운 폴더가 들어 있는지 확인하고 나서
+ * 끊는다 — 사용자가 터미널에서 직접 띄운 서버를 죽이면 안 된다.
+ */
+function cleanupOrphanRunners() {
+  let rows = []
+  try {
+    rows = JSON.parse(fs.readFileSync(runnersFile(), 'utf8'))
+  } catch {
+    return // 기록이 없으면 정리할 것도 없다
+  }
+  if (!Array.isArray(rows) || !rows.length) return
+  try {
+    fs.unlinkSync(runnersFile())
+  } catch {
+    /* 지우기 실패는 무시 — 아래에서 다시 쓴다 */
+  }
+  if (process.platform !== 'win32') return
+
+  for (const row of rows) {
+    if (!row?.pid || !row?.dir) continue
+    const ps =
+      `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${Number(row.pid)}" -EA SilentlyContinue;` +
+      ` if ($p -and $p.CommandLine -like ${JSON.stringify('*' + path.basename(row.dir) + '*')}) { 'ours' }`
+    execFile('powershell', ['-NoProfile', '-Command', ps], { timeout: 8000 }, (err, out) => {
+      if (err || !String(out).includes('ours')) return // 이미 죽었거나 남의 프로세스다
+      logRenderer(`지난번에 남은 서버를 정리합니다 — ${path.basename(row.dir)} (PID ${row.pid})`)
+      execFile('taskkill', ['/PID', String(row.pid), '/T', '/F'], () => {})
+    })
+  }
+}
+
 /** 이 프로젝트를 띄우는 명령. package.json의 스크립트에서 고른다. */
 function runScriptFor(dir) {
   try {
@@ -1630,6 +1709,7 @@ function startRun(dir) {
   child.on('exit', (code) => {
     const me = runners.get(dir)
     runners.delete(dir)
+    saveRunners()
     const name = path.basename(dir)
 
     // **끈 것과 죽은 것을 가른다.**
@@ -1656,6 +1736,7 @@ function startRun(dir) {
     pumpStatusAll({ force: true })
   })
 
+  saveRunners()
   pumpStatusAll({ force: true })
   return { ok: true, ...runState(dir) }
 }
@@ -1681,6 +1762,7 @@ function stopRun(dir) {
     return { ok: false, error: `중지 실패: ${err.message}` }
   }
   runners.delete(dir)
+  saveRunners()
   pumpStatusAll({ force: true })
   return { ok: true }
 }
@@ -1702,6 +1784,19 @@ app.on('before-quit', () => {
  * 경로로 만들어지는데, 그 로그는 프로젝트 폴더에 있는 파일이라 사람이 손으로
  * 고칠 수 있다. 아무 경로나 받아 열어 주면 앱이 남의 심부름을 하게 된다.
  */
+// 앱 로그를 탐색기에서 연다. 크래시·실행 기록이 여기 남는데 지금까지는 경로를
+// 알려 주는 수밖에 없었다(%APPDATA% 안이라 찾아가기도 번거롭다).
+ipcMain.handle('log:open', () => {
+  const p = rendererLogPath()
+  try {
+    if (!fs.existsSync(p)) fs.writeFileSync(p, '', 'utf8') // 아직 아무 일도 없었으면 빈 파일로
+    shell.showItemInFolder(p)
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, error: err.message }
+  }
+})
+
 ipcMain.handle('file:reveal', (_e, target) => {
   const p = path.resolve(String(target ?? ''))
   const inProject = loadProjects().some((dir) => {

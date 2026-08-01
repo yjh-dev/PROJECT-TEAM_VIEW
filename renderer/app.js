@@ -796,36 +796,119 @@ function redrawChat(dir) {
   restoringChat = false
 }
 
-/**
- * 답변에 실려 오는 마크다운을 **읽히게** 다듬는다.
- *
- * 팀의 결론은 세션 기록에서 그대로 퍼 온 글이라 `## 만든 것`, `| 산출물 | 링크 |`,
- * `|---|---|` 같은 문법이 날것으로 섞여 있다. 채팅 칸에서 그대로 보면 무슨 말인지
- * 읽을 수 없다. 렌더러를 마크다운 파서로 만들 이유는 없으니 **소음만 걷어낸다.**
- */
-function tidyMarkdown(text) {
-  return String(text ?? '')
-    .replace(/\|\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|/g, '') // 표 구분선
-    .replace(/^#{1,6}\s*/gm, '') // 헤딩 기호
-    .replace(/#{2,6}\s+/g, '· ') // 한 줄에 섞여 들어온 헤딩
-    .replace(/\*\*(.+?)\*\*/g, '$1') // 굵게
-    .replace(/`([^`]+)`/g, '$1') // 인라인 코드
-    // 표를 표로 그릴 수는 없으니 칸을 가운뎃점으로 잇는다. 파이프를 그대로 두면
-    // `| 산출물 | 링크 | | 1장 기획안(PRD)`처럼 읽다 걸린다.
-    //
-    // **`\s` 대신 `[ \t]`를 쓴다.** `\s`는 줄바꿈까지 먹어서 문단과 목록이 한 줄로
-    // 뭉개진다 — 답변이 읽히지 않던 원인의 절반이 여기였다.
-    .replace(/[ \t]*\|[ \t]*/g, ' · ')
-    .replace(/(?:[ \t]*·[ \t]*){2,}/g, ' · ') // 빈 칸이 겹쳐 생긴 연속 점
-    .replace(/^[ \t]*·[ \t]*|[ \t]*·[ \t]*$/gm, '')
-    .replace(/[ \t]{2,}/g, ' ')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim()
-}
-
 const URL_RE = /(https?:\/\/[^\s<>"')\]]+)/g
 
 /** 글에 섞인 URL을 눌러서 열 수 있게 만든다. 나머지는 그대로 텍스트다. */
+/**
+ * 답변을 **구조를 살려서** 그린다.
+ *
+ * 예전에는 마크다운 기호를 걷어내 한 덩어리 글로 만들었다. 그런데 팀이 내놓는
+ * 답은 표와 소제목이 섞인 보고서다 — 표를 가운뎃점으로 이어 붙이면
+ * `1 · UTF-16 BOM 경로로 바이너리가 통과 · txtToPdf.ts:106` 처럼 읽다 걸린다.
+ * 실측한 답변 하나에 파이프가 20개, 소제목이 3개였다.
+ *
+ * innerHTML은 쓰지 않는다 — 답변은 모델이 쓴 글이고, 그대로 HTML로 넣으면
+ * 화면이 남의 마크업을 실행하게 된다. 노드로 직접 만든다.
+ */
+function renderRich(parent, text) {
+  const lines = String(text ?? '').replace(/\r\n/g, '\n').split('\n')
+  const isRow = (l) => /^\s*\|.*\|\s*$/.test(l)
+  const isSep = (l) => /^\s*\|[\s:|-]+\|\s*$/.test(l)
+  const cells = (l) => l.trim().replace(/^\||\|$/g, '').split('|').map((c) => c.trim())
+
+  let i = 0
+  let para = []
+  const flushPara = () => {
+    if (!para.length) return
+    const p = document.createElement('div')
+    p.className = 'md-p'
+    inline(p, para.join('\n'))
+    parent.append(p)
+    para = []
+  }
+
+  while (i < lines.length) {
+    const line = lines[i]
+
+    // 표 — 연속된 행을 한 덩어리로 모은다
+    if (isRow(line) && (isRow(lines[i + 1] ?? '') || isSep(lines[i + 1] ?? ''))) {
+      flushPara()
+      const rows = []
+      while (i < lines.length && isRow(lines[i])) {
+        if (!isSep(lines[i])) rows.push(cells(lines[i]))
+        i++
+      }
+      const table = document.createElement('table')
+      table.className = 'md-table'
+      rows.forEach((r, ri) => {
+        const tr = document.createElement('tr')
+        for (const c of r) {
+          const td = document.createElement(ri === 0 ? 'th' : 'td')
+          inline(td, c)
+          tr.append(td)
+        }
+        table.append(tr)
+      })
+      // 좁은 패널에서 표가 넘치면 가로로 밀어 볼 수 있게 감싼다
+      const wrap = document.createElement('div')
+      wrap.className = 'md-table-wrap'
+      wrap.append(table)
+      parent.append(wrap)
+      continue
+    }
+
+    // 소제목
+    const h = /^\s{0,3}(#{1,6})\s+(.*)$/.exec(line)
+    if (h) {
+      flushPara()
+      const el = document.createElement('div')
+      el.className = 'md-h'
+      inline(el, h[2])
+      parent.append(el)
+      i++
+      continue
+    }
+
+    // 목록
+    if (/^\s*([-*·]|\d+\.)\s+/.test(line)) {
+      flushPara()
+      const ul = document.createElement('ul')
+      ul.className = 'md-list'
+      while (i < lines.length && /^\s*([-*·]|\d+\.)\s+/.test(lines[i])) {
+        const li = document.createElement('li')
+        inline(li, lines[i].replace(/^\s*([-*·]|\d+\.)\s+/, ''))
+        ul.append(li)
+        i++
+      }
+      parent.append(ul)
+      continue
+    }
+
+    if (!line.trim()) {
+      flushPara()
+      i++
+      continue
+    }
+    para.push(line)
+    i++
+  }
+  flushPara()
+}
+
+/** 한 줄 안의 **굵게**·`코드`·링크를 노드로 바꾼다. */
+function inline(parent, text) {
+  const re = /\*\*(.+?)\*\*|`([^`]+)`/g
+  let last = 0
+  for (const m of String(text).matchAll(re)) {
+    if (m.index > last) appendWithLinks(parent, text.slice(last, m.index))
+    const el = document.createElement(m[1] !== undefined ? 'strong' : 'code')
+    el.textContent = m[1] ?? m[2]
+    parent.append(el)
+    last = m.index + m[0].length
+  }
+  if (last < text.length) appendWithLinks(parent, text.slice(last))
+}
+
 function appendWithLinks(parent, text) {
   let last = 0
   for (const m of String(text).matchAll(URL_RE)) {
@@ -855,10 +938,11 @@ function renderMsg(kind, who, text) {
     w.textContent = who
     const body = document.createElement('span')
     body.className = 'body'
-    // 답변은 세션 기록에서 퍼 온 글이라 마크다운이 섞여 있다. 소음을 걷고,
-    // 결과물 링크는 눌러서 열 수 있게 한다 — 그러지 않으면 손으로 옮겨 적어야 한다.
-    const shown = kind === 'agent' ? tidyMarkdown(text) : String(text)
-    appendWithLinks(body, shown)
+    // 답변은 세션 기록에서 퍼 온 글이라 마크다운이 섞여 있다. 표·소제목은 구조를
+    // 살려 그리고, 결과물 링크는 눌러서 열 수 있게 한다 — 그러지 않으면 손으로
+    // 옮겨 적어야 한다.
+    if (kind === 'agent') renderRich(body, text)
+    else appendWithLinks(body, String(text))
     // 복사 버튼 — 평소엔 숨어 있다가 말풍선에 올리면 나타난다
     const copy = document.createElement('button')
     copy.className = 'copy'
@@ -1909,6 +1993,12 @@ document.getElementById('toggle-tools').addEventListener('click', (e) => {
     ? '파일 읽기·명령 실행 같은 도구 활동을 접습니다'
     : '도구 활동을 다시 폅니다 (기록은 지워지지 않았습니다)'
   redrawChat(activeDir)
+})
+
+// 앱 기록 열기 — 프로젝트가 없어도 쓸 수 있어야 한다(크래시는 그때도 난다).
+document.getElementById('open-log').addEventListener('click', async () => {
+  const res = await window.teamView.openLog()
+  if (!res?.ok) hintEl.textContent = res?.error ?? '기록 파일을 열지 못했습니다'
 })
 
 // 대화 전체 복사 — 화면에 보이는 순서 그대로 텍스트로 뽑는다

@@ -886,6 +886,73 @@ body.resizing * {
   display: none;
 }
 
+/* ---------- 답변 안의 구조 ----------
+   팀이 내놓는 답은 표와 소제목이 섞인 보고서다. 기호를 걷어내 한 덩어리 글로
+   만들면 `1 · UTF-16 BOM … · txtToPdf.ts:106`처럼 읽다 걸린다. */
+
+.md-p {
+  margin: 0 0 6px;
+  white-space: pre-wrap;
+}
+
+.md-p:last-child {
+  margin-bottom: 0;
+}
+
+.md-h {
+  margin: 10px 0 5px;
+  font-weight: 700;
+  color: #fff;
+  font-size: 13.5px;
+}
+
+.md-h:first-child {
+  margin-top: 0;
+}
+
+.md-list {
+  margin: 4px 0 6px;
+  padding-left: 18px;
+}
+
+.md-list li {
+  margin: 2px 0;
+}
+
+/* 좁은 패널에서 표가 넘치면 가로로 민다 — 줄바꿈되면 칸이 어긋나 못 읽는다 */
+.md-table-wrap {
+  margin: 5px 0 8px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.md-table {
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.md-table th,
+.md-table td {
+  border: 1px solid #39435a;
+  padding: 4px 7px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.md-table th {
+  background: rgba(255, 255, 255, 0.06);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.msg code {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11.5px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
 #messages ::selection {
   background: #3d6ab5;
   color: #ffffff;
