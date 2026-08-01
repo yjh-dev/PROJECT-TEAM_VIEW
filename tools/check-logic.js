@@ -199,6 +199,34 @@ for (const cmd of ['rm -rf board', 'git reset --hard origin/main', 'Remove-Item 
     : bad('훅 DESTRUCTIVE 규칙', `${frag} 누락`)
 })
 
+// ── 8. 일 순서에 모든 관문이 살아 있는가 ───────────────────────────────────
+// 실측: 순서 규칙을 넣을 때 `code-reviewer`만 못 박고 `qa-tester`는 "필요한 규모면"으로
+// 남겼다. 그 한 단어 때문에 파일 45개짜리 웹앱에 테스트가 0개로 끝났다 — 판단을
+// 넘기면 매번 "아니다"가 된다. **관문이 조용히 빠지는 것을 여기서 잡는다.**
+const guide = fs.readFileSync(path.join(ROOT, 'templates', 'CLAUDE.md'), 'utf8')
+const lead = fs.readFileSync(path.join(ROOT, 'main.js'), 'utf8')
+const inLead = (re) => re.test(lead)
+for (const [who, 이름] of [['planner', '기획'], ['ux-designer', '설계'], ['code-reviewer', '리뷰'], ['qa-tester', '검수']]) {
+  lead.includes(who)
+    ? ok(`매번 붙는 지시에 ${이름}(${who}) 단계가 있다`)
+    : bad('일 순서', `${who}가 프롬프트에서 빠졌다 — 아무도 그 단계를 밟지 않는다`)
+}
+// 검수는 규모를 따지지 않는다. 조건을 달면 조건이 안 걸리는 쪽으로 흐른다.
+inLead(/qa-tester[^]{0,80}(반드시|무조건)|(반드시|무조건)[^]{0,80}qa-tester/)
+  ? ok('검수를 조건 없이 못 박았다')
+  : bad('검수 관문', '"필요하면" 식이면 매번 건너뛴다 — 실제로 116분 작업에서 0번 불렸다')
+// 문제를 리드가 혼자 고치면 만든 사람은 같은 실수를 반복한다.
+inLead(/돌려\s*보내/) && inLead(/planner/) && inLead(/ux-designer/) && /돌려\s*보냅니다/.test(guide)
+  ? ok('검수에서 나온 문제를 원래 자리로 되돌려 보낸다')
+  : bad('되돌림 경로', '문제를 누구에게 돌려보낼지 없으면 리드가 혼자 덮는다')
+// 되돌림이 끝없이 돌면 턴이 안 끝난다.
+inLead(/두 번[^]{0,60}남/)
+  ? ok('되돌림 횟수에 끝이 있다')
+  : bad('되돌림 한계', '멈출 지점이 없으면 고침↔검수를 무한히 돈다')
+guide.includes('qa-tester') && guide.includes('마지막 관문')
+  ? ok('프로젝트 지침에도 검수 단계가 적혀 있다')
+  : bad('지침 CLAUDE.md', '검수 단계 설명이 없다')
+
 // ── 정리 ───────────────────────────────────────────────────────────────────
 fs.rmSync(LAB, { recursive: true, force: true })
 if (failed) {
