@@ -1015,7 +1015,14 @@ function pumpStatusAll({ force = false } = {}) {
     run: runState(dir),
   }))
   // 기억해 둔 채팅 폭을 같이 보낸다. 화면이 처음 뜰 때 지난번 폭으로 맞춘다.
-  const payload = { projects, activeDir, max: MAX_PROJECTS, chatWidth: loadConfig().chatWidth || null }
+  const payload = {
+    projects,
+    activeDir,
+    max: MAX_PROJECTS,
+    chatWidth: loadConfig().chatWidth || null,
+    // 보고 있는 프로젝트 것만 보낸다. 셋 다 담으면 300ms마다 오가는 양이 세 배가 된다.
+    usage: activeDir ? usageSummary(activeDir) : null,
+  }
   const json = JSON.stringify(payload)
   if (!force && json === lastStatusJson) return
   lastStatusJson = json
@@ -2131,6 +2138,137 @@ function sessionExists(dir, sessionId) {
   return fs.existsSync(sessionPath(dir, sessionId))
 }
 
+// ---------------------------------------------------------------------------
+// 토큰 사용량
+//
+// **얼마나 썼는지 볼 방법이 앱 안에 없었다.** 한도에 걸려 일이 멈춘 뒤에야 알았고,
+// 그때도 "토큰 사용량 한도"라는 실패 사유가 전부였다 — 오늘 얼마나 썼는지, 어느
+// 팀원이 많이 썼는지는 어디에도 없었다.
+//
+// 기록은 두 곳에 나뉘어 있다. 리드는 `<세션>.jsonl`에, **팀원은 `<세션>/subagents/`
+// 아래 따로** 쌓인다. 리드 것만 세면 실측에서 출력 22만인데, 팀원까지 합치면 75만이다
+// — 3분의 1만 보고 있던 셈이다. 팀원 줄에는 `attributionAgent`가 있어 누가 썼는지도
+// 알 수 있다.
+//
+// 파일이 10MB를 넘어가므로 **읽은 지점을 기억하고 새로 붙은 만큼만** 읽는다.
+const usageState = new Map() // dir → { files, day, agent, total, mark }
+const newTally = () => ({ input: 0, output: 0, cacheWrite: 0, cacheRead: 0 })
+const addTally = (t, o) => {
+  t.input += o.input
+  t.output += o.output
+  t.cacheWrite += o.cacheWrite
+  t.cacheRead += o.cacheRead
+  return t
+}
+const subTally = (a, b) => ({
+  input: a.input - b.input,
+  output: a.output - b.output,
+  cacheWrite: a.cacheWrite - b.cacheWrite,
+  cacheRead: a.cacheRead - b.cacheRead,
+})
+
+/** 이 프로젝트의 기록 파일 전부 — 리드 세션과 팀원 세션. */
+function usageFiles(dir) {
+  const folder = path.dirname(sessionPath(dir, 'x'))
+  const out = []
+  try {
+    for (const e of fs.readdirSync(folder, { withFileTypes: true })) {
+      if (e.isFile() && e.name.endsWith('.jsonl')) out.push(path.join(folder, e.name))
+      else if (e.isDirectory()) {
+        const sub = path.join(folder, e.name, 'subagents')
+        try {
+          for (const f of fs.readdirSync(sub)) if (f.endsWith('.jsonl')) out.push(path.join(sub, f))
+        } catch {
+          /* 팀원을 부르지 않은 세션에는 없다 */
+        }
+      }
+    }
+  } catch {
+    /* 아직 한 번도 안 돌린 프로젝트 */
+  }
+  return out
+}
+
+/** 새로 붙은 줄만 읽어 사용량을 누적한다. */
+function readUsage(dir) {
+  let st = usageState.get(dir)
+  if (!st) {
+    st = { files: new Map(), day: new Map(), agent: new Map(), total: newTally(), mark: null }
+    usageState.set(dir, st)
+  }
+  for (const file of usageFiles(dir)) {
+    let size = 0
+    try {
+      size = fs.statSync(file).size
+    } catch {
+      continue
+    }
+    let from = st.files.get(file) || 0
+    if (size < from) from = 0 // 파일이 줄었으면 처음부터(세션을 새로 만든 경우)
+    if (size <= from) continue
+    let text
+    try {
+      const fd = fs.openSync(file, 'r')
+      const buf = Buffer.alloc(size - from)
+      fs.readSync(fd, buf, 0, buf.length, from)
+      fs.closeSync(fd)
+      text = buf.toString('utf8')
+    } catch {
+      continue
+    }
+    // 마지막 줄이 잘려 있을 수 있다(쓰는 중). 거기까지만 읽은 것으로 표시한다.
+    const cut = text.lastIndexOf('\n')
+    if (cut < 0) continue
+    st.files.set(file, from + Buffer.byteLength(text.slice(0, cut + 1), 'utf8'))
+    for (const line of text.slice(0, cut).split('\n')) {
+      if (!line.includes('"usage"')) continue
+      let rec
+      try {
+        rec = JSON.parse(line)
+      } catch {
+        continue
+      }
+      const u = rec?.message?.usage
+      if (!u || typeof u !== 'object') continue
+      const one = {
+        input: u.input_tokens || 0,
+        output: u.output_tokens || 0,
+        cacheWrite: u.cache_creation_input_tokens || 0,
+        cacheRead: u.cache_read_input_tokens || 0,
+      }
+      addTally(st.total, one)
+      const day = String(rec.timestamp || '').slice(0, 10)
+      if (day) addTally(st.day.get(day) || st.day.set(day, newTally()).get(day), one)
+      const who = rec.attributionAgent || 'lead'
+      addTally(st.agent.get(who) || st.agent.set(who, newTally()).get(who), one)
+    }
+  }
+  return st
+}
+
+/** 지금 이 지시가 시작된 지점을 표시해 둔다. 이후 사용량이 '이번 지시' 몫이다. */
+function markUsage(dir) {
+  const st = readUsage(dir)
+  st.mark = { ...st.total }
+}
+
+/** 화면에 보낼 요약. */
+function usageSummary(dir) {
+  const st = readUsage(dir)
+  const today = new Date()
+  const key = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
+  const agents = [...st.agent.entries()]
+    .map(([name, t]) => ({ name, ...t }))
+    .sort((a, b) => b.output - a.output)
+    .slice(0, 12)
+  return {
+    total: st.total,
+    today: st.day.get(key) || newTally(),
+    run: st.mark ? subTally(st.total, st.mark) : null,
+    agents,
+  }
+}
+
 // 자주 겪는 실패를 사람 말로 옮긴다. 원문은 영어로 오고, 무엇을 해야 하는지도 안 적혀 있다.
 const FAILURE_KINDS = [
   {
@@ -2252,6 +2390,8 @@ function runCommand(c, cmd) {
   // 실패 사유를 세션 기록에서 찾을 때 **이 시점 뒤에 적힌 것만** 본다. 기록은 지시마다
   // 이어 붙으므로, 시간을 안 보면 지난 지시의 오류가 이번 실패 사유로 붙는다.
   const startedAt = Date.now() / 1000
+  // 여기서부터 쌓이는 토큰이 '이번 지시' 몫이다.
+  markUsage(dir)
   const sid = sessionIdFor(dir)
   const args = ['-p', '--permission-mode', PERMISSION_MODE]
   // 이미 있는 세션이면 잇고, 처음이면 그 id로 새로 만든다.

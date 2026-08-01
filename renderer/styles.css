@@ -1376,3 +1376,85 @@ canvas {
   display: block;
 }
 
+
+/* 토큰 사용량 — 상단 바의 작은 표시와, 눌렀을 때 나오는 자세한 표.
+   숫자를 하나로 합치지 않는다: 실측에서 캐시 읽기가 1.25억, 출력이 75만이라
+   다 더하면 겁만 주고 실제와 어긋난다. */
+#usage {
+  padding: 5px 10px;
+  font-size: 12px;
+  color: var(--muted);
+  background: transparent;
+  border-color: var(--line);
+}
+
+#usage:hover {
+  color: var(--text);
+  background: #222838;
+}
+
+#usage-pop {
+  position: fixed;
+  z-index: 60;
+  width: 340px;
+  max-width: calc(100vw - 16px);
+  max-height: 70vh;
+  overflow: auto;
+  padding: 14px 16px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+  font-size: 13px;
+}
+
+#usage-pop[hidden] {
+  display: none;
+}
+
+#usage-pop h4 {
+  margin: 0 0 10px;
+  font-size: 13px;
+}
+
+#usage-pop h5 {
+  margin: 16px 0 6px;
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+#usage-pop table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+#usage-pop th {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  text-align: right;
+  padding: 0 0 6px;
+}
+
+#usage-pop th:first-child {
+  text-align: left;
+}
+
+#usage-pop td {
+  padding: 3px 0;
+  border-top: 1px solid var(--line);
+}
+
+#usage-pop td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  padding-left: 10px;
+}
+
+#usage-pop p {
+  margin: 12px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted);
+}

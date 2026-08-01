@@ -1693,7 +1693,143 @@ on('onReset', ({ dir } = {}) => {
 
 let seeded = false // 첫 안내를 한 번만 띄우기 위한 표시
 let widthApplied = false // 기억해 둔 채팅 폭은 한 번만 적용한다(끄는 중에 덮어쓰면 안 된다)
-on('onStatus', ({ projects, activeDir: active, max, chatWidth }) => {
+// ---------------------------------------------------------------------------
+// 토큰 사용량
+//
+// **얼마나 썼는지 볼 방법이 없었다.** 한도에 걸려 일이 멈춘 뒤에야 알았고, 그때도
+// "토큰 사용량 한도"가 전부였다. 오늘 얼마나 썼는지, 누가 많이 썼는지는 어디에도
+// 없었다.
+//
+// 네 가지를 **합쳐서 하나로 보여 주지 않는다.** 실측에서 캐시 읽기가 1.25억,
+// 출력이 75만이었다 — 다 더하면 "1억 3천만"이 되어 겁만 주고 실제와 어긋난다.
+// 캐시 읽기는 같은 내용을 다시 보내지 않으려고 재사용한 양이라 성격이 다르다.
+const usageBtn = document.getElementById('usage')
+const usagePop = document.createElement('div')
+usagePop.id = 'usage-pop'
+usagePop.hidden = true
+document.body.append(usagePop)
+
+/** 사람이 읽는 단위. 10,000 미만은 그대로, 그 위는 만·억으로. */
+function fmtTokens(n) {
+  const v = Math.max(0, Math.round(n || 0))
+  if (v < 10_000) return v.toLocaleString('ko-KR')
+  if (v < 100_000_000) return `${(v / 10_000).toFixed(v < 100_000 ? 1 : 0)}만`
+  return `${(v / 100_000_000).toFixed(2)}억`
+}
+
+const USAGE_ROWS = [
+  ['output', '출력', '팀이 써 낸 양'],
+  ['input', '새 입력', '이번에 새로 보낸 양'],
+  ['cacheWrite', '캐시 기록', '다음에 다시 쓰려고 저장한 양'],
+  ['cacheRead', '캐시 읽기', '저장해 둔 것을 재사용한 양 — 새로 보낸 것이 아닙니다'],
+]
+
+const AGENT_LABEL = {
+  lead: '리드', planner: '기획', 'ux-designer': '디자인', 'frontend-dev': '프론트',
+  'backend-dev': '백엔드', 'mobile-dev': '모바일', 'code-reviewer': '리뷰',
+  'qa-tester': 'QA', debugger: '디버거', 'release-manager': '릴리스', scout: '조사',
+}
+
+let lastUsage = null
+
+function renderUsage(usage) {
+  lastUsage = usage
+  const has = usage && (usage.total.output || usage.total.input || usage.total.cacheRead)
+  usageBtn.hidden = !has
+  if (!has) {
+    usagePop.hidden = true
+    usageBtn.setAttribute('aria-expanded', 'false')
+    return
+  }
+  // 한 줄에는 **오늘 출력**만. 가장 자주 궁금한 하나이고, 캐시에 부풀지 않는다.
+  usageBtn.textContent = `토큰 오늘 ${fmtTokens(usage.today.output)}`
+  usageBtn.title = `오늘 출력 ${fmtTokens(usage.today.output)} · 새 입력 ${fmtTokens(usage.today.input)}\n눌러서 자세히 봅니다`
+  if (!usagePop.hidden) fillUsagePop()
+}
+
+function fillUsagePop() {
+  const u = lastUsage
+  usagePop.replaceChildren()
+  if (!u) return
+  const h = document.createElement('h4')
+  h.textContent = '토큰 사용량'
+  usagePop.append(h)
+
+  const table = document.createElement('table')
+  const head = document.createElement('tr')
+  for (const t of ['', '이번 지시', '오늘', '전체']) {
+    const th = document.createElement('th')
+    th.textContent = t
+    head.append(th)
+  }
+  table.append(head)
+  for (const [key, label, why] of USAGE_ROWS) {
+    const tr = document.createElement('tr')
+    const name = document.createElement('td')
+    name.textContent = label
+    name.title = why
+    tr.append(name)
+    for (const src of [u.run, u.today, u.total]) {
+      const td = document.createElement('td')
+      td.className = 'num'
+      td.textContent = src ? fmtTokens(src[key]) : '—'
+      tr.append(td)
+    }
+    table.append(tr)
+  }
+  usagePop.append(table)
+
+  if (u.agents?.length) {
+    const h2 = document.createElement('h5')
+    h2.textContent = '팀원별 (출력 기준, 전체)'
+    usagePop.append(h2)
+    const list = document.createElement('table')
+    for (const a of u.agents) {
+      if (!a.output) continue
+      const tr = document.createElement('tr')
+      const n = document.createElement('td')
+      n.textContent = AGENT_LABEL[a.name] || a.name
+      const v = document.createElement('td')
+      v.className = 'num'
+      v.textContent = fmtTokens(a.output)
+      tr.append(n, v)
+      list.append(tr)
+    }
+    usagePop.append(list)
+  }
+
+  const note = document.createElement('p')
+  note.textContent =
+    '캐시 읽기는 같은 내용을 다시 보내지 않으려고 재사용한 양입니다. 새로 보낸 양과 성격이 달라 따로 셉니다.'
+  usagePop.append(note)
+}
+
+function toggleUsagePop(show) {
+  const next = show ?? usagePop.hidden
+  usagePop.hidden = !next
+  usageBtn.setAttribute('aria-expanded', String(next))
+  if (!next) return
+  fillUsagePop()
+  // 버튼 아래에 붙인다. 화면 오른쪽 끝을 넘어가지 않게 민다.
+  const r = usageBtn.getBoundingClientRect()
+  usagePop.style.top = `${Math.round(r.bottom + 6)}px`
+  const w = usagePop.offsetWidth || 320
+  usagePop.style.left = `${Math.round(Math.max(8, Math.min(r.left, window.innerWidth - w - 8)))}px`
+}
+
+usageBtn.addEventListener('click', (e) => {
+  e.stopPropagation()
+  toggleUsagePop()
+})
+document.addEventListener('click', (e) => {
+  if (!usagePop.hidden && !usagePop.contains(e.target)) toggleUsagePop(false)
+})
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !usagePop.hidden) toggleUsagePop(false)
+})
+
+on('onStatus', ({ projects, activeDir: active, max, chatWidth, usage }) => {
+  renderUsage(usage)
   if (!widthApplied && chatWidth) {
     widthApplied = true
     setChatWidth(chatWidth, { save: false }) // 방금 읽은 값을 도로 저장할 이유가 없다

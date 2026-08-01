@@ -29,6 +29,30 @@ const ENV = {
   missing: { claude: { installed: false, loggedIn: false }, figma: { connected: false, present: false } },
 }
 
+// 토큰 사용량. 숫자는 **실측에서 가져온다** — 만들어 낸 작은 값으로는 자리가
+// 모자라는지 알 수 없다(실제로 캐시 읽기가 1.3억까지 갔다).
+const tally = (input, output, cacheWrite, cacheRead) => ({ input, output, cacheWrite, cacheRead })
+const realUsage = {
+  total: tally(125_825, 1_002_962, 8_768_723, 135_800_963),
+  today: tally(125_825, 1_002_962, 8_768_723, 135_800_963),
+  run: tally(12_040, 121_388, 690_244, 12_503_991),
+  agents: [
+    { name: 'backend-dev', ...tally(20_000, 332_100, 2_100_000, 40_000_000) },
+    { name: 'lead', ...tally(120, 221_477, 1_553_969, 3_883_739) },
+    { name: 'frontend-dev', ...tally(18_000, 210_400, 1_900_000, 38_000_000) },
+    { name: 'qa-tester', ...tally(9_000, 121_000, 900_000, 21_000_000) },
+    { name: 'code-reviewer', ...tally(4_000, 61_000, 400_000, 9_000_000) },
+    { name: 'ux-designer', ...tally(3_000, 41_000, 300_000, 7_000_000) },
+  ],
+}
+const USAGE = {
+  normal: realUsage,
+  stress: realUsage,
+  nologin: realUsage,
+  empty: null, // 아직 한 번도 안 돌린 프로젝트에는 표시가 없어야 한다
+  missing: null,
+}
+
 const req = (key, label, why, installed, version, url) => ({
   key, label, why, installed, version, canInstall: key === 'claude', optional: key === 'git', url,
 })
@@ -140,5 +164,6 @@ contextBridge.exposeInMainWorld('teamView', {
       activeDir: PROJECTS[S][0]?.dir ?? null,
       max: 3,
       chatWidth: S === 'stress' ? 520 : null,
+      usage: USAGE[S],
     }), 150),
 })
