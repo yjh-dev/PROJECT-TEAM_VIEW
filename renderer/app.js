@@ -863,6 +863,10 @@ function renderMsg(kind, who, text) {
     const copy = document.createElement('button')
     copy.className = 'copy'
     copy.type = 'button'
+    // **Tab 순서에서 뺀다.** 메시지마다 하나씩 붙어서, 대화가 길면 입력창에 닿기까지
+    // 복사 버튼을 200번 지나야 했다(실측: 10개 메시지에 이미 10개). 마우스를 올려야
+    // 보이는 보조 버튼이고, 키보드 쪽에는 '전체 복사'와 글자 선택이 따로 있다.
+    copy.tabIndex = -1
     copy.title = '이 메시지 복사'
     copy.textContent = '⧉'
     copy.addEventListener('click', (e) => {
