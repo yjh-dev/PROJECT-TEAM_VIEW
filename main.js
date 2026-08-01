@@ -460,6 +460,34 @@ function mergeHooks(claudeDir) {
 }
 
 /**
+ * CLAUDE.md의 **팀 규칙 부분만** 새 템플릿으로 바꾼다(`갱신`을 고른 경우에만).
+ *
+ * 이 파일은 위쪽 절반(개요·기술 스택·주요 명령어)이 사람의 것이고, `## 팀으로
+ * 일합니다`부터 끝까지가 앱의 것이다. 그동안 통째로 "있으면 건드리지 않는다"로
+ * 뒀더니 **오래 쓴 프로젝트가 낡은 규칙을 영영 갖고 갔다.** 실측: 검수 규칙을
+ * 고친 뒤에도 ConvertFlow에는 "테스트가 필요한 규모면 부릅니다"가 남아 새 규칙과
+ * 정면으로 부딪혔다.
+ *
+ * 사람이 쓴 위쪽은 그대로 두고, 아래쪽만 바꾼다. 혹시 아래에 사람이 덧붙인 게
+ * 있을 수 있으니 바꾸기 전 `.bak`을 남긴다.
+ */
+const TEAM_SECTION = '## 팀으로 일합니다'
+function refreshTeamRules(target) {
+  const cur = fs.readFileSync(target, 'utf8')
+  const tpl = fs.readFileSync(path.join(templateDir(), 'CLAUDE.md'), 'utf8')
+  const norm = (s) => s.replace(/\r\n/g, '\n')
+  const at = norm(cur).indexOf(TEAM_SECTION)
+  const tplAt = norm(tpl).indexOf(TEAM_SECTION)
+  // 사람이 그 제목을 지웠거나 템플릿 구조가 바뀌었으면 손대지 않는다.
+  if (at < 0 || tplAt < 0) return 'CLAUDE.md 팀 규칙 위치를 찾지 못해 그대로 뒀습니다'
+  const next = norm(cur).slice(0, at) + norm(tpl).slice(tplAt)
+  if (next === norm(cur)) return null // 이미 최신이면 조용히 넘어간다
+  fs.writeFileSync(target + '.bak', cur, 'utf8')
+  fs.writeFileSync(target, next, 'utf8')
+  return 'CLAUDE.md 팀 규칙 갱신 (개요·스택은 그대로, 이전 내용은 CLAUDE.md.bak)'
+}
+
+/**
  * 빠진 것을 채운다. 이미 있는 파일은 **덮어쓰지 않는다** — 사람이 고쳐 둔 것을
  * 되돌리면 안 된다.
  */
@@ -504,6 +532,9 @@ function setupProject(dir, parts = {}) {
       if (!fs.existsSync(target)) {
         fs.copyFileSync(path.join(templateDir(), 'CLAUDE.md'), target)
         done.push('CLAUDE.md 생성 (개요·스택·명령어는 비어 있음)')
+      } else if (parts.update) {
+        const msg = refreshTeamRules(target)
+        if (msg) done.push(msg)
       }
     }
   } catch (err) {
