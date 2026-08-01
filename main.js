@@ -14,7 +14,7 @@
 // 크기 비교가 훨씬 단순하고 정확하다.
 
 const { app, BrowserWindow, ipcMain, dialog, clipboard, shell, Notification } = require('electron')
-const { spawn, execFile } = require('child_process')
+const { spawn, execFile, execFileSync } = require('child_process')
 const crypto = require('crypto')
 const fs = require('fs')
 const path = require('path')
@@ -173,6 +173,13 @@ function projectHealth(dir) {
     // 닿지 않았다** — `rm -rf`가 44자에서 잘리던 문제를 고쳐도, 이미 세팅된
     // 프로젝트는 옛 훅 그대로라 화면에는 여전히 잘린 명령이 찍힌다.
     hookStale: staleHook(dir),
+    // **되돌릴 수단이 있는가.**
+    //
+    // 회사는 확인 없이 파일을 고치고 지운다(`bypassPermissions`). 실제로 한 작업에서
+    // `rm -rf`가 여러 번 돌았다. git이 아니면 그걸 되돌릴 방법이 아무것도 없는데,
+    // 그동안 앱은 확인조차 하지 않았다 — README에만 "버전 관리되는 폴더에 붙이세요"
+    // 라고 적혀 있었고, 정작 붙여 둔 프로젝트 둘 다 git이 아니었다.
+    git: !!gitRoot(dir),
     stack: detectStack(dir),
   }
   healthCache.set(dir, { at: Date.now(), health })
@@ -509,6 +516,117 @@ function setupProject(dir, parts = {}) {
  *
  * CLAUDE.md는 비교하지 않는다 — 개요·스택을 사람이 채우는 파일이라 다른 게 정상이다.
  */
+/**
+ * 이 폴더를 관리하는 git 저장소의 최상위 경로. 아니면 null.
+ *
+ * `.git`이 있는지만 보면 안 된다 — 상위 폴더의 저장소에 속한 하위 폴더도 버전
+ * 관리를 받는다(그 경우 되돌릴 수 있으므로 경고할 이유가 없다). git에게 직접 묻는다.
+ */
+function gitRoot(dir) {
+  try {
+    return execFileSync('git', ['-C', dir, 'rev-parse', '--show-toplevel'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 4000,
+    }).trim()
+  } catch {
+    return null // git이 없거나, 저장소가 아니거나
+  }
+}
+
+/** 커밋할 사람 정보가 설정돼 있는가. 없으면 `git commit`이 통째로 실패한다. */
+function gitIdentity() {
+  const read = (key) => {
+    try {
+      return execFileSync('git', ['config', '--get', key], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 4000,
+      }).trim()
+    } catch {
+      return ''
+    }
+  }
+  return { name: read('user.name'), email: read('user.email') }
+}
+
+// 처음 만드는 .gitignore. **이게 없으면 첫 커밋에 node_modules가 통째로 들어간다** —
+// 되돌릴 수단을 만들려다 몇 만 개 파일을 커밋하게 된다.
+const DEFAULT_GITIGNORE = `node_modules/
+.next/
+dist/
+build/
+out/
+coverage/
+*.log
+
+# 환경변수 — 실수로 올라가면 되돌리기 어렵다
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
+Thumbs.db
+`
+
+/**
+ * 되돌릴 수 있게 만든다: `git init` + 첫 커밋까지.
+ *
+ * **init만 해서는 아무것도 지켜지지 않는다.** 커밋이 하나 있어야 돌아갈 지점이
+ * 생긴다. 그래서 .gitignore를 먼저 두고(없을 때만) 전체를 한 번 커밋한다.
+ */
+function gitInit(dir) {
+  const already = gitRoot(dir)
+  if (already) return { ok: true, already: true, root: already }
+
+  const run = (args) =>
+    execFileSync('git', ['-C', dir, ...args], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 120000,
+    })
+
+  const done = []
+  try {
+    run(['init'])
+    done.push('저장소 생성')
+
+    const ignore = path.join(dir, '.gitignore')
+    if (!fs.existsSync(ignore)) {
+      fs.writeFileSync(ignore, DEFAULT_GITIGNORE, 'utf8')
+      done.push('.gitignore 추가')
+    }
+
+    run(['add', '-A'])
+    // 사람 정보가 없으면 커밋이 실패한다. 전역 설정을 건드리지 않고 이 커밋에만 붙인다.
+    const id = gitIdentity()
+    const who = []
+    if (!id.name) who.push('-c', 'user.name=Team View')
+    if (!id.email) who.push('-c', 'user.email=teamview@localhost')
+    execFileSync('git', ['-C', dir, ...who, 'commit', '-m', '첫 상태 — Team View가 되돌릴 지점을 만들었습니다'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 120000,
+    })
+    const n = run(['rev-list', '--count', 'HEAD']).trim()
+    done.push(`첫 커밋 (${n}개)`)
+  } catch (err) {
+    // stderr에 진짜 이유가 있다. 삼키면 사용자는 "왜 안 되지"만 남는다.
+    const why = String(err.stderr || err.message || '').trim().split('\n').slice(-3).join(' ')
+    return { ok: false, error: why || '알 수 없는 오류', done }
+  }
+  healthCache.delete(dir) // 방금 바뀌었다
+  return { ok: true, done, root: gitRoot(dir) }
+}
+
+ipcMain.handle('git:init', (_e, dir) => {
+  if (!loadProjects().includes(dir)) return { ok: false, error: '붙어 있지 않은 프로젝트입니다' }
+  const res = gitInit(dir)
+  if (res.ok) pumpStatusAll({ force: true })
+  return res
+})
+
 /**
  * 프로젝트에 깔린 훅이 앱이 들고 있는 것보다 낡았는가.
  *

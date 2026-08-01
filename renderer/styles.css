@@ -198,13 +198,21 @@ button:hover {
   align-items: stretch;
   gap: 6px;
   flex: 1 1 auto;
-  min-width: 0;
+  /* 어느 프로젝트인지 읽을 수는 있어야 한다. 여기까지만 줄어들고 그 아래로는
+     가로 스크롤로 넘긴다 — 예전엔 0까지 줄어들어 탭이 `s...`가 됐다. */
+  min-width: 300px;
   /* 좁은 창에서 `overflow: hidden`이면 탭이 **소리 없이 잘린다.** 실측으로 최소 창
      크기(1180px)에서 탭 3개가 169px를 요구하는데 136px만 남아 셋째 탭이 사라졌다.
      가로로 밀어 볼 수 있게 둔다 — 있는 것을 감추는 편보다 낫다. */
   overflow-x: auto;
   overflow-y: hidden;
-  scrollbar-width: thin;
+  /* 스크롤바를 보이면 그만큼 바가 높아진다(실측 55→67px). 최대 3개뿐이라 넘치는
+     일이 드물고, 넘쳐도 휠·드래그로 밀린다. 높이를 지키는 편이 낫다. */
+  scrollbar-width: none;
+}
+
+#tabs::-webkit-scrollbar {
+  height: 0;
 }
 
 #tabs::-webkit-scrollbar {
@@ -225,7 +233,10 @@ button:hover {
   border: 1px solid #333c50;
   border-radius: 6px;
   cursor: pointer;
-  min-width: 0;
+  /* **눌려서 줄어들지 않는다.** flex 안에서 기본값(shrink:1)이면 자리가 모자랄 때
+     탭끼리 서로를 눌러 `shop`이 `s...`가 됐다. 어느 프로젝트인지 못 읽으면 탭이
+     아니다. 넘치면 #tabs의 가로 스크롤로 넘긴다. */
+  flex: 0 0 auto;
   max-width: 260px;
 }
 
@@ -368,6 +379,9 @@ button:hover {
   font-size: 13px;
   padding: 4px 12px;
   border-radius: 999px;
+  /* 줄바꿈되면 바가 두 줄이 되고 탭까지 뭉갠다. 줄이지 말고 그대로 둔다. */
+  white-space: nowrap;
+  flex: 0 0 auto;
 }
 
 #status.ok {
@@ -879,6 +893,11 @@ main {
 }
 
 /* 상단 요약 — 지금 누가 뭘 하는지 */
+/* 상단바에 들어갈 것이 늘면서(git 경고·실행 버튼·주소) 자리를 다투게 됐다.
+   **무엇이 먼저 줄어들지 정해 둔다** — 안 그러면 상태 칩이 두 줄로 늘어나면서
+   바가 두 줄이 되고, 그 여파로 탭이 `s...`, `bo...`로 뭉개진다(실측). */
+
+/* 지금 누가 일하는지 — 사무실 화면에 이미 보이는 정보다. 가장 먼저 줄어든다. */
 #now {
   margin-left: auto;
   font-size: 12px;
@@ -886,6 +905,8 @@ main {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  flex: 0 1 auto;
+  min-width: 0;
   max-width: 46%;
 }
 #now.busy {
@@ -917,6 +938,26 @@ main {
   min-height: 1.1em;
   font-size: 12px;
   color: #e0af68;
+}
+
+/* `⚠`·`▶`·`■` 같은 글리프는 줄상자를 키운다 — 이 버튼들만 39px이 되어 상단바 전체가
+   5px 높아졌다(실측: 다른 버튼 34px). 줄높이를 고정해 키를 맞춘다. */
+#gitinit,
+#run {
+  line-height: 1.15;
+}
+
+/* 되돌릴 수단이 없다는 경고. 상태 표시가 아니라 **눌러서 고치는 버튼**이라
+   다른 배지와 달리 또렷하게 둔다. */
+#gitinit.danger {
+  color: #ffd9d4;
+  background: #5a2a2a;
+  border-color: #8a4444;
+  white-space: nowrap;
+}
+
+#gitinit.danger:hover {
+  background: #6d3232;
 }
 
 /* 로컬 실행 버튼 — 돌고 있으면 초록으로 확실히 구분한다 */

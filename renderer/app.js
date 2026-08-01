@@ -1511,6 +1511,7 @@ window.teamView.onStatus(({ projects, activeDir: active, max }) => {
   setupBtn.textContent = parts.some((p) => p.update) ? '팀 갱신' : '세팅하기'
 
   renderRun(me)
+  renderGit(me)
 
   // 첫 안내는 **프로젝트가 있는지 알고 난 뒤에** 띄운다. 예전에는 시작하자마자
   // "캐릭터를 클릭하고 지시를 보내세요"라고 했는데, 보낼 프로젝트가 없을 때도
@@ -1737,6 +1738,9 @@ async function attachProject() {
   // "지시를 보내도 아무 일도 안 일어난다"가 된 적이 있다.
   if (missingParts(res.health).length) await runSetup(res.dir, res.health)
   else hintEl.textContent = `${baseName(res.dir)} 붙였습니다 — 팀원 ${res.health.agents}명`
+  // **되돌릴 수단은 붙이는 자리에서 묻는다.** 나중에 상단 버튼으로도 만들 수 있지만,
+  // 첫 지시를 보내기 전이 아니면 이미 파일이 바뀐 뒤다.
+  if (res.health?.git === false) await makeGit(res.dir, { fromAttach: true })
 }
 
 addBtn.addEventListener('click', attachProject)
@@ -1787,6 +1791,43 @@ document.getElementById('copy-all').addEventListener('click', (e) => {
     btn.textContent = before
   }, 1200)
 })
+
+// ---------- 되돌릴 수단 ----------
+//
+// 회사는 확인 없이 파일을 고치고 지운다(`bypassPermissions`). 한 작업에서 `rm -rf`가
+// 여러 번 돌았다. git이 아니면 되돌릴 방법이 없는데, 그동안 앱은 확인조차 하지
+// 않았다 — README에만 적혀 있었고 정작 붙여 둔 프로젝트 둘 다 git이 아니었다.
+
+const gitBtn = document.getElementById('gitinit')
+
+function renderGit(p) {
+  gitBtn.hidden = !p || p.health?.git !== false
+}
+
+async function makeGit(dir, { fromAttach = false } = {}) {
+  const name = baseName(dir)
+  const ok = confirm(
+    `${name}은(는) git 저장소가 아닙니다.\n\n` +
+      `팀은 확인을 묻지 않고 파일을 만들고 고치고 지웁니다. 지금은 잘못돼도 되돌릴 방법이 없습니다.\n\n` +
+      `git 저장소로 만들고 지금 상태를 첫 커밋으로 남길까요?\n` +
+      `(.gitignore가 없으면 node_modules·.env를 제외하는 기본 파일을 함께 만듭니다)`,
+  )
+  if (!ok) {
+    hintEl.textContent = fromAttach
+      ? `${name}을 되돌릴 수단 없이 씁니다 — 상단 "⚠ 되돌릴 수 없음"에서 나중에 만들 수 있습니다`
+      : ''
+    return
+  }
+  gitBtn.disabled = true
+  hintEl.textContent = 'git 저장소를 만드는 중…'
+  const res = await window.teamView.gitInit(dir)
+  gitBtn.disabled = false
+  hintEl.textContent = res?.ok
+    ? `${name} — ${(res.done ?? []).join(' · ')}`
+    : `git 만들기 실패: ${res?.error ?? '알 수 없는 오류'}`
+}
+
+gitBtn.addEventListener('click', () => activeDir && makeGit(activeDir))
 
 // ---------- 로컬 실행 ----------
 //
