@@ -1382,6 +1382,13 @@ if (!app.requestSingleInstanceLock()) {
         openCompany(dir)
         startWatching(dir, { replay: dir === activeDir })
       }
+      // **켤 때도 지난 대화를 되살린다.**
+      //
+      // 화면은 `events:reset`을 받아야 저장해 둔 대화를 불러온다. 그런데 시작할
+      // 때는 그걸 보내지 않아서, **탭을 한 번 옮기기 전까지 대화가 비어 보였다.**
+      // 기록은 멀쩡히 있는데(실측: 452줄) 화면에만 안 나왔다 — 앱을 새로 깔면
+      // 지난 대화가 날아간 것처럼 보인다.
+      send('events:reset', { dir: activeDir })
       pumpStatusAll({ force: true })
     })
 
