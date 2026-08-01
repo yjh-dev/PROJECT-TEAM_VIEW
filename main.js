@@ -35,6 +35,12 @@ const COMMANDS_NAME = 'team-commands.jsonl'
 const MAX_PROJECTS = 3
 
 let win = null
+// 화면이 죽었을 때 "그때 무엇을 하고 있었는지"를 적기 위한 것들.
+// **죽은 뒤에는 물어볼 수 없으므로** 살아 있는 동안 받아 둔다.
+let crashCount = 0
+const CRASH_RELOAD_MAX = 3
+let lastVitals = null // 렌더러가 주기적으로 보내는 상태
+const bootAt = Date.now()
 // 창이 지금 사용자 눈앞에 있는지. 창 이벤트로만 갱신한다(getter는 못 믿는다 —
 // notifyDone의 주석 참고).
 let winFocused = false
@@ -1107,6 +1113,56 @@ function rendererLogPath() {
 const LOG_MAX_BYTES = 256 * 1024
 const LOG_KEEP_BYTES = 64 * 1024
 
+/**
+ * 화면이 죽거나 멎었을 때 같이 남길 사정.
+ *
+ * `crashed` 한 단어만 남으면 다음에 또 나도 알 수 있는 게 없다. 메인 쪽에서 아는 것과,
+ * 렌더러가 마지막으로 알려 준 상태를 함께 적는다.
+ */
+function crashContext() {
+  const mb = (n) => `${Math.round(n / 1024 / 1024)}MB`
+  const lines = []
+  lines.push(
+    `켠 지 ${Math.round((Date.now() - bootAt) / 60000)}분 · 붙은 프로젝트 ${loadProjects().length}개` +
+      ` · 보는 중 ${activeDir ? path.basename(activeDir) : '없음'}`,
+  )
+  const busy = [...companies.values()].filter((c) => c.child).map((c) => path.basename(c.dir))
+  lines.push(`실행 중인 지시 ${busy.length}건${busy.length ? ` (${busy.join(', ')})` : ''}` +
+    ` · 띄워 둔 서버 ${runners.size}개`)
+  try {
+    const m = process.memoryUsage()
+    lines.push(`메인 메모리 rss ${mb(m.rss)} · heap ${mb(m.heapUsed)}`)
+  } catch {
+    /* 못 재면 그만 */
+  }
+  if (lastVitals) {
+    const age = Math.round((Date.now() - lastVitals.at) / 1000)
+    lines.push(
+      `화면(${age}초 전): 대화 ${lastVitals.messages}줄 · 팀원 ${lastVitals.agents}명` +
+        ` · 결과물 ${lastVitals.outputs}개 · 이벤트 누적 ${lastVitals.events}건` +
+        (lastVitals.heap ? ` · heap ${mb(lastVitals.heap)}` : ''),
+    )
+    if (lastVitals.lastEvent) lines.push(`마지막 이벤트: ${lastVitals.lastEvent}`)
+  } else {
+    lines.push('화면 상태를 받은 적 없음 (뜨자마자 죽었을 수 있습니다)')
+  }
+  return lines
+}
+
+// 화면이 살아 있는 동안 자기 상태를 알려 준다. 죽고 나면 물어볼 수 없다.
+ipcMain.handle('ui:vitals', (_e, v) => {
+  lastVitals = { ...v, at: Date.now() }
+  return { ok: true }
+})
+
+// 화면 쪽에서 잡힌 예외. console-message로도 오지만 형식이 버전마다 달라 놓친 적이 있다.
+ipcMain.handle('ui:error', (_e, info) => {
+  logRenderer(`화면 오류: ${String(info?.message ?? '').slice(0, 300)}`)
+  if (info?.source) logRenderer(`    ${info.source}:${info.line ?? '?'}`)
+  if (info?.stack) for (const l of String(info.stack).split('\n').slice(0, 6)) logRenderer(`    ${l.trim()}`)
+  return { ok: true }
+})
+
 function logRenderer(line) {
   const stamped = `[${new Date().toISOString()}] ${line}`
   console.error('[renderer]', line)
@@ -1193,9 +1249,55 @@ function createWindow() {
   win.webContents.on('did-fail-load', (e, code, desc, url) => {
     logRenderer(`로드 실패 ${code} ${desc} — ${url}`)
   })
+  // **화면이 죽으면 되살린다.**
+  //
+  // 한 번 이런 줄이 남았다: `렌더러 프로세스 종료: crashed`. 그게 전부였다 —
+  // 왜 죽었는지도, 그때 무엇을 하고 있었는지도 없었고, 창은 까맣게 남아 앱을
+  // 다시 켜는 것 말고는 방법이 없었다.
+  //
+  // 이제 죽은 사정을 최대한 적고, 다시 띄운다. 회사(대기열·실행)는 메인 프로세스에
+  // 있어서 화면이 죽어도 계속 돌고 있다 — 화면만 붙이면 하던 일이 이어진다.
   win.webContents.on('render-process-gone', (e, details) => {
-    logRenderer(`렌더러 프로세스 종료: ${details.reason}`)
+    crashCount += 1
+    logRenderer(
+      `화면 프로세스 종료: ${details.reason}` +
+        (details.exitCode !== undefined ? ` (코드 ${details.exitCode})` : '') +
+        ` · ${crashCount}번째`,
+    )
+    for (const line of crashContext()) logRenderer(`    ${line}`)
+
+    // 되살리기를 무한히 되풀이하지 않는다. 계속 죽는다면 원인이 남아 있는 것이고,
+    // 껐다 켜기를 반복하면 로그만 불어난다.
+    if (crashCount > CRASH_RELOAD_MAX) {
+      logRenderer(`    되살리기를 멈춥니다 — ${CRASH_RELOAD_MAX}번을 넘겼습니다`)
+      dialog.showErrorBox(
+        'Team View — 화면을 되살리지 못했습니다',
+        `화면이 ${crashCount}번 종료됐습니다.\n\n` +
+          `팀 작업 자체는 계속 돌고 있습니다(대기열·실행은 화면과 별개입니다).\n` +
+          `앱을 다시 켜 주세요. 자세한 내용은 아래 파일에 있습니다:\n${rendererLogPath()}`,
+      )
+      return
+    }
+    setTimeout(() => {
+      if (win && !win.isDestroyed()) {
+        logRenderer('    화면을 다시 띄웁니다')
+        win.reload()
+      }
+    }, 800)
   })
+
+  // 죽은 것과 멎은 것은 다르다. 멎은 쪽은 로그에 아무것도 안 남아 "느려졌나?"로만 보였다.
+  win.webContents.on('unresponsive', () => {
+    logRenderer('화면이 응답하지 않습니다')
+    for (const line of crashContext()) logRenderer(`    ${line}`)
+  })
+  win.webContents.on('responsive', () => logRenderer('화면이 다시 응답합니다'))
+
+  // GPU·유틸리티 프로세스가 죽으면 화면이 이상해지는데 원인이 화면 쪽에 안 남는다.
+  app.on('child-process-gone', (_e, d) => {
+    logRenderer(`보조 프로세스 종료: ${d.type}${d.name ? `(${d.name})` : ''} — ${d.reason}`)
+  })
+
   win.webContents.on('preload-error', (e, preloadPath, err) => {
     logRenderer(`preload 오류 ${preloadPath}: ${err.message}`)
   })
@@ -1222,6 +1324,21 @@ if (!app.requestSingleInstanceLock()) {
     if (win.isMinimized()) win.restore()
     win.show()
     win.focus()
+  })
+
+  // **메인 프로세스가 예외로 죽지 않게 한다.**
+  //
+  // Electron은 메인에서 예외가 새어 나오면 "A JavaScript error occurred in the main
+  // process"라는 회색 창을 띄우고 앱을 끝낸다. 사용자에게는 스택 트레이스만 남고,
+  // 돌던 지시도 함께 사라진다. 이 앱은 대부분 타이머·이벤트로 돌아가므로, 한 군데서
+  // 난 예외 때문에 전부를 끄는 것보다 남기고 계속 도는 편이 낫다.
+  process.on('uncaughtException', (err) => {
+    logRenderer(`메인 예외: ${err?.message ?? err}`)
+    for (const l of String(err?.stack ?? '').split('\n').slice(1, 6)) logRenderer(`    ${l.trim()}`)
+    for (const l of crashContext()) logRenderer(`    ${l}`)
+  })
+  process.on('unhandledRejection', (reason) => {
+    logRenderer(`메인 미처리 거부: ${reason?.message ?? reason}`)
   })
 
   app.whenReady().then(() => {

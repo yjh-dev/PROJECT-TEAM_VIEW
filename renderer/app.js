@@ -2573,3 +2573,46 @@ renderTargets()
 refreshObstacles()
 resize()
 requestAnimationFrame(loop)
+
+// ---------- 죽었을 때를 대비해 ----------
+//
+// 화면이 죽으면 메인은 `crashed` 한 단어밖에 알 수 없다. 실제로 한 번 그렇게 남았고
+// 아무것도 알아낼 수 없었다. **살아 있는 동안** 상태를 흘려 보내 둔다.
+
+let eventsSeen = 0
+let lastEventLabel = null
+window.teamView.onEvents(({ events }) => {
+  eventsSeen += events?.length ?? 0
+  const last = events?.[events.length - 1]
+  if (last) lastEventLabel = `${last.type}${last.tool ? `/${last.tool}` : ''} · ${last.agent ?? '-'}`
+})
+
+const VITALS_MS = 20_000
+setInterval(() => {
+  window.teamView.vitals({
+    messages: messagesEl.children.length,
+    agents: agents.size,
+    outputs: outputCount(),
+    events: eventsSeen,
+    lastEvent: lastEventLabel,
+    // 크래시 원인이 메모리면 여기가 먼저 부푼다. 브라우저가 안 주면 없는 대로 둔다.
+    heap: performance.memory?.usedJSHeapSize ?? null,
+  })
+}, VITALS_MS)
+
+// 잡히지 않은 예외를 메인 로그로 보낸다. console-message로도 오지만 인자 형식이
+// 버전마다 달라 예전에 통째로 놓친 적이 있다 — 두 길로 남긴다.
+window.addEventListener('error', (e) => {
+  window.teamView.reportError({
+    message: e.message,
+    source: e.filename,
+    line: e.lineno,
+    stack: e.error?.stack,
+  })
+})
+window.addEventListener('unhandledrejection', (e) => {
+  window.teamView.reportError({
+    message: `처리되지 않은 거부: ${e.reason?.message ?? e.reason}`,
+    stack: e.reason?.stack,
+  })
+})
