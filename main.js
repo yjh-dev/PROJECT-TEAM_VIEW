@@ -1914,6 +1914,10 @@ function clearClaim(projectDir) {
 function killChild(c) {
   const child = c?.child
   if (!child) return 0
+  // **사람이 멈춘 것과 일이 실패한 것을 구분한다.** 죽이면 종료코드가 0이 아니라서
+  // 그동안 취소를 누를 때마다 "지시 실패"가 떴다. 실측: 중지를 눌렀는데 화면에는
+  // 네 시간 전 오류가 실패 사유로 붙어 나왔다.
+  child.teamviewCanceled = true
   try {
     if (process.platform === 'win32') {
       spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' })
@@ -2119,7 +2123,10 @@ const FAILURE_KINDS = [
  * 그래서 로그에는 "코드 1로 끝남"만 찍히고 **왜인지는 어디에도 없었다** —
  * 실제로 사용량 한도에 걸렸는데 원인 불명으로 보였다.
  */
-function readSessionError(dir, sessionId) {
+// 기록의 시각과 앱의 시계가 몇 초 어긋나도 이번 실행의 오류를 놓치지 않게 둔 여유.
+const CLOCK_SLACK_SEC = 10
+
+function readSessionError(dir, sessionId, since) {
   const p = sessionPath(dir, sessionId)
   let text
   try {
@@ -2137,6 +2144,13 @@ function readSessionError(dir, sessionId) {
       rec = JSON.parse(line)
     } catch {
       continue
+    }
+    // **이번 실행 뒤에 적힌 것만 본다.** 세션 기록은 지시마다 이어 붙는다. 시간을
+    // 안 보면 지난 지시의 오류를 이번 실패 사유로 붙인다 — 실측: 사용자가 중지를
+    // 눌렀는데 네 시간 전 사용량 한도 오류가 사유로 떴다(17:38 오류, 21:37 보고).
+    if (since) {
+      const t = Date.parse(rec?.timestamp || '')
+      if (!Number.isFinite(t) || t / 1000 < since - CLOCK_SLACK_SEC) continue
     }
     const content = rec?.message?.content
     for (const blk of Array.isArray(content) ? content : []) {
@@ -2188,6 +2202,9 @@ function runCommand(c, cmd) {
   // **일을 시작하기 전에 돌아갈 지점을 남긴다.** git이 아니면 조용히 넘어간다
   // (그 경우 상단에 `⚠ 되돌리기 없음`이 이미 떠 있다).
   const snapRef = takeSnapshot(dir, cmd.text)
+  // 실패 사유를 세션 기록에서 찾을 때 **이 시점 뒤에 적힌 것만** 본다. 기록은 지시마다
+  // 이어 붙으므로, 시간을 안 보면 지난 지시의 오류가 이번 실패 사유로 붙는다.
+  const startedAt = Date.now() / 1000
   const sid = sessionIdFor(dir)
   const args = ['-p', '--permission-mode', PERMISSION_MODE]
   // 이미 있는 세션이면 잇고, 처음이면 그 id로 새로 만든다.
@@ -2246,10 +2263,13 @@ function runCommand(c, cmd) {
   child.on('error', (err) => logRenderer(`claude 실행 실패(${dir}): ${err.message}`))
   child.on('exit', (code) => {
     if (c.child === child) c.child = null
-    if (code !== 0) {
+    if (code !== 0 && child.teamviewCanceled) {
+      // 사람이 멈춘 것이다. 실패로 적으면 무엇이 잘못된 줄 알고 원인을 찾게 된다.
+      logRenderer(`중지로 끝남 (${path.basename(dir)})`)
+    } else if (code !== 0) {
       const tail = errLines.slice(-12)
       // stderr는 대개 비어 있다 — claude는 실패 사유를 세션 기록에만 남긴다.
-      const why = readSessionError(dir, sid)
+      const why = readSessionError(dir, sid, startedAt)
       logRenderer(`회사 실행이 코드 ${code}로 끝남 (${path.basename(dir)})`)
       if (why?.label) logRenderer(`    ${why.label}: ${why.message}`)
       else if (why) logRenderer(`    ${why.message}`)
@@ -2269,7 +2289,9 @@ function runCommand(c, cmd) {
     // 뒤에 붙은 지시가 있으면 아직 끝난 게 아니다 — 그건 곧바로 이어서 돈다.
     // **실패도 사실대로 알린다.** 예전에는 코드 1로 끝나도 "작업이 끝났습니다"가
     // 떴다 — 사용량 한도에 걸려 아무것도 못 했는데 사용자는 다 된 줄 알았다.
-    if (!pendingCount(dir)) notifyDone(dir, code === 0 ? null : readSessionError(dir, sid))
+    // 중지는 사람이 방금 누른 것이라 알릴 것이 없다.
+    if (child.teamviewCanceled) return
+    if (!pendingCount(dir)) notifyDone(dir, code === 0 ? null : readSessionError(dir, sid, startedAt))
   })
 }
 

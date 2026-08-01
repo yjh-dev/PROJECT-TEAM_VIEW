@@ -227,6 +227,63 @@ guide.includes('qa-tester') && guide.includes('마지막 관문')
   ? ok('프로젝트 지침에도 검수 단계가 적혀 있다')
   : bad('지침 CLAUDE.md', '검수 단계 설명이 없다')
 
+// ── 9. 중지와 실패를 구분하는가, 사유는 이번 것인가 ────────────────────────
+// 실측: 사용자가 중지를 눌렀는데 화면에 "지시 실패 — 토큰 사용량 한도"가 떴다.
+// 두 가지가 겹친 사고였다. (1) 죽이면 종료코드가 0이 아니라서 중지가 실패로
+// 분류됐고, (2) 실패 사유를 세션 기록에서 시간 제한 없이 가져와 **네 시간 전**
+// 오류가 붙었다(17:38 오류, 21:37 보고).
+{
+  const errLine = (ts, msg) =>
+    JSON.stringify({ timestamp: ts, message: { content: [{ is_error: true, content: msg }] } })
+  const fixture = path.join(os.tmpdir(), 'tv-logic-sess.jsonl')
+  fs.writeFileSync(
+    fixture,
+    [
+      errLine('2026-08-01T08:38:47.050Z', "API error: You've hit your session limit · resets 5:40pm"),
+      JSON.stringify({ timestamp: '2026-08-01T12:30:00.000Z', message: { content: [{ text: '뒤에 온 새 지시' }] } }),
+    ].join('\n') + '\n',
+    'utf8',
+  )
+
+  const kindsAt = lead.indexOf('const FAILURE_KINDS')
+  const readAt = lead.indexOf('const CLOCK_SLACK_SEC')
+  const readEnd = lead.indexOf('\n}\n', lead.indexOf('function readSessionError'))
+  const code = [
+    "const fs = require('fs')",
+    lead.slice(kindsAt, lead.indexOf('\n]\n', kindsAt) + 3),
+    'const sessionPath = () => ' + JSON.stringify(fixture),
+    lead.slice(readAt, readEnd + 3),
+    'module.exports = { readSessionError }',
+  ].join('\n')
+  const f = path.join(os.tmpdir(), 'tv-check-sesserr.js')
+  fs.writeFileSync(f, code, 'utf8')
+  delete require.cache[require.resolve(f)]
+  const { readSessionError } = require(f)
+  const at = Date.parse('2026-08-01T08:38:47.050Z') / 1000
+
+  readSessionError('x', 'y', at + 3600) === null
+    ? ok('지난 지시의 오류를 이번 실패 사유로 삼지 않는다')
+    : bad('실패 사유 시점', '네 시간 전 오류가 지금 사유로 붙는다')
+  const now = readSessionError('x', 'y', at - 60)
+  now && now.label === '토큰 사용량 한도'
+    ? ok('이번 실행 중 난 오류는 그대로 찾아 분류한다')
+    : bad('실패 사유 탐지', JSON.stringify(now))
+  const slack = readSessionError('x', 'y', at + 5)
+  slack && slack.label === '토큰 사용량 한도'
+    ? ok('시계가 몇 초 어긋나도 놓치지 않는다')
+    : bad('시계 여유', '여유가 없으면 진짜 사유를 놓친다')
+
+  inLead(/child\.teamviewCanceled = true/)
+    ? ok('중지할 때 그 프로세스에 표시를 남긴다')
+    : bad('중지 표시', '표시가 없으면 중지와 실패를 구분할 수 없다')
+  inLead(/if \(code !== 0 && child\.teamviewCanceled\)/)
+    ? ok('중지로 죽은 것을 실패로 적지 않는다')
+    : bad('중지 처리', '중지를 누를 때마다 "지시 실패"가 뜬다')
+  inLead(/if \(child\.teamviewCanceled\) return/)
+    ? ok('중지에는 알림을 띄우지 않는다')
+    : bad('중지 알림', '방금 자기가 누른 것을 알림으로 다시 알린다')
+}
+
 // ── 정리 ───────────────────────────────────────────────────────────────────
 fs.rmSync(LAB, { recursive: true, force: true })
 if (failed) {
