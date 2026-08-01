@@ -84,7 +84,7 @@ const EVENTS = {
     tool('backend-dev', 'Bash', 'npx tsc --noEmit'),
     // 되돌릴 수 없는 명령 — 줄이지도 접지도 않고 붉게 남아야 한다
     tool('backend-dev', 'Bash', 'cd /c/dev/2026 && rm -rf board-scaffold-tmp && rm -rf board/.next'),
-    { ts: now - 5, type: 'reply', agent: 'lead', detail: '기획안을 Figma에 만들었습니다. 링크: https://www.figma.com/design/abc123' },
+    { ts: now - 5, type: 'reply', agent: 'lead', detail: "조사 결과입니다. (묻는 말이라 파일·Figma 산출물은 만들지 않았습니다.)\n\n먼저 확인된 사실 하나 — 지난번 중단된 리뷰 수정은 **실제로 반영돼 있었습니다.** Blocker 2건·Major 6건 전부 고쳐졌고, Minor 8건 중 7건도 반영됐습니다. `tsc --noEmit`, `next build` 모두 경고 0으로 통과합니다.\n\n## 지금 당장 고칠 것\n\n| | 문제 | 위치 |\n|---|---|---|\n| 1 | **UTF-16 BOM 경로로 바이너리가 통과** — UTF-8/EUC-KR은 `fatal:true`로 막았는데 BOM 분기만 남았습니다. gzip 헤더 바이트를 `.txt`로 올리면 예외 없이 깨진 글자 PDF가 200으로 내려옵니다(실측 확인) | `lib/server/txtToPdf.ts:106-111` |\n| 2 | **`/api/convert`에 레이트 리밋·오리진 검사가 전무** — 무인증 공개 엔드포인트가 요청당 20MB + CPU 30초를 씁니다. 게다가 본문이 요청당 4번 복사돼(~60-80MB 상주) OOM 벡터가 됩니다 | `route.ts` 전체, `route.ts:164-197, 269-273, 334` |\n| 3 | `tmp-check/` 스크래치 폴더가 커밋 대기 중 — 파일 자신이 \"끝나면 지운다\"고 적어 둔 것입니다 | `tmp-check/` |\n\n## 다음에\n\n- **지원 포맷의 진실 소스가 둘**입니다. `lib/constants.ts:117-129`가 `'.txt'`를 하드코딩해서, `documentFormats.ts` 매트릭스만 바꾸면 검증은 통과하는데 file input `accept`·라벨·안내 문구는 TXT에 머뭅니다. README가 약속한 \"매트릭스 한 줄만 바꾸면 됨\"이 실제로는 안 지켜집니다 — Phase 2 착수 전 선행 작업입니다.\n- `doc.save()`·`embedFont`(`txtToPdf.ts:270-311`)에 양보 지점이 없어, 루프는 고쳤지만 이 구간에서 타임아웃이 다시 무력해질 수 있습니다.\n- `package.json`에 `\"lint\": \"next lint\"`가 있는데 **ESLint 의존성도 설정도 없습니다.** 테스트도 0건입니다.\n- `README.md:3-4` 첫 문장이 아직 \"파일은 서버로 올라가지 않고\" — 문서 변환이 붙은 지금은 사실과 다릅니다(하단 섹션은 올바름).\n\n## 나중에\n\n`wrapLine` 누적 재계산, Select의 Tab 시 포커스 유실·같은 첫 글자 순환 점프, 완료 행의 개별 재변환 버튼 부재.\n\n**기능 공백**: 이미지 변환은 완결, 문서는 TXT→PDF 1개만 `ready`이고 나머지 6조합(MD/HTML/DOCX→PDF, PDF→PNG/JPG/TXT)은 `planned`입니다. 다만 planned 처리 경로(서버 501 → 클라이언트 사전 차단 → 드롭다운 비활성)는 이미 다 연결돼 있어 구멍은 아닙니다.\n\n브라우저 실제 동작은 확인하지 않았습니다(dev 서버를 띄우지 않음). 직접 보시려면 Team View 상단 `▶ 실행` 버튼을 쓰시면 됩니다." },
   ],
   stress: [
     { ts: now - 400, type: 'command', agent: 'lead', detail: '아주 긴 지시문입니다 '.repeat(20) },
@@ -115,6 +115,7 @@ contextBridge.exposeInMainWorld('teamView', {
   copyText: async () => true,
   openExternal: async () => ({ ok: true }),
   revealFile: async () => ({ ok: true }),
+  openLog: async () => ({ ok: true }),
   setChatWidth: async () => ({ ok: true }),
   vitals: async () => ({ ok: true }),
   reportError: async () => ({ ok: true }),

@@ -82,6 +82,7 @@ DESTRUCTIVE = re.compile(
 )
 CMD_KEEP = 120           # 보통 명령
 DESTRUCTIVE_KEEP = 600   # 지우는 명령 — 대상이 전부 보여야 한다
+REPLY_KEEP = 8000        # 답변 — 묻는 말에는 이게 결과물이다
 
 
 def agent_of(payload):
@@ -428,11 +429,20 @@ def last_assistant_text(transcript_path):
         text = re.sub(r"\n[ \t]+", "\n", text)
         text = re.sub(r"\n{3,}", "\n\n", text).strip()
         if text:
-            # 180자로 자르던 것을 늘린다. 실측에서 한 시간짜리 작업의 결론이
-            # `https://www.figma.com/design/CudC`에서 끊겼다 — **결과물 링크가
-            # 잘려 접근할 수 없었다.** 답변은 세션이 끝날 때 한 번만 남으므로
-            # 길어도 로그를 크게 늘리지 않는다(도구 이벤트가 대부분이다).
-            return text[:1200]
+            # **답변은 잘리면 안 된다.** 묻는 말에는 이 텍스트가 곧 결과물이다.
+            #
+            # 180 → 1200으로 늘렸었는데 여전히 모자랐다. 실측으로 1,526자짜리 답변이
+            # 21% 잘렸고, 사라진 뒷부분에 접근성 결함·기능 공백 현황과 함께
+            # "브라우저 실제 동작은 확인하지 않았습니다"라는 **한계 고지**가 있었다.
+            # 그 문장이 사라지면 다 검증된 것처럼 읽힌다.
+            #
+            # 답변은 세션이 끝날 때 한 번만 남으므로 길어도 로그를 크게 늘리지 않는다
+            # (이벤트의 대부분은 도구 호출이다). 그래도 상한은 둔다 — 없으면 로그
+            # 상한(512KB)을 한 번에 밀어내 예전 기록이 통째로 날아간다.
+            if len(text) <= REPLY_KEEP:
+                return text
+            # 잘랐으면 **잘랐다고 밝힌다.** 조용히 자르면 사람이 끝까지 읽은 줄 안다.
+            return text[:REPLY_KEEP] + f"\n\n…(답변이 길어 {len(text) - REPLY_KEEP}자를 줄였습니다)"
     return None
 
 
