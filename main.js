@@ -793,6 +793,16 @@ function gitInit(dir) {
   return { ok: true, done, root: gitRoot(dir) }
 }
 
+// 채팅 패널 폭. 창 크기와 달리 앱이 기억해 줘야 매번 다시 끌지 않는다.
+ipcMain.handle('ui:chat-width', (_e, px) => {
+  const w = Number(px)
+  if (!Number.isFinite(w) || w < 200 || w > 4000) return { ok: false }
+  const cfg = loadConfig()
+  cfg.chatWidth = Math.round(w)
+  saveConfig(cfg)
+  return { ok: true }
+})
+
 ipcMain.handle('git:init', (_e, dir) => {
   if (!loadProjects().includes(dir)) return { ok: false, error: '붙어 있지 않은 프로젝트입니다' }
   const res = gitInit(dir)
@@ -943,7 +953,8 @@ function pumpStatusAll({ force = false } = {}) {
     health: projectHealth(dir),
     run: runState(dir),
   }))
-  const payload = { projects, activeDir, max: MAX_PROJECTS }
+  // 기억해 둔 채팅 폭을 같이 보낸다. 화면이 처음 뜰 때 지난번 폭으로 맞춘다.
+  const payload = { projects, activeDir, max: MAX_PROJECTS, chatWidth: loadConfig().chatWidth || null }
   const json = JSON.stringify(payload)
   if (!force && json === lastStatusJson) return
   lastStatusJson = json

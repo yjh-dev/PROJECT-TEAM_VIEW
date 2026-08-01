@@ -27,6 +27,7 @@ contextBridge.exposeInMainWorld('teamView', {
   // 답변에 실려 오는 결과물 링크(Figma 등)를 기본 브라우저로 연다.
   openExternal: (url) => ipcRenderer.invoke('open:external', url),
   revealFile: (p) => ipcRenderer.invoke('file:reveal', p),
+  setChatWidth: (px) => ipcRenderer.invoke('ui:chat-width', px),
   gitInit: (dir) => ipcRenderer.invoke('git:init', dir),
   snapshotDiff: (dir, ref) => ipcRenderer.invoke('snapshot:diff', { dir, ref }),
   snapshotRestore: (dir, ref) => ipcRenderer.invoke('snapshot:restore', { dir, ref }),

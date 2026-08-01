@@ -85,6 +85,17 @@
         </div>
       </section>
 
+      <!-- 사무실과 채팅 사이의 손잡이. 끌어서 채팅 폭을 조절한다.
+           키보드로도 되게 role/tabindex를 준다 — 마우스로만 되는 조작은 못 쓰는 사람이 생긴다. -->
+      <div
+        id="splitter"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="채팅 패널 너비 조절"
+        tabindex="0"
+        title="끌어서 채팅 폭 조절 · 화살표 키로 미세 조정 · 더블클릭하면 기본값"
+      ></div>
+
       <!-- 채팅: 전체 지시와 팀원별 대화를 한곳에서 -->
       <aside id="chat">
         <header>

@@ -425,6 +425,46 @@ main {
 }
 
 /* ── 채팅 ─────────────────────────────────────────────── */
+/* 채팅과 사무실 사이의 손잡이.
+   보이는 폭은 얇게(6px) 두되 **잡히는 폭은 넓힌다**(좌우 4px씩) — 6px짜리를
+   정확히 겨냥해 누르는 건 생각보다 어렵다. */
+#splitter {
+  flex: 0 0 6px;
+  align-self: stretch;
+  position: relative;
+  border-radius: 3px;
+  cursor: col-resize;
+  background: transparent;
+}
+
+#splitter::before {
+  content: '';
+  position: absolute;
+  inset: 0 -4px; /* 잡히는 영역만 넓힌다 */
+}
+
+#splitter::after {
+  content: '';
+  position: absolute;
+  inset: 30% 2px; /* 가운데에만 짧은 선 — 늘 보이면 시끄럽다 */
+  border-radius: 2px;
+  background: var(--line);
+}
+
+#splitter:hover::after,
+#splitter:focus-visible::after,
+#splitter.dragging::after {
+  inset: 0 1px;
+  background: #7dcfff;
+}
+
+/* 끄는 동안 사무실 위로 마우스가 지나가도 커서가 흔들리지 않게 */
+body.resizing,
+body.resizing * {
+  cursor: col-resize !important;
+  user-select: none;
+}
+
 #chat {
   width: 380px;
   flex: 0 0 380px;

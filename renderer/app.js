@@ -1497,7 +1497,12 @@ window.teamView.onReset(({ dir } = {}) => {
 })
 
 let seeded = false // 첫 안내를 한 번만 띄우기 위한 표시
-window.teamView.onStatus(({ projects, activeDir: active, max }) => {
+let widthApplied = false // 기억해 둔 채팅 폭은 한 번만 적용한다(끄는 중에 덮어쓰면 안 된다)
+window.teamView.onStatus(({ projects, activeDir: active, max, chatWidth }) => {
+  if (!widthApplied && chatWidth) {
+    widthApplied = true
+    setChatWidth(chatWidth, { save: false }) // 방금 읽은 값을 도로 저장할 이유가 없다
+  }
   activeDir = active
   lastProjects = projects
   renderTabs(projects, active, max)
@@ -1796,6 +1801,93 @@ document.getElementById('copy-all').addEventListener('click', (e) => {
   setTimeout(() => {
     btn.textContent = before
   }, 1200)
+})
+
+// ---------- 채팅 폭 조절 ----------
+//
+// 사무실을 크게 보고 싶을 때와 긴 답변을 읽을 때 필요한 폭이 다르다. 손잡이를
+// 끌어서 바꾸고, 그 폭을 기억한다.
+
+const chatEl = document.getElementById('chat')
+const splitterEl = document.getElementById('splitter')
+const CHAT_W_MIN = 280 // 이보다 좁으면 팀원 칩과 보내기 버튼이 겹친다
+const CHAT_W_DEFAULT = 380
+
+/** 창 크기에 맞춘 최대 폭. 사무실이 사라질 만큼 넓히지는 못하게 한다. */
+function chatMax() {
+  return Math.max(CHAT_W_MIN, Math.round(window.innerWidth * 0.7))
+}
+
+function setChatWidth(px, { save = true } = {}) {
+  const w = Math.round(Math.min(chatMax(), Math.max(CHAT_W_MIN, px)))
+  chatEl.style.flex = `0 0 ${w}px`
+  chatEl.style.width = `${w}px`
+  splitterEl.setAttribute('aria-valuenow', String(w))
+  // 캔버스는 남는 자리를 채우므로 폭이 바뀌면 다시 잡아야 한다.
+  resize()
+  if (save) window.teamView.setChatWidth(w)
+  return w
+}
+
+let dragFrom = null
+
+splitterEl.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0) return
+  dragFrom = { x: e.clientX, w: chatEl.getBoundingClientRect().width }
+  // 포인터를 손잡이에 묶어 둔다. 안 그러면 빨리 끌 때 커서가 손잡이를 벗어나며
+  // 드래그가 끊긴다. 붙잡지 못해도(이미 놓인 포인터 등) 드래그 자체는 되게 둔다 —
+  // 여기서 예외가 나면 손잡이가 통째로 죽는다.
+  try {
+    splitterEl.setPointerCapture(e.pointerId)
+  } catch {
+    /* 못 붙잡아도 pointermove는 온다 */
+  }
+  splitterEl.classList.add('dragging')
+  document.body.classList.add('resizing')
+  e.preventDefault()
+})
+
+splitterEl.addEventListener('pointermove', (e) => {
+  if (!dragFrom) return
+  // 손잡이는 채팅 **왼쪽**에 있으므로 왼쪽으로 끌수록 채팅이 넓어진다.
+  setChatWidth(dragFrom.w + (dragFrom.x - e.clientX), { save: false })
+})
+
+function endDrag(e) {
+  if (!dragFrom) return
+  dragFrom = null
+  splitterEl.classList.remove('dragging')
+  document.body.classList.remove('resizing')
+  try {
+    splitterEl.releasePointerCapture(e.pointerId)
+  } catch {
+    /* 이미 풀렸으면 그만 */
+  }
+  // 끄는 내내 저장하면 디스크를 계속 두드린다. 놓을 때 한 번만 남긴다.
+  window.teamView.setChatWidth(Math.round(chatEl.getBoundingClientRect().width))
+}
+
+splitterEl.addEventListener('pointerup', endDrag)
+splitterEl.addEventListener('pointercancel', endDrag)
+
+// 더블클릭하면 기본 폭으로. 끌다가 이상해졌을 때 되돌릴 길이 있어야 한다.
+splitterEl.addEventListener('dblclick', () => setChatWidth(CHAT_W_DEFAULT))
+
+// 키보드로도 조절한다. 마우스로만 되는 조작은 못 쓰는 사람이 생긴다.
+splitterEl.addEventListener('keydown', (e) => {
+  const step = e.shiftKey ? 40 : 10
+  const now = chatEl.getBoundingClientRect().width
+  if (e.key === 'ArrowLeft') setChatWidth(now + step)
+  else if (e.key === 'ArrowRight') setChatWidth(now - step)
+  else if (e.key === 'Home') setChatWidth(CHAT_W_DEFAULT)
+  else return
+  e.preventDefault()
+})
+
+// 창이 좁아지면 채팅이 화면을 다 먹을 수 있다. 최대치를 다시 적용한다.
+window.addEventListener('resize', () => {
+  const now = chatEl.getBoundingClientRect().width
+  if (now > chatMax()) setChatWidth(now)
 })
 
 // ---------- 되돌릴 수단 ----------
