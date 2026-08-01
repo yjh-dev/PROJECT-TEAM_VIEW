@@ -1124,6 +1124,7 @@ ipcMain.handle('open:external', async (_e, url) => {
 // 화면에 주소와 끄는 버튼을 둔다. 팀원에게 시키고 뒷정리를 못 하는 것보다 낫다.
 
 const runners = new Map() // dir -> { child, script, port, url, startedAt, lines }
+const stopping = new Set() // 사용자가 끈 것. 그 exit는 실패로 치지 않는다.
 
 /** 이 프로젝트를 띄우는 명령. package.json의 스크립트에서 고른다. */
 function runScriptFor(dir) {
@@ -1191,8 +1192,26 @@ function startRun(dir) {
   child.stdout.on('data', take)
   child.stderr.on('data', take)
   child.on('exit', (code) => {
+    const me = runners.get(dir)
     runners.delete(dir)
-    if (code) logRenderer(`실행이 코드 ${code}로 끝남 (${path.basename(dir)})`)
+    const name = path.basename(dir)
+
+    // **끈 것과 죽은 것을 가른다.**
+    //
+    // 중지는 taskkill로 하므로 자식은 코드 1로 끝난다. 그걸 그대로 적었더니
+    // 사용자가 정상적으로 누른 '실행 중지'가 로그에 `실행이 코드 1로 끝남`으로
+    // 남아, 실패한 것처럼 보였다.
+    if (stopping.delete(dir)) {
+      logRenderer(`실행 중지됨 — ${name}`)
+    } else if (code) {
+      // **왜 죽었는지 같이 남긴다.** 예전에는 코드만 적고 그동안 모아 둔 출력을
+      // 통째로 버렸다. 로그에도 화면에도 이유가 없어서 사용자가 알 방법이 없었다.
+      const tail = (me?.lines ?? []).slice(-15)
+      logRenderer(`실행이 코드 ${code}로 끝남 (${name})`)
+      for (const line of tail) logRenderer(`    ${line}`)
+      // 화면에도 띄운다 — logRenderer는 파일과 콘솔에만 쓴다.
+      send('run:failed', { dir, code, lines: tail })
+    }
     pumpStatusAll({ force: true })
   })
   child.on('error', (err) => {
@@ -1215,10 +1234,14 @@ function stopRun(dir) {
   const r = runners.get(dir)
   if (!r) return { ok: true, already: true }
   const pid = r.child.pid
+  // 이 뒤에 오는 exit는 실패가 아니라 우리가 끈 것이다. runners에서 바로 지우므로
+  // (버튼이 즉시 바뀌어야 한다) 표시는 따로 둔다.
+  stopping.add(dir)
   try {
     if (process.platform === 'win32') execFile('taskkill', ['/PID', String(pid), '/T', '/F'], () => {})
     else process.kill(-pid, 'SIGTERM')
   } catch (err) {
+    stopping.delete(dir)
     return { ok: false, error: `중지 실패: ${err.message}` }
   }
   runners.delete(dir)
