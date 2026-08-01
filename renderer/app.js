@@ -35,6 +35,11 @@ const welcomeAddEl = document.getElementById('welcome-add')
 const setupBtn = document.getElementById('setup')
 const overlay = document.getElementById('overlay')
 const targetsEl = document.getElementById('targets')
+// 대화에 딸린 조작들. 프로젝트가 없으면 함께 잠근다 — 쓰는 곳(updateComposer)이
+// 파일 앞쪽이라 참조도 여기서 잡아 둔다.
+const cancelBtnEl = document.getElementById('chat-cancel')
+const toolsBtnEl = document.getElementById('toggle-tools')
+const copyAllEl = document.getElementById('copy-all')
 const messagesEl = document.getElementById('messages')
 const inputEl = document.getElementById('chat-input')
 const sendBtn = document.getElementById('chat-send')
@@ -247,6 +252,37 @@ window.addEventListener('mouseup', () => {
   }, 0)
 })
 canvas.style.cursor = 'grab'
+
+/**
+ * 그 자리에 있는 팀원. 없으면 null.
+ *
+ * 클릭 판정과 커서 모양이 **같은 규칙**을 써야 한다. 따로 두면 "손가락이 떴는데
+ * 눌러도 안 잡히는" 자리가 생긴다.
+ */
+function agentAt(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect()
+  const lx = (clientX - rect.left - cam.x) / scale
+  const ly = (clientY - rect.top - cam.y) / scale
+  let best = null
+  let bestD = Infinity
+  for (const a of agents.values()) {
+    const { x, y } = toScreen(a.gx, a.gy)
+    if (lx < x - 9 || lx > x + 9 || ly < y - 24 || ly > y + 5) continue
+    const d = Math.abs(lx - x) + Math.abs(ly - y)
+    if (d < bestD) {
+      bestD = d
+      best = a
+    }
+  }
+  return best
+}
+
+// 캐릭터 위에서는 손가락으로 바꾼다. 안내문은 "캐릭터를 클릭하세요"라고 하는데
+// 커서는 어디서나 손바닥(이동)이라, 누를 수 있는 자리인지 알 방법이 없었다.
+canvas.addEventListener('mousemove', (e) => {
+  if (dragging) return // 끄는 중에는 grabbing을 유지한다
+  canvas.style.cursor = agentAt(e.clientX, e.clientY) ? 'pointer' : 'grab'
+})
 
 // ── Ctrl + 휠 / Ctrl + ± 로 줌 ───────────────────────────────────────────
 canvas.addEventListener(
@@ -919,7 +955,16 @@ function renderTargets() {
 function updateComposer() {
   // 붙인 프로젝트가 없으면 **보낼 곳이 없다.** 그런데도 버튼이 살아 있어서, 눌러 보고
   // 실패 메시지를 읽은 뒤에야 그 사실을 알게 된다. 먼저 할 일을 입력창에 적어 준다.
-  if (!activeDir) {
+  // 프로젝트가 없으면 **대화에 딸린 조작이 전부 할 일이 없다.** 취소할 작업도,
+  // 복사할 대화도, 접을 도구 활동도, 보낼 상대도 없다. 그런데 전부 눌려서
+  // 눌러 보고 아무 일도 안 일어나는 것을 겪어야 알 수 있었다.
+  const idle = !activeDir
+  cancelBtnEl.disabled = idle
+  copyAllEl.disabled = idle
+  toolsBtnEl.disabled = idle
+  for (const chip of targetsEl.querySelectorAll('.target')) chip.disabled = idle
+
+  if (idle) {
     sendBtn.disabled = true
     sendBtn.textContent = '보내기'
     inputEl.disabled = true
@@ -1247,6 +1292,9 @@ function renderNow(now) {
         return `${a.label}(${w.word} ${fmtDur(w.sec)})`
       })
       .join(' · ')
+  // 자리가 모자라면 말줄임으로 잘린다(실측 30px 넘침). 잘린 뒤쪽을 볼 방법이
+  // 없으면 "누가 더 일하는지"를 알 수 없으므로 마우스를 올리면 전부 보이게 둔다.
+  nowEl.title = nowEl.textContent
 }
 
 function syncOverlay(now) {
@@ -1490,22 +1538,12 @@ function loop(now) {
 
 canvas.addEventListener('click', (e) => {
   if (dragging?.moved) return // 화면을 끌던 중이면 선택하지 않는다
-  const rect = canvas.getBoundingClientRect()
-  const lx = (e.clientX - rect.left - cam.x) / scale
-  const ly = (e.clientY - rect.top - cam.y) / scale
-  let best = null
-  let bestD = Infinity
-  for (const a of agents.values()) {
-    const { x, y } = toScreen(a.gx, a.gy)
-    if (lx < x - 9 || lx > x + 9 || ly < y - 24 || ly > y + 5) continue
-    const d = Math.abs(lx - x) + Math.abs(ly - y)
-    if (d < bestD) {
-      bestD = d
-      best = a
-    }
-  }
+  const best = agentAt(e.clientX, e.clientY)
   target = best ? best.id : 'all'
   renderTargets()
+  // 칩으로 고를 때와 똑같이 대화도 그 사람 것만 남긴다. 두 길이 다르게 동작하면
+  // "칩은 걸러지는데 캐릭터는 안 걸러진다"가 된다.
+  redrawChat(activeDir)
   inputEl.focus()
 })
 
@@ -1811,7 +1849,7 @@ welcomeAddEl.addEventListener('click', attachProject)
 // 취소할 수 있는 건 **앱이 만든 것**뿐이다: 아직 안 집어간 대기열과, 앱이 띄운
 // claude 프로세스. 이미 세션 안에서 돌고 있는 작업은 앱이 손댈 수 없다 —
 // 그건 그 터미널에서 Esc로 멈춰야 한다. 그래서 결과를 사실대로 적어 준다.
-document.getElementById('chat-cancel').addEventListener('click', async (e) => {
+cancelBtnEl.addEventListener('click', async (e) => {
   const btn = e.currentTarget
   btn.disabled = true
   // **이 프로젝트만** 취소한다. 다른 탭에서 돌고 있는 작업은 건드리지 않는다.
@@ -2047,8 +2085,6 @@ const outputsEl = document.getElementById('outputs')
 const tabChatEl = document.getElementById('tab-chat')
 const tabOutEl = document.getElementById('tab-out')
 const outCountEl = document.getElementById('out-count')
-const toolsBtnEl = document.getElementById('toggle-tools')
-const copyAllEl = document.getElementById('copy-all')
 let outView = false // 결과물 탭을 보고 있는가
 
 function showPanel(out) {

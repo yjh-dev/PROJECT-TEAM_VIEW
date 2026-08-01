@@ -1102,11 +1102,28 @@ function rendererLogPath() {
   return path.join(app.getPath('userData'), 'renderer.log')
 }
 
+// 로그 파일 상한. 이벤트 로그(512KB)·채팅(2000줄)에는 있는데 여기만 없어서
+// 몇 달 쓰면 한없이 자랐다. 실행이 실패할 때마다 15줄씩 붙기도 한다.
+const LOG_MAX_BYTES = 256 * 1024
+const LOG_KEEP_BYTES = 64 * 1024
+
 function logRenderer(line) {
   const stamped = `[${new Date().toISOString()}] ${line}`
   console.error('[renderer]', line)
   try {
-    fs.appendFileSync(rendererLogPath(), stamped + '\n', 'utf8')
+    const file = rendererLogPath()
+    // 넘치면 **뒤쪽만 남긴다.** 오래된 줄보다 최근 줄이 진단에 쓸모 있다.
+    try {
+      if (fs.statSync(file).size > LOG_MAX_BYTES) {
+        const buf = fs.readFileSync(file, 'utf8')
+        const kept = buf.slice(-LOG_KEEP_BYTES)
+        // 잘린 첫 줄이 반쪽짜리로 남지 않게 줄 경계까지 버린다
+        fs.writeFileSync(file, kept.slice(kept.indexOf('\n') + 1), 'utf8')
+      }
+    } catch {
+      /* 파일이 없으면 아래에서 만들어진다 */
+    }
+    fs.appendFileSync(file, stamped + '\n', 'utf8')
   } catch {
     /* 로그를 못 남기는 것이 앱을 멈출 이유는 아니다 */
   }
