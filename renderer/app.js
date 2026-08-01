@@ -177,11 +177,30 @@ function resize() {
   // 기본 배율은 도면이 창에 딱 들어오는 크기
   fitScale = Math.max(0.5, Math.min(w / STAGE_W, h / STAGE_H))
   scale = eff()
+  centerCam() // 채팅 폭을 바꾸면 남는 쪽이 생긴다 — 거기서는 가운데로
   clampCam()
   ctx.imageSmoothingEnabled = false
 }
 
 /** 도면이 화면 밖으로 완전히 사라지지 않도록 이동 범위를 제한한다. */
+/**
+ * 사무실을 캔버스 가운데에 놓는다 — **남는 쪽만.**
+ *
+ * 카메라 기본값이 (0,0)이라 사무실이 늘 좌상단에 붙어 있었다. 창이 넓을 때는
+ * 도면이 가로를 꽉 채워 티가 안 났는데, 채팅을 넓히자 캔버스가 좁고 길어지면서
+ * 아래쪽이 크게 비고 사무실이 위로 몰렸다.
+ *
+ * 확대해서 도면이 캔버스보다 큰 축은 건드리지 않는다. 그 축은 사용자가 끌어서
+ * 보던 위치가 있고, 가운데로 되돌리면 보던 자리를 빼앗는다.
+ */
+function centerCam() {
+  const s = eff()
+  const slackX = canvas.width - STAGE_W * s
+  const slackY = canvas.height - STAGE_H * s
+  if (slackX > 0) cam.x = slackX / 2
+  if (slackY > 0) cam.y = slackY / 2
+}
+
 function clampCam() {
   const s = eff()
   const stageW = STAGE_W * s
@@ -253,9 +272,10 @@ window.addEventListener('keydown', (e) => {
   } else if (e.key === '0') {
     e.preventDefault()
     cam.zoom = 1
-    cam.x = 0
-    cam.y = 0
     scale = eff()
+    // 처음 크기로 되돌릴 때도 가운데에 놓는다. (0,0)으로 보내면 좌상단에 붙는다.
+    centerCam()
+    clampCam()
   }
 })
 window.addEventListener('resize', resize)
@@ -554,7 +574,7 @@ function applyEvent(ev) {
       // 답변은 '일하는 상태'가 아니다. 말풍선만 띄우고 상태는 건드리지 않는다.
       agent.task = String(ev.detail ?? '').slice(0, 60)
       agent.lastEventAt = history ? now - IDLE_LEAVE_MS - 1000 : now
-      if (!ev._replay) addMsg('agent', `${agent.label} · 답변`, String(ev.detail ?? ''))
+      if (!ev._replay) addMsg('agent', `${agent.label} · 답변`, String(ev.detail ?? ''), { agent: agent.id })
       return
     default:
       if (history) {
@@ -692,23 +712,49 @@ let showTools = true
  */
 function addMsg(kind, who, text, opts = {}) {
   const log = logFor(activeDir)
-  const item = { kind, who, text, tool: Boolean(opts.tool) }
+  // **누구의 줄인지 id로 남긴다.** 예전에는 화면에 쓰는 이름(`who`)만 있었는데
+  // 그건 "리드 · 답변"처럼 꾸며진 문자열이라 나중에 걸러 내기가 어렵다.
+  const item = { kind, who, text, tool: Boolean(opts.tool), agent: opts.agent }
   log.push(item)
   while (log.length > 200) log.shift()
   // 디스크에도 남긴다 — 앱을 끄면 사라지던 것을 이어 볼 수 있게. 지난 대화를 다시
   // 그리는 중(replaying)에는 저장하지 않는다. 안 그러면 켤 때마다 두 배로 쌓인다.
   if (activeDir && !restoringChat) window.teamView.appendChat(activeDir, item)
-  if (item.tool && !showTools) return // 기록은 남기고 화면에만 안 띄운다
+  if (!visibleInChat(item)) return // 기록은 남기고 화면에만 안 띄운다
   renderMsg(kind, who, text)
+}
+
+/**
+ * 이 줄을 지금 화면에 띄울 것인가.
+ *
+ * 두 가지로 거른다 — '도구 활동' 토글, 그리고 **골라 둔 팀원**. 칩을 누르면 그
+ * 사람에게 보내는 것까지만 되고 대화는 전체가 그대로 보여서, 골라 놓고도 그
+ * 사람이 무슨 말을 했는지 찾으려면 스크롤을 뒤져야 했다.
+ */
+function visibleInChat(m) {
+  if (m.tool && !showTools) return false
+  if (target === 'all') return true
+  // 내가 그 사람에게 보낸 줄은 함께 남긴다 — 답만 있고 질문이 없으면 읽히지 않는다.
+  if (m.kind === 'me') return String(m.who ?? '').includes(labelFor(target))
+  if (m.kind === 'sys') return false // 세션 시작/대기 같은 공용 알림은 뺀다
+  if (m.agent) return m.agent === target
+  // 예전에 저장된 대화에는 id가 없다. 이름으로라도 맞춰 본다.
+  return String(m.who ?? '').startsWith(labelFor(target))
 }
 
 /** 탭을 옮겼을 때(또는 도구 활동을 접었다 펼 때) 그 프로젝트의 대화를 다시 그린다. */
 function redrawChat(dir) {
   restoringChat = true
   messagesEl.replaceChildren()
+  let shown = 0
   for (const m of logFor(dir)) {
-    if (m.tool && !showTools) continue
+    if (!visibleInChat(m)) continue
     renderMsg(m.kind, m.who, m.text)
+    shown++
+  }
+  // 걸러서 아무것도 안 남으면 화면이 텅 빈다. 고장인지 없는 건지 알려 준다.
+  if (!shown && target !== 'all') {
+    renderMsg('sys', '', `${labelFor(target)}의 대화가 아직 없습니다 — 칩을 다시 누르면 전체를 봅니다`)
   }
   messagesEl.scrollTop = messagesEl.scrollHeight
   restoringChat = false
@@ -808,7 +854,7 @@ function chatFromEvent(ev, agent) {
   // 그런데 그 규칙에 `rm -rf`까지 걸려서, 무엇을 지웠는지가 화면에서 통째로
   // 사라질 수 있었다. 회사는 권한을 묻지 않고 지운다 — 이것만은 항상 남긴다.
   if (ev.type === 'tool' && isDestructive(ev)) {
-    addMsg('warn', agent.label, `⚠ ${ev.detail}`)
+    addMsg('warn', agent.label, `⚠ ${ev.detail}`, { agent: agent.id })
     return
   }
   // 도구 이벤트는 시끄러우므로 에이전트당 2.5초에 한 줄로 줄인다
@@ -827,12 +873,12 @@ function chatFromEvent(ev, agent) {
   if (ev.type === 'agent_stop') {
     const sec = agent.startedAt != null ? Math.floor((performance.now() - agent.startedAt) / 1000) : 0
     const detail = sec > 0 ? `끝냈습니다 · ${fmtDur(sec)} · 도구 ${agent.toolCount ?? 0}회` : '끝냈습니다'
-    addMsg('agent', agent.label, detail)
+    addMsg('agent', agent.label, detail, { agent: agent.id })
     return
   }
   // id(`backend-dev`)까지 붙이면 380px 칸에서 이름이 잘린다("백엔드 · backend-d").
   // 이름표와 캐릭터 색으로 이미 누구인지 알 수 있다.
-  addMsg('agent', agent.label, describe(ev), { tool: ev.type === 'tool' })
+  addMsg('agent', agent.label, describe(ev), { tool: ev.type === 'tool', agent: agent.id })
 }
 
 function renderTargets() {
@@ -853,6 +899,9 @@ function renderTargets() {
       // **그 뒤 지시가 전부 그 사람에게 갔다** — 프론트가 기획안을 고치던 원인이다.
       target = target === id ? 'all' : id
       renderTargets()
+      // 고른 사람의 대화만 보여 준다. 고르는 것과 보는 것이 따로 놀면, 골라 놓고도
+      // 그 사람이 무슨 말을 했는지 찾으려고 스크롤을 뒤져야 한다.
+      redrawChat(activeDir)
       inputEl.focus()
     })
     targetsEl.append(b)
