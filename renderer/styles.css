@@ -3,7 +3,10 @@
   --panel: #171a23;
   --line: #262b38;
   --text: #dfe6f5;
-  --muted: #7b8399;
+  /* 흐린 글자. **배경마다 대비가 다르다** — 본문 위에서는 4.90이라 통과하지만
+     배너(설치 안내·실행 환경) 위에서는 4.29·3.81까지 떨어져 AA에 못 미쳤다.
+     네 배경 모두에서 4.5를 넘는 값으로 잡는다(최소 4.55). */
+  --muted: #8791a6;
 }
 
 * {
@@ -70,11 +73,22 @@ body {
 #need-close {
   background: none;
   border: 0;
-  color: #f7768e;
+  /* 탭 닫기와 같은 문제였다 — 21x18로 조준하기 어려웠다. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: 5px;
+  color: #ff8fa3;
   font-size: 18px;
   line-height: 1;
-  padding: 0 4px;
   cursor: pointer;
+}
+
+#need-close:hover {
+  background: rgba(247, 118, 142, 0.16);
 }
 
 .need-row {
@@ -90,6 +104,8 @@ body {
   font-weight: 600;
 }
 
+/* **무엇이 왜 필요한지 읽어야 하는 글이다.** 설치가 필요한 사람에게는 이게 전부인데
+   흐리게 두면 읽지 않는다(실측 4.29:1로 AA에 못 미쳤다). */
 .need-row .why {
   flex: 1;
   color: var(--muted);
@@ -175,6 +191,13 @@ body {
   border-bottom: 1px solid var(--line);
 }
 
+/* 상단바 버튼은 줄바꿈하지 않는다. 자리가 모자라면 `팀 갱신`이 "팀 갱 / 신"으로
+   쪼개져 바가 두 줄이 됐다 — 넘침이 아니라 줄바꿈이라 잘림 검사에도 안 걸렸다. */
+#bar button {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 button {
   background: #2b3346;
   color: var(--text);
@@ -211,17 +234,10 @@ button:hover {
   scrollbar-width: none;
 }
 
+/* 두 번 적혀 있었다 — `height: 0` 뒤에 `height: 4px`가 와서 뒤가 이겼다.
+   숨기려던 의도가 조용히 뒤집혀 있었다. 한 곳으로 합친다. */
 #tabs::-webkit-scrollbar {
   height: 0;
-}
-
-#tabs::-webkit-scrollbar {
-  height: 4px;
-}
-
-#tabs::-webkit-scrollbar-thumb {
-  background: #333c50;
-  border-radius: 2px;
 }
 
 .tab {
@@ -263,21 +279,22 @@ button:hover {
   border-radius: 999px;
   white-space: nowrap;
   background: rgba(255, 255, 255, 0.07);
-  color: var(--muted);
+  /* 11px 작은 글씨라 AA 기준(4.5:1)을 넘겨야 읽힌다 — 실측 3.47이었다. */
+  color: #a7b0c4;
 }
 
 .tab .st.busy {
-  color: #7aa2f7;
+  color: #a9c3ff;
   background: rgba(122, 162, 247, 0.16);
 }
 
 .tab .st.queued {
-  color: #e0af68;
+  color: #f0c98a;
   background: rgba(224, 175, 104, 0.16);
 }
 
 .tab .st.shut {
-  color: #f7768e;
+  color: #ffa3b3;
   background: rgba(247, 118, 142, 0.16);
 }
 
@@ -285,16 +302,29 @@ button:hover {
 .tab .x {
   background: none;
   border: 0;
-  padding: 0 3px;
-  color: #5c6780;
+  /* **되돌릴 수 없는 동작인데 가장 작고 흐렸다.** 실측 17x15에 대비 2.01 —
+     프로젝트를 떼는 버튼이 화면에서 제일 조준하기 어려웠다. 손 닿는 크기(24px)로
+     키우고 글자도 읽히게 올린다. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: 5px;
+  color: #a3adc4;
   font-size: 15px;
   line-height: 1;
   cursor: pointer;
+  /* **이름이 길면 눌려서 찌그러진다.** 극단값 검사에서 24px로 잡아 둔 버튼이
+     11px까지 줄어들었다 — 이름이 자리를 다 가져가고 버튼이 밀린 것이다.
+     닫기 버튼은 줄어들지 않는다. */
+  flex: 0 0 24px;
 }
 
 .tab .x:hover {
-  color: #f7768e;
-  background: none;
+  color: #ff9aae;
+  background: rgba(247, 118, 142, 0.16);
 }
 
 /* ---------- 연결 상태 점 ----------
@@ -526,8 +556,9 @@ body.resizing * {
   top: 5px;
   right: 5px;
   opacity: 0.55;
-  width: 22px;
-  height: 22px;
+  /* 22px는 조준하기에 작다. 손 닿는 크기(24px)로. */
+  width: 24px;
+  height: 24px;
   padding: 0;
   font-size: 13px;
   line-height: 20px;
@@ -576,7 +607,8 @@ body.resizing * {
 
 #stack .st-label {
   font-size: 11px;
-  color: #5c6780;
+  /* #5c6780은 3.07:1로 AA에 못 미쳤다. 흐린 글자는 한 곳(--muted)에서 관리한다. */
+  color: var(--muted);
 }
 
 #stack .st {
@@ -1035,6 +1067,11 @@ body.resizing * {
 }
 
 #run-url {
+  /* 링크지만 누르는 것이다. 높이 18px은 조준하기에 얕다. */
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 4px;
   font-size: 12px;
   color: #7dcfff;
   text-decoration: none;
@@ -1044,6 +1081,12 @@ body.resizing * {
 
 #run-url:hover {
   text-decoration: underline;
+}
+
+/* `display: inline-flex`가 `[hidden]`의 기본값을 이긴다. 프로젝트가 없을 때도
+   빈 링크가 8px짜리로 남아 있었다 — 이 함정만 세 번째다(#messages, #welcome, 여기). */
+#run-url[hidden] {
+  display: none;
 }
 
 #stage-wrap {
@@ -1115,7 +1158,8 @@ body.resizing * {
 #welcome .hint {
   margin-top: 6px;
   font-size: 12px;
-  color: #5f6779;
+  /* 조작 방법을 알려 주는 유일한 자리다. 흐리게 두면 읽지 않는다(실측 3.27:1). */
+  color: var(--muted);
 }
 
 #welcome .hint b {
