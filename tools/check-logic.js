@@ -282,6 +282,31 @@ guide.includes('qa-tester') && guide.includes('마지막 관문')
   inLead(/if \(child\.teamviewCanceled\) return/)
     ? ok('중지에는 알림을 띄우지 않는다')
     : bad('중지 알림', '방금 자기가 누른 것을 알림으로 다시 알린다')
+
+  // **사유를 못 찾았다고 성공이 되면 안 된다.** 위의 시점 제한을 넣자마자 실측에서
+  // 드러났다 — 코드 1로 끝났는데 기록에 오류가 없어 사유가 null이 됐고, 그러자
+  // "작업이 끝났습니다"가 떴다. 판정은 종료코드가 한다.
+  const fj = lead.indexOf('\n}\n', lead.indexOf('function failureFor'))
+  const ffCode = [
+    'const readSessionError = () => (process.env.WHY === "1" ? { message: "한도", label: "토큰 사용량 한도", hint: null } : null)',
+    lead.slice(lead.indexOf('function failureFor'), fj + 3),
+    'module.exports = { failureFor }',
+  ].join('\n')
+  const ff = path.join(os.tmpdir(), 'tv-check-failure.js')
+  fs.writeFileSync(ff, ffCode, 'utf8')
+  delete require.cache[require.resolve(ff)]
+  const { failureFor } = require(ff)
+
+  process.env.WHY = '0'
+  failureFor('d', 's', 0, 0) === null ? ok('성공은 실패로 적지 않는다') : bad('성공 판정', 'null이 아니다')
+  const unknown = failureFor('d', 's', 0, 1)
+  unknown && typeof unknown.message === 'string'
+    ? ok('사유를 못 찾아도 실패는 실패로 알린다')
+    : bad('실패 판정', '사유가 없으면 성공으로 처리된다 — "작업이 끝났습니다"가 뜬다')
+  process.env.WHY = '1'
+  failureFor('d', 's', 0, 1)?.label === '토큰 사용량 한도'
+    ? ok('사유를 찾으면 그대로 붙인다')
+    : bad('사유 전달', '찾은 사유가 버려진다')
 }
 
 // ── 정리 ───────────────────────────────────────────────────────────────────

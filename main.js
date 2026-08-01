@@ -2150,6 +2150,25 @@ const FAILURE_KINDS = [
 // 기록의 시각과 앱의 시계가 몇 초 어긋나도 이번 실행의 오류를 놓치지 않게 둔 여유.
 const CLOCK_SLACK_SEC = 10
 
+/**
+ * 이번 실행이 실패했는가, 실패했다면 왜인가. 성공이면 `null`.
+ *
+ * **사유를 못 찾았다고 성공으로 보면 안 된다.** 사유를 이번 실행 것만 보도록 고친
+ * 직후 실측에서 드러났다 — 코드 1로 끝났는데 세션 기록에 오류 블록이 없어 사유가
+ * `null`이 됐고, 그러자 "작업이 끝났습니다" 알림이 떴다. 사용자는 다 된 줄 안다.
+ * **판정은 종료코드가 하고, 사유는 있으면 붙이는 것이다.**
+ */
+function failureFor(dir, sessionId, since, code) {
+  if (code === 0) return null
+  return (
+    readSessionError(dir, sessionId, since) || {
+      message: `실행이 코드 ${code}로 끝났습니다. 이유가 기록에 남지 않았습니다.`,
+      label: null,
+      hint: '같은 지시를 다시 보내 보시고, 되풀이되면 상단 `기록`에서 로그를 확인하세요.',
+    }
+  )
+}
+
 function readSessionError(dir, sessionId, since) {
   const p = sessionPath(dir, sessionId)
   let text
@@ -2293,7 +2312,7 @@ function runCommand(c, cmd) {
     } else if (code !== 0) {
       const tail = errLines.slice(-12)
       // stderr는 대개 비어 있다 — claude는 실패 사유를 세션 기록에만 남긴다.
-      const why = readSessionError(dir, sid, startedAt)
+      const why = failureFor(dir, sid, startedAt, code)
       logRenderer(`회사 실행이 코드 ${code}로 끝남 (${path.basename(dir)})`)
       if (why?.label) logRenderer(`    ${why.label}: ${why.message}`)
       else if (why) logRenderer(`    ${why.message}`)
@@ -2315,7 +2334,7 @@ function runCommand(c, cmd) {
     // 떴다 — 사용량 한도에 걸려 아무것도 못 했는데 사용자는 다 된 줄 알았다.
     // 중지는 사람이 방금 누른 것이라 알릴 것이 없다.
     if (child.teamviewCanceled) return
-    if (!pendingCount(dir)) notifyDone(dir, code === 0 ? null : readSessionError(dir, sid, startedAt))
+    if (!pendingCount(dir)) notifyDone(dir, failureFor(dir, sid, startedAt, code))
   })
 }
 
