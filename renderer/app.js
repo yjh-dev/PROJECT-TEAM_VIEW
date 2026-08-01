@@ -1553,10 +1553,30 @@ canvas.addEventListener('click', (e) => {
 
 // ---------- 배선 ----------
 
+/**
+ * 메인에서 오는 소식을 받는다. **없는 통로면 조용히 넘어간다.**
+ *
+ * 통로 하나를 붙이는 곳이 파일 맨 바깥이라, 그게 없으면 그 줄에서 예외가 나고
+ * **모듈 평가가 통째로 멈춘다.** 뒤쪽 `const`가 초기화되지 않아 화면이 까맣게
+ * 뜨고, 로그에는 엉뚱한 `Cannot access ... before initialization`만 남는다.
+ * 실제로 preload에 함수 하나를 늦게 추가했다가 그렇게 됐다.
+ *
+ * 앱과 preload 버전이 어긋나는 일(설치본을 덮어쓰다 만 경우 등)은 언제든 생긴다.
+ * 소식 하나를 못 받는 것과 화면 전체가 죽는 것은 크기가 다르다.
+ */
+function on(name, handler) {
+  const fn = window.teamView?.[name]
+  if (typeof fn !== 'function') {
+    console.warn(`[teamView] ${name} 통로가 없습니다 — 그 소식은 받지 않습니다`)
+    return
+  }
+  fn(handler)
+}
+
 // 이벤트에는 어느 프로젝트 것인지가 실려 온다. 보고 있는 사무실 것만 그린다 —
 // 메인도 비활성 프로젝트는 아예 파싱하지 않으므로 여기까지 오지도 않지만,
 // 탭을 막 옮긴 순간의 이전 프로젝트 이벤트가 뒤늦게 닿을 수 있어 한 번 더 거른다.
-window.teamView.onEvents(({ dir, events }) => {
+on('onEvents', ({ dir, events }) => {
   if (dir !== activeDir) return
   events.forEach(applyEvent)
   refreshOutCount() // 묶음 단위로 한 번만 — 이벤트마다 다시 그리면 목록이 깜빡인다
@@ -1569,7 +1589,7 @@ window.teamView.onEvents(({ dir, events }) => {
  * 그 프로젝트에서 오간 대화를 다시 그려 준다. 탭을 옮길 때마다 대화가 사라지면
  * 무엇을 시켰는지 알 수 없다.
  */
-window.teamView.onReset(({ dir } = {}) => {
+on('onReset', ({ dir } = {}) => {
   if (dir) activeDir = dir
   restoreChat(dir) // 지난 대화를 되살린다(프로젝트당 한 번)
   queuedFor.length = 0
@@ -1589,7 +1609,7 @@ window.teamView.onReset(({ dir } = {}) => {
 
 let seeded = false // 첫 안내를 한 번만 띄우기 위한 표시
 let widthApplied = false // 기억해 둔 채팅 폭은 한 번만 적용한다(끄는 중에 덮어쓰면 안 된다)
-window.teamView.onStatus(({ projects, activeDir: active, max, chatWidth }) => {
+on('onStatus', ({ projects, activeDir: active, max, chatWidth }) => {
   if (!widthApplied && chatWidth) {
     widthApplied = true
     setChatWidth(chatWidth, { save: false }) // 방금 읽은 값을 도로 저장할 이유가 없다
@@ -1764,6 +1784,15 @@ function renderTabs(projects, active, max) {
     nm.className = 'nm'
     nm.textContent = baseName(p.dir)
 
+    // 다른 탭에서 서버가 돌고 있으면 여기서만 알 수 있다. 사무실은 한 번에 하나만
+    // 보이므로, 옮겨 가 보지 않고는 무엇이 떠 있는지 알 방법이 없었다.
+    const running = p.run?.running ? document.createElement('span') : null
+    if (running) {
+      running.className = 'st run'
+      running.textContent = '▶'
+      running.title = p.run.url ? `실행 중 — ${p.run.url}` : '실행 중 (주소 확인 중)'
+    }
+
     // 배지 하나에 무엇을 담을지: **진행 중이면 진행을, 조용하면 왜 조용한지**를 보여준다.
     // 일하고 있는데 '팀원 없음'이 떠 있으면 지금 상태를 가린다.
     const st = document.createElement('span')
@@ -1799,7 +1828,7 @@ function renderTabs(projects, active, max) {
       await window.teamView.removeProject(p.dir)
     })
 
-    tab.append(nm, st, x)
+    tab.append(nm, ...(running ? [running] : []), st, x)
     // 탭은 div라서 그냥 두면 **키보드로 프로젝트를 바꿀 수 없다.** 버튼처럼 만든다.
     tab.tabIndex = 0
     tab.setAttribute('role', 'button')
@@ -2038,7 +2067,7 @@ function renderRun(p) {
   runBtn.className = r.running ? 'on' : ''
   runBtn.textContent = r.running ? '■ 실행 중지' : `▶ 실행`
   runBtn.title = r.running
-    ? `npm run ${r.script} 를 멈춥니다`
+    ? `npm run ${r.script} 를 멈춥니다 · 오른쪽 클릭하면 실행 로그를 봅니다`
     : `npm run ${r.script} 로 띄웁니다 (앱이 관리하므로 지시가 끝나도 살아 있습니다)`
 
   // 주소는 자식이 뱉는 줄에서 주워 온다 — 포트를 우리가 정하지 않기 때문이다.
@@ -2070,11 +2099,32 @@ runBtn.addEventListener('click', async () => {
 //
 // 예전에는 코드만 로그 파일에 적고 모아 둔 출력을 통째로 버렸다. 앱에는 아무것도
 // 뜨지 않아서, 버튼을 눌렀는데 아무 일도 안 일어난 것처럼 보였다.
-window.teamView.onRunFailed(({ dir, code, lines }) => {
+// 지시를 처리하던 세션이 비정상 종료했을 때. 예전에는 로그 파일에만 남아서
+// "보냈는데 아무 일도 안 일어났다"로만 보였다.
+on('onCommandFailed', ({ dir, code, lines }) => {
+  if (dir !== activeDir) return
+  const tail = (lines ?? []).filter(Boolean).slice(-6).join('\n')
+  addMsg('warn', '실행', `지시 처리가 코드 ${code}로 끝났습니다${tail ? `\n\n${tail}` : ''}`)
+  hintEl.textContent = '지시 처리가 실패했습니다 — 대화에 이유가 남았습니다'
+})
+
+on('onRunFailed', ({ dir, code, lines }) => {
   if (dir !== activeDir) return
   const tail = (lines ?? []).filter(Boolean).slice(-8).join('\n')
   addMsg('warn', '실행', `실행이 코드 ${code}로 끝났습니다${tail ? `\n\n${tail}` : ''}`)
   hintEl.textContent = '실행이 실패했습니다 — 대화에 이유가 남았습니다'
+})
+
+// 돌고 있는 서버의 출력을 본다. 실패했을 때는 대화에 뜨지만, **잘 돌고 있을 때의
+// 로그**를 볼 방법이 없었다 — 컴파일 경고나 요청 기록은 여기에만 나온다.
+// (IPC는 진작 만들어 두고 화면에서 한 번도 쓰지 않았다.)
+runBtn.addEventListener('contextmenu', async (e) => {
+  e.preventDefault()
+  const me = lastProjects.find((p) => p.dir === activeDir)
+  if (!me?.run?.running) return
+  const res = await window.teamView.runLog(activeDir)
+  const lines = (res?.lines ?? []).slice(-40)
+  addMsg('sys', '', lines.length ? `— 실행 로그 (마지막 ${lines.length}줄) —\n${lines.join('\n')}` : '— 실행 로그가 비어 있습니다 —')
 })
 
 runUrlEl.addEventListener('click', (e) => {
@@ -2563,7 +2613,7 @@ async function recheckNeeds() {
   if (lastEnv) renderEnv(lastEnv)
 }
 
-window.teamView.onEnv(renderEnv)
+on('onEnv', renderEnv)
 window.teamView.checkEnv().then(renderEnv)
 recheckNeeds()
 // 로그인이 풀리거나 Figma 연결이 끊기는 일은 앱 밖에서도 일어난다. 계속 지켜본다.
@@ -2581,7 +2631,7 @@ requestAnimationFrame(loop)
 
 let eventsSeen = 0
 let lastEventLabel = null
-window.teamView.onEvents(({ events }) => {
+on('onEvents', ({ events }) => {
   eventsSeen += events?.length ?? 0
   const last = events?.[events.length - 1]
   if (last) lastEventLabel = `${last.type}${last.tool ? `/${last.tool}` : ''} · ${last.agent ?? '-'}`

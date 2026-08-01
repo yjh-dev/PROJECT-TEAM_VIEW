@@ -1992,7 +1992,11 @@ function runCommand(c, cmd) {
       // 쪼개지고 줄바꿈 뒤는 통째로 잘린다 — 실측으로 프롬프트 하나가 인자 35개가
       // 되고 정작 지시 내용("지시: ...")은 사라졌다. 그동안 리드가 엉뚱한 일을 한
       // 이유가 여기 있었다. stdin은 셸 파싱을 거치지 않으므로 그대로 도착한다.
-      stdio: ['pipe', 'ignore', 'ignore'],
+      // **stderr는 받아 둔다.** 예전에는 버렸는데, 실행이 실패하면 코드만 남고
+      // 이유가 어디에도 없었다("코드 1로 끝남"이 전부였다). 받아서 마지막 몇 줄만
+      // 들고 있다가 실패했을 때 같이 보여 준다. stdout은 계속 흘려보낸다 —
+      // 진행 상황은 훅이 이벤트로 남기므로 여기서 또 받을 이유가 없다.
+      stdio: ['pipe', 'ignore', 'pipe'],
       env: { ...process.env, TEAMVIEW_POLLER: String(process.pid) },
     })
     child.stdin.on('error', () => {}) // 자식이 먼저 죽으면 EPIPE가 난다 — 무시
@@ -2022,10 +2026,24 @@ function runCommand(c, cmd) {
   }
   pumpStatusAll({ force: true })
 
+  // stderr를 계속 비워 주지 않으면 파이프가 차서 자식이 멈춘다. 뒤쪽만 들고 있는다.
+  const errLines = []
+  child.stderr?.on('data', (b) => {
+    errLines.push(...String(b).split(/\r?\n/).filter((l) => l.trim()))
+    if (errLines.length > 60) errLines.splice(0, errLines.length - 60)
+  })
+
   child.on('error', (err) => logRenderer(`claude 실행 실패(${dir}): ${err.message}`))
   child.on('exit', (code) => {
     if (c.child === child) c.child = null
-    if (code !== 0) logRenderer(`회사 실행이 코드 ${code}로 끝남 (${dir})`)
+    if (code !== 0) {
+      const tail = errLines.slice(-12)
+      logRenderer(`회사 실행이 코드 ${code}로 끝남 (${path.basename(dir)})`)
+      for (const l of tail) logRenderer(`    ${l}`)
+      // **화면에도 띄운다.** logRenderer는 파일과 콘솔에만 쓴다 — 지시를 보냈는데
+      // 아무 일도 안 일어난 것처럼 보이고, 왜인지 알 방법이 없었다.
+      send('command:failed', { dir, code, lines: tail })
+    }
     // 훅은 회사가 띄운 세션에서 취소 깃발을 **지우지 않는다**(지우면 곧바로 다음
     // 지시를 집어가 "취소했는데 계속 일한다"가 된다). 실행이 끝난 지금 회사가 내린다.
     try {
