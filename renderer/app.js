@@ -610,6 +610,12 @@ function collectOutput(ev) {
     return
   }
 
+  // 회사가 지시를 집어가며 남긴 '출발 지점'. 이게 있어야 되돌릴 수 있다.
+  if (ev.type === 'command_taken' && ev.snap && runs.length) {
+    runs[0].snap = ev.snap
+    return
+  }
+
   // 지시 기록보다 앞선 활동도 있다(앱 밖에서 시작한 세션). 받아 줄 묶음을 만들어 둔다.
   if (!runs.length) runs.unshift({ text: '', ts: ev.ts, files: new Map(), figma: new Map() })
   const run = runs[0]
@@ -1963,6 +1969,9 @@ function renderOutputs() {
     meta.textContent = bits.join(' · ')
     head.append(caret, title, meta)
 
+    // 이 지시가 시작되기 전 지점이 남아 있으면 되돌릴 수 있다.
+    if (run.snap) head.append(undoBtn(run))
+
     const body = document.createElement('div')
     body.className = 'out-body'
 
@@ -1987,6 +1996,58 @@ function renderOutputs() {
     box.append(head, body)
     outputsEl.append(box)
   })
+}
+
+/**
+ * 이 지시를 통째로 되돌리는 버튼.
+ *
+ * **무엇이 사라지는지 먼저 보여 준다.** 되돌리기가 오히려 작업을 날리면 최악이다 —
+ * 지시 이후에 사람이 손으로 고친 것까지 함께 사라질 수 있다.
+ */
+function undoBtn(run) {
+  const b = document.createElement('button')
+  b.type = 'button'
+  b.className = 'out-undo'
+  b.textContent = '되돌리기'
+  b.title = '이 지시를 시작하기 전 상태로 파일을 되돌립니다'
+  b.addEventListener('click', async (e) => {
+    e.stopPropagation() // 묶음이 접히지 않게
+    b.disabled = true
+    const dir = activeDir
+    const d = await window.teamView.snapshotDiff(dir, run.snap)
+    if (!d?.ok) {
+      b.disabled = false
+      hintEl.textContent = d?.error ?? '변경 내용을 읽지 못했습니다'
+      return
+    }
+    if (!d.items.length) {
+      b.disabled = false
+      hintEl.textContent = '이 지시 이후 바뀐 파일이 없습니다'
+      return
+    }
+    const add = d.items.filter((i) => i.status === 'A')
+    const other = d.items.filter((i) => i.status !== 'A')
+    const list = d.items.slice(0, 20).map((i) => `  ${i.status === 'A' ? '삭제됨' : '되돌림'}  ${i.path}`)
+    const more = d.items.length > 20 ? `\n  … 외 ${d.items.length - 20}개` : ''
+    const ok = confirm(
+      `이 지시를 시작하기 전으로 되돌립니다.\n\n` +
+        `새로 만들어진 ${add.length}개는 지워지고, 고쳐지거나 지워진 ${other.length}개는 되살아납니다.\n\n` +
+        list.join('\n') +
+        more +
+        `\n\n지시 이후에 직접 고치신 내용이 있다면 그것도 함께 사라집니다. 계속할까요?`,
+    )
+    if (!ok) {
+      b.disabled = false
+      return
+    }
+    const res = await window.teamView.snapshotRestore(dir, run.snap)
+    b.disabled = false
+    hintEl.textContent = res?.ok
+      ? `되돌렸습니다 — ${res.removed}개 삭제 · ${res.restored}개 복구 (되돌리기 직전 상태도 남겨 두었습니다)`
+      : `일부 되돌리지 못했습니다: ${(res?.failed ?? []).slice(0, 3).join(', ')}`
+    addMsg('sys', '', `— 되돌림: ${run.text ? firstLine(run.text) : '이전 지시'} —`)
+  })
+  return b
 }
 
 function emptyNote(text) {

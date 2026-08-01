@@ -681,6 +681,29 @@ main {
   white-space: nowrap;
 }
 
+/* 되돌리기 — 되돌릴 수 있는 묶음에만 붙는다. 눈에 띄되 실수로 누를 만큼
+   크지는 않게 둔다(누르면 확인 창이 한 번 더 뜬다). */
+.out-undo {
+  flex: none;
+  font-size: 11px;
+  padding: 3px 8px;
+  color: #e0af68;
+  background: transparent;
+  border: 1px solid #5a4a2e;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.out-undo:hover {
+  color: #ffd9a0;
+  background: #3a3020;
+}
+
+.out-undo:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .out-body {
   display: flex;
   flex-direction: column;

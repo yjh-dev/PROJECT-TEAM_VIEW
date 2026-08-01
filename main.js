@@ -516,6 +516,179 @@ function setupProject(dir, parts = {}) {
  *
  * CLAUDE.md는 비교하지 않는다 — 개요·스택을 사람이 채우는 파일이라 다른 게 정상이다.
  */
+// ---------------------------------------------------------------------------
+// 작업 전 스냅샷
+//
+// git 저장소로 만들어 줘도 **돌아갈 지점이 첫 커밋 하나뿐**이다. 지시를 열 번
+// 보내면 그 사이 상태는 어디에도 남지 않는다. 그래서 지시를 집어가는 순간마다
+// 자동으로 현재 상태를 남긴다 — 사람이 아무것도 하지 않아도 매 지시가 되돌릴 수
+// 있는 단위가 된다.
+//
+// **사용자의 git을 조금도 건드리지 않는다.** 별도 인덱스 파일에 담고 커밋 객체만
+// 만들어 `refs/teamview/` 아래에 매단다. `git log`·`git branch`·`git status`·
+// `git stash` 어디에도 나타나지 않는다(실측으로 확인).
+//
+// `git stash create`를 쓰지 않은 이유: 그건 **추적되지 않는 새 파일을 담지 않는다.**
+// 팀이 하는 일의 대부분이 새 파일을 만드는 것이라, 그걸로는 되돌려도 만들어진
+// 파일이 그대로 남는다.
+
+const SNAP_REF_PREFIX = 'refs/teamview/snap'
+
+/**
+ * 그 프로젝트에서 git을 돌린다. 실패하면 null(예외를 밖으로 던지지 않는다).
+ *
+ * **성공했는데 출력이 없는 명령이 많다**(`add`·`update-ref`·`checkout`). 그래서
+ * 결과를 참·거짓으로 보면 안 된다 — 빈 문자열은 성공이다. 반드시 `=== null`로
+ * 실패를 가려야 한다. 처음에 falsy로 판정했다가 스냅샷이 통째로 안 만들어졌다.
+ */
+function git(dir, args, opts = {}) {
+  try {
+    return execFileSync('git', ['-C', dir, ...args], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 60000,
+      ...opts,
+    })
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 지금 작업트리 전체를 트리 객체로 굳힌다(무시 목록은 존중).
+ *
+ * 사용자의 인덱스(`.git/index`)를 쓰면 그 사람이 `git add` 해 둔 것이 날아간다.
+ * 우리 전용 인덱스 파일을 따로 쓴다.
+ */
+function writeWorkTree(dir) {
+  const idx = path.join(dir, '.git', 'teamview-index')
+  const env = { ...process.env, GIT_INDEX_FILE: idx }
+  try {
+    if (git(dir, ['add', '-A'], { env }) === null) return null
+    const tree = git(dir, ['write-tree'], { env })
+    return tree ? tree.trim() : null
+  } finally {
+    try {
+      fs.unlinkSync(idx)
+    } catch {
+      /* 남아도 다음에 덮어쓴다 */
+    }
+  }
+}
+
+/**
+ * 지시를 실행하기 직전 상태를 남긴다. git이 아니면 조용히 넘어간다.
+ * 반환값은 스냅샷 참조 이름(결과물 패널이 이걸로 되돌린다).
+ */
+function takeSnapshot(dir, label) {
+  if (!gitRoot(dir)) return null
+  const tree = writeWorkTree(dir)
+  if (!tree) return null
+  const head = git(dir, ['rev-parse', 'HEAD'])
+  const parent = head ? ['-p', head.trim()] : [] // 커밋이 하나도 없는 저장소도 있다
+  const msg = `teamview snapshot — ${String(label ?? '').slice(0, 120)}`
+  const commit = git(dir, ['commit-tree', tree, ...parent, '-m', msg])
+  if (!commit) return null
+  const ref = `${SNAP_REF_PREFIX}/${Date.now()}`
+  if (git(dir, ['update-ref', ref, commit.trim()]) === null) return null
+  pruneSnapshots(dir)
+  return ref
+}
+
+// 스냅샷을 무한히 쌓아 두지 않는다. 오래된 것부터 지운다 — 참조가 없어지면
+// git이 알아서 객체를 정리한다.
+const SNAP_KEEP = 30
+
+function pruneSnapshots(dir) {
+  const out = git(dir, ['for-each-ref', '--format=%(refname)', SNAP_REF_PREFIX])
+  if (!out) return
+  const refs = out.trim().split('\n').filter(Boolean).sort()
+  for (const ref of refs.slice(0, Math.max(0, refs.length - SNAP_KEEP))) {
+    git(dir, ['update-ref', '-d', ref])
+  }
+}
+
+/**
+ * 스냅샷 이후 무엇이 달라졌는지. **되돌리기 전에 사람에게 보여 줄 목록이다.**
+ * 되돌리기가 오히려 작업을 날리는 일이 없어야 한다.
+ */
+function snapshotDiff(dir, ref) {
+  const tree = writeWorkTree(dir)
+  if (!tree) return null
+  const out = git(dir, ['diff', '--name-status', ref, tree])
+  if (out === null) return null
+  const items = []
+  for (const line of out.split('\n')) {
+    const [st, ...rest] = line.split('\t')
+    const p = rest.join('\t').trim()
+    if (!p) continue
+    items.push({ status: st.trim()[0], path: p })
+  }
+  return items
+}
+
+/** 스냅샷 시점으로 되돌린다. 만들어진 것은 지우고, 고쳐지거나 지워진 것은 되살린다. */
+function restoreSnapshot(dir, ref) {
+  const items = snapshotDiff(dir, ref)
+  if (!items) return { ok: false, error: '변경 내용을 읽지 못했습니다' }
+  let removed = 0
+  let restored = 0
+  const failed = []
+  for (const it of items) {
+    const full = path.join(dir, it.path)
+    if (it.status === 'A') {
+      try {
+        fs.unlinkSync(full)
+        removed++
+      } catch (err) {
+        failed.push(`${it.path}: ${err.message}`)
+      }
+    } else {
+      if (git(dir, ['checkout', ref, '--', it.path]) !== null) restored++
+      else failed.push(it.path)
+    }
+  }
+  // 파일을 지우고 남은 빈 폴더를 치운다. 남겨 두면 되돌렸는데 흔적이 남는다.
+  pruneEmptyDirs(dir, items)
+  return { ok: failed.length === 0, removed, restored, failed }
+}
+
+/** 되돌리며 비게 된 폴더만 지운다. 프로젝트 최상위는 절대 건드리지 않는다. */
+function pruneEmptyDirs(dir, items) {
+  const dirs = new Set()
+  for (const it of items) {
+    if (it.status !== 'A') continue
+    let d = path.dirname(path.join(dir, it.path))
+    while (d.length > dir.length) {
+      dirs.add(d)
+      d = path.dirname(d)
+    }
+  }
+  // 깊은 것부터 지워야 상위가 비워진다
+  for (const d of [...dirs].sort((a, b) => b.length - a.length)) {
+    try {
+      if (fs.readdirSync(d).length === 0) fs.rmdirSync(d)
+    } catch {
+      /* 비어 있지 않거나 이미 없으면 그만 */
+    }
+  }
+}
+
+ipcMain.handle('snapshot:diff', (_e, { dir, ref }) => {
+  if (!loadProjects().includes(dir)) return { ok: false, error: '붙어 있지 않은 프로젝트입니다' }
+  const items = snapshotDiff(dir, ref)
+  return items ? { ok: true, items } : { ok: false, error: '스냅샷을 읽지 못했습니다' }
+})
+
+ipcMain.handle('snapshot:restore', (_e, { dir, ref }) => {
+  if (!loadProjects().includes(dir)) return { ok: false, error: '붙어 있지 않은 프로젝트입니다' }
+  // 되돌리기도 되돌릴 수 있어야 한다. 되돌리기 직전 상태를 한 번 더 남긴다.
+  takeSnapshot(dir, '되돌리기 직전')
+  const res = restoreSnapshot(dir, ref)
+  if (res.ok || res.restored || res.removed) pumpStatusAll({ force: true })
+  return res
+})
+
 /**
  * 이 폴더를 관리하는 git 저장소의 최상위 경로. 아니면 null.
  *
@@ -1657,6 +1830,9 @@ const PERMISSION_MODE = 'bypassPermissions'
  */
 function runCommand(c, cmd) {
   const dir = c.dir
+  // **일을 시작하기 전에 돌아갈 지점을 남긴다.** git이 아니면 조용히 넘어간다
+  // (그 경우 상단에 `⚠ 되돌리기 없음`이 이미 떠 있다).
+  const snapRef = takeSnapshot(dir, cmd.text)
   const sid = sessionIdFor(dir)
   const args = ['-p', '--permission-mode', PERMISSION_MODE]
   // 이미 있는 세션이면 잇고, 처음이면 그 id로 새로 만든다.
@@ -1693,6 +1869,8 @@ function runCommand(c, cmd) {
       ts: Date.now() / 1000,
       type: 'command_taken',
       agent: cmd.agent || 'lead',
+      // 이 지시가 어느 지점에서 출발했는지. 결과물 패널이 이걸로 되돌린다.
+      snap: snapRef || undefined,
     })
   } catch {
     /* 기록 실패가 실행을 막지는 않는다 */
