@@ -1941,10 +1941,63 @@ function sessionIdFor(dir) {
  * 있는데도 **매번 프로젝트 전체를 다시 읽었다**(README·package.json·src 전부).
  * 세션 파일이 있느냐가 사실이므로 그걸 본다.
  */
-function sessionExists(dir, sessionId) {
+function sessionPath(dir, sessionId) {
   const enc = dir.replace(/[^a-zA-Z0-9]/g, '-')
-  const p = path.join(app.getPath('home'), '.claude', 'projects', enc, `${sessionId}.jsonl`)
-  return fs.existsSync(p)
+  return path.join(app.getPath('home'), '.claude', 'projects', enc, `${sessionId}.jsonl`)
+}
+
+function sessionExists(dir, sessionId) {
+  return fs.existsSync(sessionPath(dir, sessionId))
+}
+
+// 자주 겪는 실패를 사람 말로 옮긴다. 원문은 영어로 오고, 무엇을 해야 하는지도 안 적혀 있다.
+const FAILURE_KINDS = [
+  {
+    re: /session limit|usage limit|rate limit|quota|too many requests|\b429\b/i,
+    label: '토큰 사용량 한도',
+    hint: '한도가 풀린 뒤 같은 지시를 다시 보내면 됩니다.',
+  },
+  { re: /overloaded|\b529\b|service unavailable|\b503\b/i, label: '서버 혼잡', hint: '잠시 뒤 다시 보내 보세요.' },
+  { re: /credit|billing|payment/i, label: '결제·크레딧 문제', hint: 'Claude 계정의 결제 상태를 확인하세요.' },
+  { re: /authentication|unauthorized|\b401\b|logged out/i, label: '로그인 만료', hint: '상단 Claude 점을 눌러 다시 로그인하세요.' },
+]
+
+/**
+ * 지시가 왜 실패했는지 **세션 기록에서** 읽어 온다.
+ *
+ * `claude`는 stderr로 아무것도 쓰지 않는다(실측: 완전히 비어 있었다). 실패 사유는
+ * 세션 기록(`~/.claude/projects/…/<id>.jsonl`)의 `is_error` 항목에만 남는다.
+ * 그래서 로그에는 "코드 1로 끝남"만 찍히고 **왜인지는 어디에도 없었다** —
+ * 실제로 사용량 한도에 걸렸는데 원인 불명으로 보였다.
+ */
+function readSessionError(dir, sessionId) {
+  const p = sessionPath(dir, sessionId)
+  let text
+  try {
+    // 뒤쪽만 본다. 긴 세션 기록을 통째로 읽으면 그것대로 부담이다.
+    const buf = fs.readFileSync(p, 'utf8')
+    text = buf.length > 400_000 ? buf.slice(-400_000) : buf
+  } catch {
+    return null
+  }
+  const found = []
+  for (const line of text.split('\n')) {
+    if (!line.includes('is_error') && !line.includes('API error')) continue
+    let rec
+    try {
+      rec = JSON.parse(line)
+    } catch {
+      continue
+    }
+    const content = rec?.message?.content
+    for (const blk of Array.isArray(content) ? content : []) {
+      if (blk?.is_error && typeof blk.content === 'string') found.push(blk.content.trim())
+    }
+  }
+  if (!found.length) return null
+  const message = found[found.length - 1].slice(0, 400)
+  const kind = FAILURE_KINDS.find((k) => k.re.test(message))
+  return { message, label: kind?.label ?? null, hint: kind?.hint ?? null }
 }
 
 // 권한을 묻지 않는다.
@@ -2046,11 +2099,15 @@ function runCommand(c, cmd) {
     if (c.child === child) c.child = null
     if (code !== 0) {
       const tail = errLines.slice(-12)
+      // stderr는 대개 비어 있다 — claude는 실패 사유를 세션 기록에만 남긴다.
+      const why = readSessionError(dir, sid)
       logRenderer(`회사 실행이 코드 ${code}로 끝남 (${path.basename(dir)})`)
+      if (why?.label) logRenderer(`    ${why.label}: ${why.message}`)
+      else if (why) logRenderer(`    ${why.message}`)
       for (const l of tail) logRenderer(`    ${l}`)
       // **화면에도 띄운다.** logRenderer는 파일과 콘솔에만 쓴다 — 지시를 보냈는데
       // 아무 일도 안 일어난 것처럼 보이고, 왜인지 알 방법이 없었다.
-      send('command:failed', { dir, code, lines: tail })
+      send('command:failed', { dir, code, lines: tail, why })
     }
     // 훅은 회사가 띄운 세션에서 취소 깃발을 **지우지 않는다**(지우면 곧바로 다음
     // 지시를 집어가 "취소했는데 계속 일한다"가 된다). 실행이 끝난 지금 회사가 내린다.
@@ -2061,7 +2118,9 @@ function runCommand(c, cmd) {
     }
     pumpStatusAll({ force: true })
     // 뒤에 붙은 지시가 있으면 아직 끝난 게 아니다 — 그건 곧바로 이어서 돈다.
-    if (!pendingCount(dir)) notifyDone(dir)
+    // **실패도 사실대로 알린다.** 예전에는 코드 1로 끝나도 "작업이 끝났습니다"가
+    // 떴다 — 사용량 한도에 걸려 아무것도 못 했는데 사용자는 다 된 줄 알았다.
+    if (!pendingCount(dir)) notifyDone(dir, code === 0 ? null : readSessionError(dir, sid))
   })
 }
 
@@ -2072,11 +2131,13 @@ function runCommand(c, cmd) {
  * 다른 일을 하다가 "끝났나?" 하고 가끔 들여다보게 되는데, 앱은 끝나도 아무 신호를
  * 주지 않았다. 창이 앞에 있으면 화면으로 이미 보이므로 그때는 조용히 있는다.
  */
-function notifyDone(dir) {
+function notifyDone(dir, failure) {
   const name = path.basename(dir)
+  const done = !failure
+  const what = done ? '작업 종료' : '지시 실패'
   if (!win || win.isDestroyed()) return
   // 창이 눈앞에 있으면 화면으로 이미 보인다 — 그때 깜빡이면 성가시기만 하다.
-  if (winFocused) return logRenderer(`작업 종료 — ${name} (창이 앞에 있어 알리지 않음)`)
+  if (winFocused) return logRenderer(`${what} — ${name} (창이 앞에 있어 알리지 않음)`)
 
   // 작업표시줄 깜빡임. 알림 배너를 꺼 둔 사람에게도 남는 신호다.
   try {
@@ -2085,10 +2146,14 @@ function notifyDone(dir) {
     /* 플랫폼이 지원하지 않으면 그만 */
   }
   try {
-    if (!Notification.isSupported()) return logRenderer(`작업 종료 — ${name} (깜빡임만)`)
+    if (!Notification.isSupported()) return logRenderer(`${what} — ${name} (깜빡임만)`)
     const n = new Notification({
-      title: `${name} — 작업이 끝났습니다`,
-      body: '눌러서 결과를 확인하세요',
+      // **실패를 완료라고 하지 않는다.** 사용량 한도에 걸려 아무것도 못 했는데
+      // "작업이 끝났습니다"가 뜨면 사용자는 다 된 줄 안다.
+      title: done ? `${name} — 작업이 끝났습니다` : `${name} — 지시를 처리하지 못했습니다`,
+      body: done
+        ? '눌러서 결과를 확인하세요'
+        : (failure.label ? `${failure.label} — 눌러서 확인하세요` : '눌러서 이유를 확인하세요'),
     })
     // 알림을 누르면 그 프로젝트를 띄운 채로 창을 앞에 올린다. 세 개를 붙여 놓고
     // 다른 탭을 보던 중이면 끝난 쪽을 직접 찾아 들어가야 했다.
@@ -2099,7 +2164,7 @@ function notifyDone(dir) {
       win.focus()
     })
     n.show()
-    logRenderer(`작업 종료 — ${name} (알림·깜빡임)`)
+    logRenderer(`${what} — ${name} (알림·깜빡임)`)
   } catch (err) {
     // 알림이 막혀 있어도 깜빡임은 이미 줬다. 다만 **조용히 넘기지는 않는다** —
     // 알림이 안 뜨는데 이유를 알 수 없으면 고칠 방법이 없다.

@@ -2101,11 +2101,22 @@ runBtn.addEventListener('click', async () => {
 // 뜨지 않아서, 버튼을 눌렀는데 아무 일도 안 일어난 것처럼 보였다.
 // 지시를 처리하던 세션이 비정상 종료했을 때. 예전에는 로그 파일에만 남아서
 // "보냈는데 아무 일도 안 일어났다"로만 보였다.
-on('onCommandFailed', ({ dir, code, lines }) => {
+on('onCommandFailed', ({ dir, code, lines, why }) => {
   if (dir !== activeDir) return
+  // **왜 실패했는지를 맨 앞에 크게 적는다.** 예전에는 "코드 1로 끝남"만 남아서,
+  // 사용량 한도에 걸린 것을 세션 기록을 직접 뒤져야 알 수 있었다.
+  const head = why?.label
+    ? `⚠ 지시를 처리하지 못했습니다 — ${why.label}`
+    : `⚠ 지시 처리가 코드 ${code}로 끝났습니다`
+  const parts = [head]
+  if (why?.message) parts.push(why.message)
+  if (why?.hint) parts.push(why.hint)
   const tail = (lines ?? []).filter(Boolean).slice(-6).join('\n')
-  addMsg('warn', '실행', `지시 처리가 코드 ${code}로 끝났습니다${tail ? `\n\n${tail}` : ''}`)
-  hintEl.textContent = '지시 처리가 실패했습니다 — 대화에 이유가 남았습니다'
+  if (tail) parts.push(tail)
+  addMsg('warn', '실행', parts.join('\n\n'))
+  hintEl.textContent = why?.label
+    ? `${why.label} — 대화를 확인하세요`
+    : '지시 처리가 실패했습니다 — 대화에 이유가 남았습니다'
 })
 
 on('onRunFailed', ({ dir, code, lines }) => {
