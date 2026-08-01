@@ -55,7 +55,10 @@ tools: Read, Write, Edit, Grep, Glob, mcp__figma__whoami, mcp__figma__get_metada
   보고해라(도구 목록은 이 파일 맨 위 `tools:`에 있다).
 
 **A. 디자인이 이미 있을 때 (Figma → 스펙)** — 기본 경로다.
-1. 받은 URL의 노드를 `get_metadata`로 훑어 구조를 파악한다(큰 파일을 통째로 읽지 않는다).
+1. 받은 URL의 노드를 `get_metadata`로 훑어 구조를 파악한다. **반드시 node-id를 지정한다.**
+   파일 뿌리에서 부르면 결과가 10만 자를 넘어 **통째로 버려진다** — 호출은 돌고 결과만
+   폐기되므로 시간과 토큰만 나간다(실측으로 두 번 그랬다). 결과가 너무 크다는 응답을
+   받으면 **같은 호출을 반복하지 말고 더 좁은 노드로 내려가라.**
 2. 화면 단위로 `get_design_context`를 호출해 레이아웃·컴포넌트·토큰을 가져오고,
    `get_screenshot`으로 실제 모습을 확인한다. 색·타이포·간격은 **눈대중하지 말고**
    `get_variable_defs`의 변수(디자인 토큰)를 그대로 인용한다.
@@ -66,8 +69,10 @@ tools: Read, Write, Edit, Grep, Glob, mcp__figma__whoami, mcp__figma__get_metada
 **B. 디자인이 없을 때 (스펙 → Figma)** — 사용자가 원할 때만.
 - 캔버스에 쓰는 도구(`use_figma`, `generate_figma_design`, `create_new_file`)는 **되돌리기
   어렵다. 반드시 사용자 확인을 받고 실행**한다. 어느 파일/페이지에 그릴지도 함께 확인한다.
-- `use_figma`를 쓰기 전에는 `/figma-use` 스킬을 먼저 읽는다(플러그인 스킬이 없으면
-  `skill://figma/figma-use/SKILL.md`). 페이지 단위 생성은 `/figma-generate-design`.
+- `use_figma`를 쓰기 전에는 `/figma-use` 스킬을 먼저 읽는다. 페이지 단위 생성은
+  `/figma-generate-design`. **`skill://…`은 파일 경로가 아니다** — `Read`로 열려고
+  하지 마라. 스킬은 Skill 도구로 부르는 것이고, 없으면 그냥 없는 대로 진행한다.
+  실제로 `Read`에 넘겼다가 10만 자짜리 엉뚱한 결과를 받고 버린 적이 있다.
 - 유저플로우·정보구조 다이어그램은 `generate_diagram`(FigJam)이 마크다운보다 낫다.
 
 **공통**: 설계 문서 맨 위에 출처를 남긴다 — `Figma: <파일 URL> (node-id: <id>)`.
