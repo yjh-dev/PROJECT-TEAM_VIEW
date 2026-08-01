@@ -131,6 +131,32 @@ for (let i = 0; i < 35; i++) M.takeSnapshot(LAB, 'bulk ' + i)
 const kept = sh(['for-each-ref', '--format=%(refname)', 'refs/teamview/snap']).trim().split('\n').filter(Boolean).length
 kept <= 30 ? ok(`스냅샷을 30개까지만 둔다 (지금 ${kept})`) : bad('스냅샷 보관 한도', `${kept}개`)
 
+// ── 6-2. 실패 사유를 사람 말로 옮기는가 ────────────────────────────────────
+// claude는 stderr로 아무것도 쓰지 않는다. 실패 사유는 세션 기록에만 남고, 그걸
+// 못 읽으면 화면에는 "코드 1로 끝남"만 뜬다 — 실제로 사용량 한도에 걸렸는데
+// 원인 불명으로 보였다.
+{
+  const src2 = fs.readFileSync(path.join(ROOT, 'main.js'), 'utf8').replace(/\r\n/g, '\n')
+  const i = src2.indexOf('const FAILURE_KINDS')
+  const kinds = src2.slice(i, src2.indexOf('\n]\n', i) + 3)
+  const f2 = path.join(os.tmpdir(), 'tv-check-kinds.js')
+  fs.writeFileSync(f2, kinds + '\nmodule.exports = { FAILURE_KINDS }\n', 'utf8')
+  delete require.cache[require.resolve(f2)]
+  const { FAILURE_KINDS } = require(f2)
+  const cases = [
+    ["You've hit your session limit · resets 5:40pm (Asia/Seoul)", '토큰 사용량 한도'],
+    ['API Error: 429 Too Many Requests', '토큰 사용량 한도'],
+    ['Error: Overloaded (529)', '서버 혼잡'],
+    ['Authentication failed: 401 unauthorized', '로그인 만료'],
+    ['insufficient credit balance', '결제·크레딧 문제'],
+    ['ENOENT: no such file or directory', null],
+  ]
+  for (const [msg, want] of cases) {
+    const hit = FAILURE_KINDS.find((k) => k.re.test(msg))
+    eq('실패 분류: ' + (want ?? '분류 없음'), hit ? hit.label : null, want)
+  }
+}
+
 // ── 7. 훅이 지우는 명령을 자르지 않는가 ────────────────────────────────────
 // 훅은 파이썬이라 함수만 떼어 오지 못한다. 규칙(정규식·길이)을 파일에서 읽어 확인한다.
 const hook = fs.readFileSync(path.join(ROOT, 'hooks', 'team_events.py'), 'utf8')
