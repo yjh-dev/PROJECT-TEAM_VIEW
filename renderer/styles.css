@@ -191,6 +191,13 @@ body {
   border-bottom: 1px solid var(--line);
 }
 
+/* 상단바 버튼은 줄바꿈하지 않는다. 자리가 모자라면 `팀 갱신`이 "팀 갱 / 신"으로
+   쪼개져 바가 두 줄이 됐다 — 넘침이 아니라 줄바꿈이라 잘림 검사에도 안 걸렸다. */
+#bar button {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 button {
   background: #2b3346;
   color: var(--text);
@@ -309,6 +316,10 @@ button:hover {
   font-size: 15px;
   line-height: 1;
   cursor: pointer;
+  /* **이름이 길면 눌려서 찌그러진다.** 극단값 검사에서 24px로 잡아 둔 버튼이
+     11px까지 줄어들었다 — 이름이 자리를 다 가져가고 버튼이 밀린 것이다.
+     닫기 버튼은 줄어들지 않는다. */
+  flex: 0 0 24px;
 }
 
 .tab .x:hover {
@@ -596,7 +607,8 @@ body.resizing * {
 
 #stack .st-label {
   font-size: 11px;
-  color: #5c6780;
+  /* #5c6780은 3.07:1로 AA에 못 미쳤다. 흐린 글자는 한 곳(--muted)에서 관리한다. */
+  color: var(--muted);
 }
 
 #stack .st {
