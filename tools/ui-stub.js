@@ -130,6 +130,7 @@ contextBridge.exposeInMainWorld('teamView', {
   login: async () => ({ ok: false, timeout: true, env: ENV[S] }),
   onEnv: noop,
   onRunFailed: noop,
+  onCommandFailed: noop,
   onReset: noop,
   onEvents: (cb) => setTimeout(() => cb({ dir: PROJECTS[S][0]?.dir ?? null, events: EVENTS[S] }), 300),
   onStatus: (cb) =>

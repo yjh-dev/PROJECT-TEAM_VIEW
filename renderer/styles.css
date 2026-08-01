@@ -298,6 +298,15 @@ button:hover {
   background: rgba(247, 118, 142, 0.16);
 }
 
+/* 그 프로젝트에서 서버가 돌고 있다. 사무실은 한 번에 하나만 보이므로
+   탭에서만 알 수 있다. */
+.tab .st.run {
+  color: #0f1a12;
+  background: #7ddb9a;
+  padding: 2px 5px;
+  font-size: 10px;
+}
+
 /* 떼기 버튼 — 평소엔 흐리게. 실수로 누르기 쉬운 자리라 확인을 한 번 받는다. */
 .tab .x {
   background: none;

@@ -42,4 +42,5 @@ contextBridge.exposeInMainWorld('teamView', {
   onReset: (cb) => ipcRenderer.on('events:reset', (_e, payload) => cb(payload)),
   onStatus: (cb) => ipcRenderer.on('projects:status', (_e, status) => cb(status)),
   onRunFailed: (cb) => ipcRenderer.on('run:failed', (_e, info) => cb(info)),
+  onCommandFailed: (cb) => ipcRenderer.on('command:failed', (_e, info) => cb(info)),
 })
