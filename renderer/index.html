@@ -41,6 +41,15 @@
       <button id="add" title="프로젝트를 하나 더 붙입니다 (최대 3개)">+ 프로젝트</button>
       <!-- 구성이 빠졌을 때만 나타난다. 붙일 때 거절했거나 나중에 갖추고 싶을 때의 자리. -->
       <button id="setup" hidden title="빠진 구성(훅·팀원·CLAUDE.md)을 채웁니다">세팅하기</button>
+      <!-- 되돌릴 수단. 회사는 확인 없이 파일을 고치고 지운다 — git이 아니면 복구가 없다. -->
+      <button
+        id="gitinit"
+        class="danger"
+        hidden
+        title="이 프로젝트는 git이 아닙니다 — 팀이 파일을 고치거나 지워도 되돌릴 수단이 없습니다. 눌러서 저장소로 만듭니다"
+      >
+        ⚠ 되돌리기 없음
+      </button>
       <!-- 로컬 실행 — 앱이 직접 든다. 팀원 세션에서 띄우면 지시가 끝날 때 같이 죽는다. -->
       <button id="run" hidden></button>
       <a id="run-url" href="#" hidden title="브라우저에서 엽니다"></a>
