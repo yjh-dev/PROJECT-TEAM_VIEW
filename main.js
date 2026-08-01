@@ -179,6 +179,10 @@ function projectHealth(dir) {
     // 닿지 않았다** — `rm -rf`가 44자에서 잘리던 문제를 고쳐도, 이미 세팅된
     // 프로젝트는 옛 훅 그대로라 화면에는 여전히 잘린 명령이 찍힌다.
     hookStale: staleHook(dir),
+    // 지침도 낡는다. 팀원 정의와 훅만 보고 있었더니 **CLAUDE.md의 팀 규칙이 옛것으로
+    // 남았다** — 검수를 마지막 관문으로 바꾼 뒤에도 이미 세팅된 프로젝트에는
+    // "테스트가 필요한 규모면 부릅니다"가 그대로 있어 새 규칙과 정면으로 부딪혔다.
+    guideStale: staleGuide(dir),
     // **되돌릴 수단이 있는가.**
     //
     // 회사는 확인 없이 파일을 고치고 지운다(`bypassPermissions`). 실제로 한 작업에서
@@ -862,6 +866,26 @@ function staleHook(dir) {
     const a = fs.readFileSync(src, 'utf8').replace(/\r\n/g, '\n')
     const b = fs.readFileSync(dst, 'utf8').replace(/\r\n/g, '\n')
     return a !== b
+  } catch {
+    return false
+  }
+}
+
+/**
+ * CLAUDE.md의 **팀 규칙 부분만** 앱보다 낡았는지. 위쪽(개요·기술 스택·주요 명령어)은
+ * 사람이 채우는 자리라 다른 게 정상이므로 비교하지 않는다.
+ */
+function staleGuide(dir) {
+  const target = path.join(dir, 'CLAUDE.md')
+  try {
+    if (!fs.existsSync(target)) return false // 없는 건 '낡음'이 아니라 '없음'이다
+    const norm = (s) => s.replace(/\r\n/g, '\n')
+    const cur = norm(fs.readFileSync(target, 'utf8'))
+    const tpl = norm(fs.readFileSync(path.join(templateDir(), 'CLAUDE.md'), 'utf8'))
+    const a = cur.indexOf(TEAM_SECTION)
+    const b = tpl.indexOf(TEAM_SECTION)
+    if (a < 0 || b < 0) return false // 사람이 구조를 바꿨으면 건드릴 판단을 하지 않는다
+    return cur.slice(a) !== tpl.slice(b)
   } catch {
     return false
   }

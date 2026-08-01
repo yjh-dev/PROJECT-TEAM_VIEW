@@ -1783,6 +1783,15 @@ function missingParts(health) {
       label: '훅이 앱보다 낡았습니다 — 갱신하면 지우는 명령이 잘리지 않고 기록됩니다',
     })
   }
+  // 지침도 마찬가지다. **팀원 정의만 세고 있었더니 CLAUDE.md의 팀 규칙이 옛것으로
+  // 남았다** — 팀원을 갱신하고 나면 버튼이 사라져, 정작 규칙은 낡은 채로 굳었다.
+  if (!out.some((p) => p.key === 'guide') && h.guideStale) {
+    out.push({
+      key: 'guide',
+      update: true,
+      label: '팀 규칙(CLAUDE.md)이 앱보다 낡았습니다 — 개요·스택은 그대로 두고 규칙만 바꿉니다',
+    })
+  }
   return out
 }
 
@@ -1795,12 +1804,25 @@ async function runSetup(dir, health) {
   if (!parts.length) return
   const isUpdate = parts.some((p) => p.update)
   const list = parts.map((p) => `  · ${p.label}`).join('\n')
+  // **무엇을 덮어쓰는지 정확히 말한다.** 예전에는 "CLAUDE.md는 건드리지 않습니다"가
+  // 항상 붙어 있었는데, 지침 갱신이 생기면서 그게 거짓말이 될 뻔했다.
+  const touching = []
+  if (parts.some((p) => p.key === 'agents' && p.update)) {
+    touching.push('· 팀원 파일(.claude/agents/*.md)을 앱이 들고 있는 것으로 덮어씁니다')
+  }
+  if (parts.some((p) => p.key === 'hooks' && p.update)) {
+    touching.push('· 훅 파일(.claude/hooks/team_events.py)을 최신으로 바꿉니다')
+  }
+  if (parts.some((p) => p.key === 'guide' && p.update)) {
+    touching.push(
+      '· CLAUDE.md의 “팀으로 일합니다” 아래만 바꿉니다 — 개요·기술 스택·주요 명령어는 그대로입니다',
+      '· 바꾸기 전 CLAUDE.md.bak으로 지금 내용을 남깁니다',
+    )
+  }
+  touching.push('· 직접 고쳐 두신 부분이 있다면 그 내용은 사라집니다')
   const ok = confirm(
     isUpdate
-      ? `${baseName(dir)}의 팀원 정의를 최신으로 갱신할까요?\n\n${list}\n\n` +
-          `· 팀원 파일(.claude/agents/*.md)을 앱이 들고 있는 것으로 덮어씁니다\n` +
-          `· 그 파일을 직접 고쳐 두셨다면 그 내용은 사라집니다\n` +
-          `· CLAUDE.md와 settings.json은 건드리지 않습니다`
+      ? `${baseName(dir)}의 팀 설정을 최신으로 갱신할까요?\n\n${list}\n\n${touching.join('\n')}`
       : `${baseName(dir)}에 다음이 없습니다.\n\n${list}\n\n` +
           `지금 넣을까요?\n` +
           `· 기존 settings.json은 덮어쓰지 않고 훅만 덧붙입니다\n` +
