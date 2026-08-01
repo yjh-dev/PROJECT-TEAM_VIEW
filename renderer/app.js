@@ -1836,6 +1836,17 @@ runBtn.addEventListener('click', async () => {
   if (!res?.ok) hintEl.textContent = res?.error ?? '실행에 실패했습니다'
 })
 
+// 실행이 죽으면 **화면에 이유를 띄운다.**
+//
+// 예전에는 코드만 로그 파일에 적고 모아 둔 출력을 통째로 버렸다. 앱에는 아무것도
+// 뜨지 않아서, 버튼을 눌렀는데 아무 일도 안 일어난 것처럼 보였다.
+window.teamView.onRunFailed(({ dir, code, lines }) => {
+  if (dir !== activeDir) return
+  const tail = (lines ?? []).filter(Boolean).slice(-8).join('\n')
+  addMsg('warn', '실행', `실행이 코드 ${code}로 끝났습니다${tail ? `\n\n${tail}` : ''}`)
+  hintEl.textContent = '실행이 실패했습니다 — 대화에 이유가 남았습니다'
+})
+
 runUrlEl.addEventListener('click', (e) => {
   e.preventDefault()
   const u = runUrlEl.dataset.url
