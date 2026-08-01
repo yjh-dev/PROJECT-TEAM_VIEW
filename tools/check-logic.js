@@ -223,6 +223,11 @@ inLead(/돌려\s*보내/) && inLead(/planner/) && inLead(/ux-designer/) && /돌�
 inLead(/두 번[^]{0,60}남/)
   ? ok('되돌림 횟수에 끝이 있다')
   : bad('되돌림 한계', '멈출 지점이 없으면 고침↔검수를 무한히 돈다')
+// 검사물을 남길 자리를 안 정해 주면 임시 폴더에 쓰고 버린다(실측: tmp-check/fixtures).
+inLead(/tests\//) && guide.includes('tests/')
+  ? ok('검수한 것을 어디에 남길지 정해 준다')
+  : bad('검사물 보관 자리', '임시 폴더에 쓰고 버려 다음 검수 때 처음부터 다시 만든다')
+
 guide.includes('qa-tester') && guide.includes('마지막 관문')
   ? ok('프로젝트 지침에도 검수 단계가 적혀 있다')
   : bad('지침 CLAUDE.md', '검수 단계 설명이 없다')
