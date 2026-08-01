@@ -8,10 +8,12 @@
     "dev": "pnpm run check && electron .",
     "start": "pnpm run check && electron .",
     "demo": "node tools/emit-demo-events.js",
-    "check": "node tools/check-refs.js && node --no-warnings tools/check-nav.js",
+    "check": "node tools/check-refs.js && node --no-warnings tools/check-nav.js && node tools/check-logic.js",
     "build:dir": "pnpm run check && electron-builder --dir",
-    "build:win": "pnpm run check && electron-builder --win nsis portable",
-    "icon": "electron tools/make-icon.js"
+    "build:win": "pnpm run check:all && electron-builder --win nsis portable",
+    "icon": "electron tools/make-icon.js",
+    "check:ui": "node tools/check-ui.js",
+    "check:all": "pnpm run check && pnpm run check:ui"
   },
   "devDependencies": {
     "electron": "^33.2.0",
