@@ -476,6 +476,15 @@ function mergeHooks(claudeDir) {
  * 있을 수 있으니 바꾸기 전 `.bak`을 남긴다.
  */
 const TEAM_SECTION = '## 팀으로 일합니다'
+
+/** 템플릿에서 `## 제목` 한 덩어리를 떼어 온다(다음 `## `이나 `---` 앞까지). */
+function sectionOf(text, title) {
+  const i = text.indexOf(title)
+  if (i < 0) return null
+  const rest = text.slice(i + title.length)
+  const stop = rest.search(/\n##\s|\n---\s*\n/)
+  return (title + (stop < 0 ? rest : rest.slice(0, stop))).trim()
+}
 function refreshTeamRules(target) {
   const cur = fs.readFileSync(target, 'utf8')
   const tpl = fs.readFileSync(path.join(templateDir(), 'CLAUDE.md'), 'utf8')
@@ -484,7 +493,17 @@ function refreshTeamRules(target) {
   const tplAt = norm(tpl).indexOf(TEAM_SECTION)
   // 사람이 그 제목을 지웠거나 템플릿 구조가 바뀌었으면 손대지 않는다.
   if (at < 0 || tplAt < 0) return 'CLAUDE.md 팀 규칙 위치를 찾지 못해 그대로 뒀습니다'
-  const next = norm(cur).slice(0, at) + norm(tpl).slice(tplAt)
+  let head = norm(cur).slice(0, at)
+  // **윗부분에도 앱이 새로 넣는 자리가 생길 수 있다.** `## Figma`가 그렇다 —
+  // 사람이 채우는 영역에 있지만 앱이 쓰는 약속이라, 없으면 기존 프로젝트는
+  // 갱신을 눌러도 영영 못 받는다. 사람이 쓴 내용은 건드리지 않고 **없는 제목만
+  // 덧붙인다.**
+  for (const title of ['## Figma']) {
+    if (head.includes(title)) continue
+    const block = sectionOf(norm(tpl).slice(0, tplAt), title)
+    if (block) head = head.replace(/\n*(---\s*\n*)?$/, '\n\n' + block + '\n\n---\n\n')
+  }
+  const next = head + norm(tpl).slice(tplAt)
   if (next === norm(cur)) return null // 이미 최신이면 조용히 넘어간다
   fs.writeFileSync(target + '.bak', cur, 'utf8')
   fs.writeFileSync(target, next, 'utf8')
