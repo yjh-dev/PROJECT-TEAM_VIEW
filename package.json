@@ -1,6 +1,6 @@
 {
   "name": "team-view",
-  "version": "0.17.0",
+  "version": "0.18.0",
   "private": true,
   "description": "Claude Code 팀 에이전트의 실제 활동을 도트 캐릭터로 보여주고 지시를 내리는 윈도우 앱",
   "main": "main.js",

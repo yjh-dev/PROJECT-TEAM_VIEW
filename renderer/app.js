@@ -80,15 +80,39 @@ function workState(a, now) {
   const sec = a.startedAt != null ? Math.floor((now - a.startedAt) / 1000) : 0
   const quietFor = Math.floor((now - a.lastEventAt) / 1000)
   const thinking = now - a.lastEventAt > THINKING_MS
-  const stalled = now - a.lastEventAt > STALL_MS
+  // **리드가 조용한 것은 대개 멈춘 게 아니라 기다리는 것이다.**
+  //
+  // 리드는 자기가 도구를 쓸 때만 이벤트를 낸다. 팀원에게 일을 맡긴 동안에는
+  // 결과를 기다리기만 하므로 아무것도 남지 않는다. 팀원 하나가 30분씩 도는
+  // 이 앱에서 5분 기준은 거의 항상 걸린다.
+  //
+  // 실측(daily, 지시 하나 109분): 리드가 5분 넘게 조용한 구간이 다섯 번,
+  // 합계 102분 — 전체의 93%. 그리고 **다섯 번 모두 팀원이 일하는 중**이었다.
+  // 한 번도 진짜로 멈춘 적이 없는데 화면에는 내내 `⚠ 응답 없음`이 떠 있었다.
+  //
+  // 정말 문제인 경우는 **아무도 일하지 않는데** 리드가 조용할 때뿐이다.
+  const waitingOn = a.id === LEAD_ID ? teammatesWorking() : []
+  const stalled = now - a.lastEventAt > STALL_MS && !waitingOn.length
+  const waiting = a.id === LEAD_ID && waitingOn.length > 0 && thinking
   return {
     sec,
     quietFor,
     thinking,
     stalled,
-    icon: stalled ? '⚠' : thinking ? '⋯' : (a.act?.icon ?? '◆'),
-    word: stalled ? '응답 없음' : thinking ? '생각 중' : (a.act?.word ?? '작업'),
+    waitingOn,
+    icon: stalled ? '⚠' : waiting ? '⏳' : thinking ? '⋯' : (a.act?.icon ?? '◆'),
+    word: stalled ? '응답 없음' : waiting ? '기다리는 중' : thinking ? '생각 중' : (a.act?.word ?? '작업'),
   }
+}
+
+/** 지금 실제로 일하고 있는 팀원(리드 제외). 리드가 무엇을 기다리는지 알려면 필요하다. */
+function teammatesWorking() {
+  const out = []
+  for (const a of agents.values()) {
+    if (a.id === LEAD_ID || !a.active) continue
+    out.push(a.label)
+  }
+  return out
 }
 
 const WALL_SEGMENTS = interiorWallSegments()
@@ -1411,6 +1435,9 @@ function renderNow(now) {
       .sort((p, q) => (p.startedAt ?? 0) - (q.startedAt ?? 0))
       .map((a) => {
         const w = workState(a, now)
+        // 리드가 기다리는 중이면 **무엇을 기다리는지** 적는다. "기다리는 중"만
+        // 있으면 여전히 뭔가 잘못된 것처럼 읽힌다.
+        if (w.waitingOn?.length) return `${a.label}(${w.waitingOn.join('·')} 결과 기다리는 중)`
         return `${a.label}(${w.word} ${fmtDur(w.sec)})`
       })
       .join(' · ')

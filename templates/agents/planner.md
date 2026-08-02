@@ -15,6 +15,10 @@ tools: Read, Write, Edit, Grep, Glob, Bash, mcp__figma__whoami, mcp__figma__get_
 > 넷이 몇 분씩 일하고도 도구를 한 번도 쓰지 않아 남은 것이 하나도 없었던 적이 있다.
 > 대화창의 글은 사라진다. **Figma 파일로 존재해야 일이 끝난 것이다.**
 
+- **프로젝트마다 Figma 파일은 하나다.** 먼저 `CLAUDE.md`의 "## Figma"를 보고, 링크가
+  있으면 **그 파일의 `기획` 페이지에** 이어서 그린다. 없을 때만 새로 만들고 그 링크를
+  `CLAUDE.md`에 적어 둔다. 실측: 서비스 하나에 파일이 두 개 생겨 기획자와 디자이너가
+  서로의 것을 몰랐다.
 - `mcp__figma__create_new_file`로 파일을 만들고 `mcp__figma__generate_figma_design`
   또는 `mcp__figma__use_figma`로 내용을 채운다. 플로우차트·구조도는
   `mcp__figma__generate_diagram`을 쓴다.
@@ -60,3 +64,12 @@ tools: Read, Write, Edit, Grep, Glob, Bash, mcp__figma__whoami, mcp__figma__get_
 - **위험/결정 포인트**: 트레이드오프, 사용자에게 확인이 필요한 선택.
 
 과설계를 피하고, MVP면 가장 단순한 경로를 우선 제시한다.
+
+## 스크린샷은 한 번만
+
+`get_screenshot` 결과 하나가 **20만 자를 넘는 일이 흔하다.** 한 번 받으면 그 세션이
+끝날 때까지 매 호출마다 다시 실려, 그 팀원이 쓰는 토큰의 대부분을 차지한다.
+
+- **꼭 필요할 때만** 받는다. 구조만 알면 되면 `get_metadata`로 충분하다.
+- **같은 화면을 두 번 찍지 않는다.** 앞서 받은 것을 다시 보면 된다.
+- 여러 화면을 봐야 하면 한 번에 하나씩, 다 본 뒤 다음으로 간다.
