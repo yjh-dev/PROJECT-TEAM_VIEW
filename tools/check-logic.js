@@ -320,6 +320,8 @@ guide.includes('qa-tester') && guide.includes('마지막 관문')
   const fj = lead.indexOf('\n}\n', lead.indexOf('function failureFor'))
   const ffCode = [
     'const readSessionError = () => (process.env.WHY === "1" ? { message: "한도", label: "토큰 사용량 한도", hint: null } : null)',
+    // 끝나지 않은 팀원 판정은 아래 10번에서 따로 본다. 여기서는 없다고 둔다.
+    'const unfinishedAgents = () => (process.env.LEFT ? process.env.LEFT.split(",") : [])',
     lead.slice(lead.indexOf('function failureFor'), fj + 3),
     'module.exports = { failureFor }',
   ].join('\n')
@@ -329,7 +331,13 @@ guide.includes('qa-tester') && guide.includes('마지막 관문')
   const { failureFor } = require(ff)
 
   process.env.WHY = '0'
+  process.env.LEFT = ''
   failureFor('d', 's', 0, 0) === null ? ok('성공은 실패로 적지 않는다') : bad('성공 판정', 'null이 아니다')
+  process.env.LEFT = 'qa-tester'
+  failureFor('d', 's', 0, 0)?.label === '팀원 작업이 끊김'
+    ? ok('팀원이 일하는 중에 끝났으면 성공이라 하지 않는다')
+    : bad('끊김 판정', '"작업 종료"라고 알린다 — 사람은 다 끝난 줄 안다')
+  process.env.LEFT = ''
   const unknown = failureFor('d', 's', 0, 1)
   unknown && typeof unknown.message === 'string'
     ? ok('사유를 못 찾아도 실패는 실패로 알린다')
@@ -338,6 +346,50 @@ guide.includes('qa-tester') && guide.includes('마지막 관문')
   failureFor('d', 's', 0, 1)?.label === '토큰 사용량 한도'
     ? ok('사유를 찾으면 그대로 붙인다')
     : bad('사유 전달', '찾은 사유가 버려진다')
+}
+
+// ── 10. 팀원이 일하는 중에 끝났으면 "작업 종료"가 아니다 ────────────────────
+// 실측: 리드가 `SendMessage`로 QA를 배경에 돌려놓고 "결과를 받은 뒤 최종 보고
+// 하겠습니다"라며 턴을 끝냈다. QA는 그 뒤 10분을 더 일했고 보고는 오지 않았는데,
+// 종료코드가 0이라 앱은 "작업 종료"라고 알렸다 — 사람은 다 끝난 줄 안다.
+{
+  const lab2 = fs.mkdtempSync(path.join(os.tmpdir(), 'tv-unfin-'))
+  fs.mkdirSync(path.join(lab2, '.claude'), { recursive: true })
+  const ev = (o) => JSON.stringify(o)
+  fs.writeFileSync(
+    path.join(lab2, '.claude', 'team-events.jsonl'),
+    [
+      ev({ ts: 1000, type: 'agent_start', agent: 'backend-dev' }),
+      ev({ ts: 1100, type: 'agent_stop', agent: 'backend-dev' }),
+      ev({ ts: 1200, type: 'agent_start', agent: 'qa-tester' }), // 끝나지 않았다
+    ].join('\n') + '\n',
+    'utf8',
+  )
+  const ui = lead.indexOf('function unfinishedAgents')
+  const code2 = [
+    "const fs = require('fs')",
+    "const path = require('path')",
+    'const CLOCK_SLACK_SEC = 10',
+    'const eventsFileFor = (d) => path.join(d, ".claude", "team-events.jsonl")',
+    lead.slice(ui, lead.indexOf('\n}\n', ui) + 3),
+    'module.exports = { unfinishedAgents }',
+  ].join('\n')
+  const f2 = path.join(os.tmpdir(), 'tv-check-unfin.js')
+  fs.writeFileSync(f2, code2, 'utf8')
+  delete require.cache[require.resolve(f2)]
+  const { unfinishedAgents } = require(f2)
+
+  const left = unfinishedAgents(lab2, 900)
+  left.length === 1 && left[0] === 'qa-tester'
+    ? ok('끝나지 않은 팀원을 잡아낸다')
+    : bad('미완료 팀원', JSON.stringify(left) + ' — 못 잡으면 "작업 종료"로 알린다')
+  unfinishedAgents(lab2, 2000).length === 0
+    ? ok('이번 실행 뒤에 아무 일도 없으면 없다고 한다')
+    : bad('미완료 판정', '지난 실행 것을 끌어온다')
+  inLead(/배경으로 넘기고 끝내지 마라/)
+    ? ok('배경으로 넘기고 답하는 것을 막았다')
+    : bad('배경 실행', 'SendMessage로 맡기고 턴을 끝내는 길이 열려 있다')
+  fs.rmSync(lab2, { recursive: true, force: true })
 }
 
 // ── 정리 ───────────────────────────────────────────────────────────────────

@@ -2113,7 +2113,14 @@ const DELIVERABLE =
   `\n\n[이번 턴이 전부다] 네가 답을 내놓는 순간 이 세션은 끝난다. 뒤이어 도는 것은 없다.` +
   ` **"진행 중입니다" "완료되면 이어서 보고하겠습니다" 같은 답을 하지 마라** — 지킬 수 없는 약속이고,` +
   ` 사람은 다 끝난 줄 안다. 팀원에게 맡긴 일은 **결과를 받고 확인한 뒤에** 답해라.` +
-  ` 정말 못 끝낼 분량이면 어디까지 했고 무엇이 남았는지 적어라 — 남은 일은 사람이 다시 시킨다.`
+  ` 정말 못 끝낼 분량이면 어디까지 했고 무엇이 남았는지 적어라 — 남은 일은 사람이 다시 시킨다.` +
+  // 실측: 리드가 `SendMessage`로 QA를 **배경에 돌려놓고** 곧바로 "재검수를 이어서
+  // 돌리고 있습니다. 결과를 받은 뒤 최종 보고하겠습니다"라고 답하며 턴을 끝냈다.
+  // QA는 그 뒤로 10분을 더 일했고 최종 보고는 오지 않았다. 위 규칙은 "결과를 받고
+  // 답해라"였는데, **배경으로 넘기는 도구**를 막지 않아 빠져나갔다.
+  ` **배경으로 넘기고 끝내지 마라.** 팀원을 배경에서 이어 돌리는 도구(\`SendMessage\` 같은)로` +
+  ` 일을 맡긴 채 답하지 마라 — 네가 답하는 순간 그 일도 함께 죽는다.` +
+  ` 결과가 필요한 일은 **기다려서 받은 뒤에** 답해라.`
 
 function promptFor(cmd) {
   const who = cmd.agent
@@ -2331,8 +2338,50 @@ const CLOCK_SLACK_SEC = 10
  * `null`이 됐고, 그러자 "작업이 끝났습니다" 알림이 떴다. 사용자는 다 된 줄 안다.
  * **판정은 종료코드가 하고, 사유는 있으면 붙이는 것이다.**
  */
+/**
+ * 이번 실행에서 **시작만 하고 끝나지 않은 팀원**. 리드가 결과를 안 받고 턴을 끝냈다는
+ * 뜻이다.
+ *
+ * 실측: 리드가 `SendMessage`로 QA를 배경에 돌려놓고 "결과를 받은 뒤 최종 보고하겠습니다"
+ * 라고 답하며 끝냈다. QA는 그 뒤 10분을 더 일했고 보고는 오지 않았는데, 종료코드가
+ * 0이라 앱은 **"작업 종료"**라고 알렸다. 사람은 다 끝난 줄 안다.
+ */
+function unfinishedAgents(dir, since) {
+  const started = []
+  try {
+    const lines = fs.readFileSync(eventsFileFor(dir), 'utf8').split('\n')
+    for (const line of lines) {
+      if (!line.includes('agent_')) continue
+      let e
+      try {
+        e = JSON.parse(line)
+      } catch {
+        continue
+      }
+      if (since && (e.ts || 0) < since - CLOCK_SLACK_SEC) continue
+      if (e.type === 'agent_start' && e.agent) started.push(e.agent)
+      else if (e.type === 'agent_stop' && e.agent) {
+        const i = started.lastIndexOf(e.agent)
+        if (i >= 0) started.splice(i, 1)
+      }
+    }
+  } catch {
+    return []
+  }
+  return [...new Set(started)]
+}
+
 function failureFor(dir, sessionId, since, code) {
-  if (code === 0) return null
+  if (code === 0) {
+    // **끝나지 않은 팀원이 남았으면 끝난 게 아니다.**
+    const left = unfinishedAgents(dir, since)
+    if (!left.length) return null
+    return {
+      message: `${left.join('·')}의 작업이 끝나기 전에 리드가 답을 내놓았습니다.`,
+      label: '팀원 작업이 끊김',
+      hint: '`계속진행해줘`로 이어서 시키면 중단된 지점부터 다시 합니다.',
+    }
+  }
   return (
     readSessionError(dir, sessionId, since) || {
       message: `실행이 코드 ${code}로 끝났습니다. 이유가 기록에 남지 않았습니다.`,
