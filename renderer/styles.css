@@ -1377,30 +1377,41 @@ canvas {
 }
 
 
-/* 토큰 사용량 — 상단 바의 작은 표시와, 눌렀을 때 나오는 자세한 표.
-   숫자를 하나로 합치지 않는다: 실측에서 캐시 읽기가 1.25억, 출력이 75만이라
-   다 더하면 겁만 주고 실제와 어긋난다. */
-#usage {
-  padding: 5px 10px;
-  font-size: 12px;
-  color: var(--muted);
-  background: transparent;
-  border-color: var(--line);
+
+/* ☰ 메뉴 — 상단 바에서 덜어낸 것들이 들어간다.
+   바에는 매 순간 봐야 하는 것(탭·실행·지금 누가 일하는지)만 남긴다. */
+#menu {
+  position: relative;
+  padding: 6px 11px;
+  font-size: 15px;
+  line-height: 1;
+  flex-shrink: 0;
 }
 
-#usage:hover {
-  color: var(--text);
-  background: #222838;
+/* 숨겼다고 놓치면 안 되는 것(세팅 빠짐·되돌리기 없음·연결 끊김)이 있을 때만. */
+#menu-dot {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #e0af68;
+  border: 1px solid var(--panel);
 }
 
-#usage-pop {
+#menu-dot[hidden] {
+  display: none;
+}
+
+#menu-pop {
   position: fixed;
   z-index: 60;
-  width: 340px;
+  width: 320px;
   max-width: calc(100vw - 16px);
-  max-height: 70vh;
+  max-height: 78vh;
   overflow: auto;
-  padding: 14px 16px;
+  padding: 6px 0;
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -1408,28 +1419,64 @@ canvas {
   font-size: 13px;
 }
 
-#usage-pop[hidden] {
+#menu-pop[hidden] {
   display: none;
 }
 
-#usage-pop h4 {
-  margin: 0 0 10px;
-  font-size: 13px;
+#menu-pop section {
+  padding: 8px 14px 12px;
 }
 
-#usage-pop h5 {
-  margin: 16px 0 6px;
-  font-size: 12px;
-  color: var(--muted);
+#menu-pop section + section {
+  border-top: 1px solid var(--line);
+}
+
+#menu-pop h4 {
+  margin: 0 0 8px;
+  font-size: 11px;
   font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--muted);
 }
 
-#usage-pop table {
+/* 메뉴 안의 버튼은 줄지어 놓는다 — 바에서처럼 옆으로 늘어놓으면 또 좁아진다. */
+#menu-pop button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  margin-bottom: 6px;
+  padding: 8px 10px;
+}
+
+#menu-pop button:last-child {
+  margin-bottom: 0;
+}
+
+#menu-pop button[hidden] {
+  display: none;
+}
+
+#menu-pop #stack {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 8px;
+}
+
+#menu-pop #conn {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+/* 토큰 표 — 네 항목을 합치지 않는다. 실측에서 캐시 읽기가 1.36억, 출력이 100만이라
+   다 더하면 겁만 주고 실제와 어긋난다. */
+#usage-body table {
   width: 100%;
   border-collapse: collapse;
 }
 
-#usage-pop th {
+#usage-body th {
   font-size: 11px;
   font-weight: 600;
   color: var(--muted);
@@ -1437,24 +1484,44 @@ canvas {
   padding: 0 0 6px;
 }
 
-#usage-pop th:first-child {
+#usage-body th:first-child {
   text-align: left;
 }
 
-#usage-pop td {
+#usage-body td {
   padding: 3px 0;
   border-top: 1px solid var(--line);
 }
 
-#usage-pop td.num {
+#usage-body td.num {
   text-align: right;
   font-variant-numeric: tabular-nums;
   padding-left: 10px;
 }
 
-#usage-pop p {
-  margin: 12px 0 0;
+#usage-body h5 {
+  margin: 14px 0 6px;
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+#usage-body p {
+  margin: 10px 0 0;
   font-size: 11px;
   line-height: 1.5;
   color: var(--muted);
+}
+
+/* 화면에는 안 보이지만 읽어 주는 글자 — ☰만 있으면 무슨 버튼인지 알 수 없다. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }

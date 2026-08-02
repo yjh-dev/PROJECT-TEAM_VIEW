@@ -753,6 +753,8 @@ function addMsg(kind, who, text, opts = {}) {
   const item = { kind, who, text, tool: Boolean(opts.tool), agent: opts.agent }
   log.push(item)
   while (log.length > 200) log.shift()
+  // 처음 말하는 사람이면 칩에 자리를 내준다.
+  if (item.agent && !chipIds.has(item.agent)) renderTargets()
   // 디스크에도 남긴다 — 앱을 끄면 사라지던 것을 이어 볼 수 있게. 지난 대화를 다시
   // 그리는 중(replaying)에는 저장하지 않는다. 안 그러면 켤 때마다 두 배로 쌓인다.
   if (activeDir && !restoringChat) window.teamView.appendChat(activeDir, item)
@@ -1005,6 +1007,12 @@ function chatFromEvent(ev, agent) {
   addMsg('agent', agent.label, describe(ev), { tool: ev.type === 'tool', agent: agent.id })
 }
 
+// 접어 둔 팀원을 폈는지. 한 번 펴면 그 세션 동안은 계속 보인다.
+let targetsOpen = false
+// 지금 칩으로 나와 있는 팀원. 새로 말한 사람이 생기면 칩을 다시 그린다 —
+// 칩을 시작할 때 한 번만 그렸더니 **아무도 안 나타났다**(실측: 전원이 접힘).
+let chipIds = new Set()
+
 function renderTargets() {
   targetsEl.replaceChildren()
   const mk = (id, label, color) => {
@@ -1019,6 +1027,7 @@ function renderTargets() {
     }
     b.append(document.createTextNode(label))
     b.addEventListener('click', () => {
+      if (id === '__more') return // 접힌 팀원을 펴는 칩 — 고르는 칩이 아니다
       // 고른 사람을 다시 누르면 전체로 돌아간다. 한 번 고르면 풀 방법이 없어서
       // **그 뒤 지시가 전부 그 사람에게 갔다** — 프론트가 기획안을 고치던 원인이다.
       target = target === id ? 'all' : id
@@ -1029,11 +1038,36 @@ function renderTargets() {
       inputEl.focus()
     })
     targetsEl.append(b)
+    return b
   }
   mk('all', '전체', null)
-  for (const r of ROSTER) mk(r.id, r.label, r.shirt)
+  // **전원을 늘어놓지 않는다.** 열한 개가 두 줄을 차지해 대화를 밀어냈고, 그중
+  // 여덟 명은 이 프로젝트에서 한 번도 말한 적이 없어 눌러도 빈 화면만 나왔다.
+  // 말한 적 있는 사람과 지금 고른 사람만 두고, 나머지는 접는다.
+  // 누구의 줄인지는 `agent`(id)에 있다. `who`는 "리드 · 답변"처럼 꾸며진 이름이라
+  // 그대로 맞춰 보면 아무도 못 찾는다 — 실측에서 열한 명이 전부 접혔다.
+  const log = logFor(activeDir)
+  const spoke = new Set(log.map((m) => m.agent).filter(Boolean))
+  const named = (r) => log.some((m) => String(m.who ?? '').startsWith(r.label))
+  const shown = ROSTER.filter((r) => spoke.has(r.id) || named(r) || target === r.id)
+  chipIds = new Set(shown.map((r) => r.id))
+  const rest = ROSTER.filter((r) => !shown.includes(r))
+  for (const r of shown) mk(r.id, r.label, r.shirt)
+  if (rest.length && !targetsOpen) {
+    const more = mk('__more', `+${rest.length}`, null)
+    more.classList.remove('sel')
+    more.title = `아직 말하지 않은 팀원 ${rest.length}명을 폅니다`
+    more.addEventListener('click', (e) => {
+      e.stopPropagation()
+      targetsOpen = true
+      renderTargets()
+    })
+  } else if (rest.length) {
+    for (const r of rest) mk(r.id, r.label, r.shirt)
+  }
   updateComposer()
 }
+
 
 /**
  * 지금 **누구에게** 보내는지 입력창과 버튼에 그대로 적는다.
@@ -1703,11 +1737,8 @@ let widthApplied = false // 기억해 둔 채팅 폭은 한 번만 적용한다(
 // 네 가지를 **합쳐서 하나로 보여 주지 않는다.** 실측에서 캐시 읽기가 1.25억,
 // 출력이 75만이었다 — 다 더하면 "1억 3천만"이 되어 겁만 주고 실제와 어긋난다.
 // 캐시 읽기는 같은 내용을 다시 보내지 않으려고 재사용한 양이라 성격이 다르다.
-const usageBtn = document.getElementById('usage')
-const usagePop = document.createElement('div')
-usagePop.id = 'usage-pop'
-usagePop.hidden = true
-document.body.append(usagePop)
+const usageSec = document.getElementById('usage-sec')
+const usageBody = document.getElementById('usage-body')
 
 /** 사람이 읽는 단위. 10,000 미만은 그대로, 그 위는 만·억으로. */
 function fmtTokens(n) {
@@ -1735,25 +1766,15 @@ let lastUsage = null
 function renderUsage(usage) {
   lastUsage = usage
   const has = usage && (usage.total.output || usage.total.input || usage.total.cacheRead)
-  usageBtn.hidden = !has
-  if (!has) {
-    usagePop.hidden = true
-    usageBtn.setAttribute('aria-expanded', 'false')
-    return
-  }
-  // 한 줄에는 **오늘 출력**만. 가장 자주 궁금한 하나이고, 캐시에 부풀지 않는다.
-  usageBtn.textContent = `토큰 오늘 ${fmtTokens(usage.today.output)}`
-  usageBtn.title = `오늘 출력 ${fmtTokens(usage.today.output)} · 새 입력 ${fmtTokens(usage.today.input)}\n눌러서 자세히 봅니다`
-  if (!usagePop.hidden) fillUsagePop()
+  usageSec.hidden = !has
+  // 메뉴가 닫혀 있으면 다시 그릴 이유가 없다 — 300ms마다 표를 새로 만들 뻔했다.
+  if (has && !menuPop.hidden) fillUsage()
 }
 
-function fillUsagePop() {
+function fillUsage() {
   const u = lastUsage
-  usagePop.replaceChildren()
+  usageBody.replaceChildren()
   if (!u) return
-  const h = document.createElement('h4')
-  h.textContent = '토큰 사용량'
-  usagePop.append(h)
 
   const table = document.createElement('table')
   const head = document.createElement('tr')
@@ -1777,12 +1798,12 @@ function fillUsagePop() {
     }
     table.append(tr)
   }
-  usagePop.append(table)
+  usageBody.append(table)
 
   if (u.agents?.length) {
     const h2 = document.createElement('h5')
     h2.textContent = '팀원별 (출력 기준, 전체)'
-    usagePop.append(h2)
+    usageBody.append(h2)
     const list = document.createElement('table')
     for (const a of u.agents) {
       if (!a.output) continue
@@ -1795,38 +1816,64 @@ function fillUsagePop() {
       tr.append(n, v)
       list.append(tr)
     }
-    usagePop.append(list)
+    usageBody.append(list)
   }
 
   const note = document.createElement('p')
   note.textContent =
     '캐시 읽기는 같은 내용을 다시 보내지 않으려고 재사용한 양입니다. 새로 보낸 양과 성격이 달라 따로 셉니다.'
-  usagePop.append(note)
+  usageBody.append(note)
 }
 
-function toggleUsagePop(show) {
-  const next = show ?? usagePop.hidden
-  usagePop.hidden = !next
-  usageBtn.setAttribute('aria-expanded', String(next))
+// ---------------------------------------------------------------------------
+// ☰ 메뉴
+//
+// 상단 바에 버튼 여섯 개와 상태 넷이 한 줄로 늘어서 있었다. 그중 매 순간 봐야 하는
+// 것은 **탭·실행·지금 누가 일하는지** 셋뿐인데, 나머지가 그 사이에 끼어 정작 그
+// 셋이 눈에 안 들어왔다. 자주 쓰지 않는 것을 여기로 옮긴다.
+//
+// **숨겼다고 놓치면 안 되는 것들이 있다** — 세팅이 빠졌거나, 되돌릴 수단이 없거나,
+// Claude 연결이 끊긴 경우다. 그때는 ☰에 점을 붙여 열어 보게 만든다.
+const menuBtn = document.getElementById('menu')
+const menuPop = document.getElementById('menu-pop')
+const menuDot = document.getElementById('menu-dot')
+
+function toggleMenu(show) {
+  const next = show ?? menuPop.hidden
+  menuPop.hidden = !next
+  menuBtn.setAttribute('aria-expanded', String(next))
   if (!next) return
-  fillUsagePop()
-  // 버튼 아래에 붙인다. 화면 오른쪽 끝을 넘어가지 않게 민다.
-  const r = usageBtn.getBoundingClientRect()
-  usagePop.style.top = `${Math.round(r.bottom + 6)}px`
-  const w = usagePop.offsetWidth || 320
-  usagePop.style.left = `${Math.round(Math.max(8, Math.min(r.left, window.innerWidth - w - 8)))}px`
+  fillUsage()
+  // 버튼 오른쪽 끝에 맞춰 아래로. 화면 밖으로 나가지 않게 민다.
+  const r = menuBtn.getBoundingClientRect()
+  menuPop.style.top = `${Math.round(r.bottom + 6)}px`
+  const w = menuPop.offsetWidth || 320
+  menuPop.style.left = `${Math.round(Math.max(8, Math.min(r.right - w, window.innerWidth - w - 8)))}px`
 }
 
-usageBtn.addEventListener('click', (e) => {
+menuBtn.addEventListener('click', (e) => {
   e.stopPropagation()
-  toggleUsagePop()
+  toggleMenu()
 })
 document.addEventListener('click', (e) => {
-  if (!usagePop.hidden && !usagePop.contains(e.target)) toggleUsagePop(false)
+  if (!menuPop.hidden && !menuPop.contains(e.target)) toggleMenu(false)
 })
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && !usagePop.hidden) toggleUsagePop(false)
+  if (e.key === 'Escape' && !menuPop.hidden) {
+    toggleMenu(false)
+    menuBtn.focus()
+  }
 })
+
+/** ☰에 점을 붙일 일이 있는가. 숨긴 것 중 **손봐야 하는 것**만 센다. */
+function refreshMenuDot() {
+  const need =
+    !document.getElementById('setup').hidden ||
+    !document.getElementById('gitinit').hidden ||
+    !!envBlocker(lastEnv)
+  menuDot.hidden = !need
+  menuBtn.title = need ? '설정·상태·기록 — 손볼 것이 있습니다' : '설정·상태·기록'
+}
 
 on('onStatus', ({ projects, activeDir: active, max, chatWidth, usage }) => {
   renderUsage(usage)
@@ -1848,6 +1895,7 @@ on('onStatus', ({ projects, activeDir: active, max, chatWidth, usage }) => {
   renderStack(me?.health?.stack)
   const parts = me ? missingParts(me.health) : []
   setupBtn.hidden = !parts.length
+  refreshMenuDot() // 숨긴 것 중 손볼 게 생겼는지 ☰에 알린다
   // 빠진 것을 채우는 것과 낡은 것을 갱신하는 것은 다른 일이다. 버튼이 무엇을 할지
   // 이름으로 밝힌다 — 같은 이름이면 눌러 보고 나서야 알게 된다.
   setupBtn.textContent = parts.some((p) => p.update) ? '팀 갱신' : '세팅하기'
@@ -2270,6 +2318,7 @@ const gitBtn = document.getElementById('gitinit')
 
 function renderGit(p) {
   gitBtn.hidden = !p || p.health?.git !== false
+  refreshMenuDot()
 }
 
 async function makeGit(dir, { fromAttach = false } = {}) {
@@ -2734,6 +2783,7 @@ function renderConn(env) {
 
 function renderEnv(env) {
   lastEnv = env
+  refreshMenuDot()
   renderConn(env)
   const block = envBlocker(env)
   // **설치 안내가 떠 있으면 배너를 겹쳐 띄우지 않는다.**
