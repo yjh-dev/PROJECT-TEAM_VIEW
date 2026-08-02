@@ -2312,38 +2312,57 @@ function failureFor(dir, sessionId, since, code) {
 }
 
 function readSessionError(dir, sessionId, since) {
-  const p = sessionPath(dir, sessionId)
-  let text
-  try {
-    // 뒤쪽만 본다. 긴 세션 기록을 통째로 읽으면 그것대로 부담이다.
-    const buf = fs.readFileSync(p, 'utf8')
-    text = buf.length > 400_000 ? buf.slice(-400_000) : buf
-  } catch {
-    return null
-  }
-  const found = []
-  for (const line of text.split('\n')) {
-    if (!line.includes('is_error') && !line.includes('API error')) continue
-    let rec
+  // **리드 기록만 보면 놓친다.** 실측: 한도에 걸려 죽었는데 그 메시지는 QA 팀원의
+  // 기록에만 있었다. 리드 파일에는 아무것도 없어 "이유가 기록에 남지 않았습니다"가
+  // 됐다. 팀원 기록까지 함께 본다.
+  const files = usageFiles(dir)
+  const mine = sessionPath(dir, sessionId)
+  if (!files.includes(mine)) files.push(mine)
+
+  const found = [] // [시각, 문구]
+  for (const p of files) {
+    let text
     try {
-      rec = JSON.parse(line)
+      text = fs.readFileSync(p, 'utf8')
     } catch {
       continue
     }
-    // **이번 실행 뒤에 적힌 것만 본다.** 세션 기록은 지시마다 이어 붙는다. 시간을
-    // 안 보면 지난 지시의 오류를 이번 실패 사유로 붙인다 — 실측: 사용자가 중지를
-    // 눌렀는데 네 시간 전 사용량 한도 오류가 사유로 떴다(17:38 오류, 21:37 보고).
-    if (since) {
+    for (const line of text.split('\n')) {
+      // 값싼 1차 거르기. 이 셋 중 하나도 없으면 파싱할 이유가 없다.
+      if (!line.includes('is_error') && !line.includes('API error') && !line.includes('limit')) continue
+      let rec
+      try {
+        rec = JSON.parse(line)
+      } catch {
+        continue
+      }
+      // **이번 실행 뒤에 적힌 것만 본다.** 기록은 지시마다 이어 붙는다. 시간을 안 보면
+      // 지난 지시의 오류를 이번 실패 사유로 붙인다 — 실측: 사용자가 중지를 눌렀는데
+      // 네 시간 전 사용량 한도 오류가 사유로 떴다(17:38 오류, 21:37 보고).
       const t = Date.parse(rec?.timestamp || '')
-      if (!Number.isFinite(t) || t / 1000 < since - CLOCK_SLACK_SEC) continue
-    }
-    const content = rec?.message?.content
-    for (const blk of Array.isArray(content) ? content : []) {
-      if (blk?.is_error && typeof blk.content === 'string') found.push(blk.content.trim())
+      if (since) {
+        if (!Number.isFinite(t) || t / 1000 < since - CLOCK_SLACK_SEC) continue
+      }
+      const content = rec?.message?.content
+      for (const blk of Array.isArray(content) ? content : []) {
+        if (blk?.is_error && typeof blk.content === 'string') {
+          found.push([t || 0, blk.content.trim()])
+          continue
+        }
+        // **한도 메시지는 오류로 표시되지 않는다.** 그냥 답변 문장으로 남는다:
+        // "You've hit your session limit · resets 3:50am (Asia/Seoul)". `is_error`만
+        // 보던 탓에 이걸 통째로 놓쳤다. 아는 실패 유형에 걸릴 때만 받아들인다 —
+        // 아무 문장이나 받으면 리뷰어가 "rate limit"을 논한 것까지 사유가 된다.
+        if (blk?.type === 'text' && typeof blk.text === 'string' && blk.text.length < 400) {
+          const hit = FAILURE_KINDS.find((k) => k.re.test(blk.text))
+          if (hit) found.push([t || 0, blk.text.trim()])
+        }
+      }
     }
   }
   if (!found.length) return null
-  const message = found[found.length - 1].slice(0, 400)
+  found.sort((a, b) => a[0] - b[0])
+  const message = found[found.length - 1][1].slice(0, 400)
   const kind = FAILURE_KINDS.find((k) => k.re.test(message))
   return { message, label: kind?.label ?? null, hint: kind?.hint ?? null }
 }

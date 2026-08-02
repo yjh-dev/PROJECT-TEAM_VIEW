@@ -249,6 +249,18 @@ guide.includes('qa-tester') && guide.includes('마지막 관문')
     ].join('\n') + '\n',
     'utf8',
   )
+  // **한도 메시지는 팀원 기록에, 그것도 오류가 아닌 답변 문장으로 남는다.** 실측:
+  // 리드 파일에는 아무것도 없어 "이유가 기록에 남지 않았습니다"가 됐다.
+  const subFixture = path.join(os.tmpdir(), 'tv-logic-sub.jsonl')
+  fs.writeFileSync(
+    subFixture,
+    JSON.stringify({
+      timestamp: '2026-08-01T15:36:13.040Z',
+      attributionAgent: 'qa-tester',
+      message: { content: [{ type: 'text', text: "You've hit your session limit · resets 3:50am (Asia/Seoul)" }] },
+    }) + '\n',
+    'utf8',
+  )
 
   const kindsAt = lead.indexOf('const FAILURE_KINDS')
   const readAt = lead.indexOf('const CLOCK_SLACK_SEC')
@@ -257,6 +269,7 @@ guide.includes('qa-tester') && guide.includes('마지막 관문')
     "const fs = require('fs')",
     lead.slice(kindsAt, lead.indexOf('\n]\n', kindsAt) + 3),
     'const sessionPath = () => ' + JSON.stringify(fixture),
+    'const usageFiles = () => ' + JSON.stringify([fixture, subFixture]),
     lead.slice(readAt, readEnd + 3),
     'module.exports = { readSessionError }',
   ].join('\n')
@@ -266,9 +279,13 @@ guide.includes('qa-tester') && guide.includes('마지막 관문')
   const { readSessionError } = require(f)
   const at = Date.parse('2026-08-01T08:38:47.050Z') / 1000
 
-  readSessionError('x', 'y', at + 3600) === null
+  const later = readSessionError('x', 'y', at + 3600)
+  !later?.message.includes('5:40pm')
     ? ok('지난 지시의 오류를 이번 실패 사유로 삼지 않는다')
     : bad('실패 사유 시점', '네 시간 전 오류가 지금 사유로 붙는다')
+  readSessionError('x', 'y', Date.parse('2026-08-01T17:00:00Z') / 1000) === null
+    ? ok('그 뒤로 아무 일도 없었으면 사유도 없다')
+    : bad('시점 제한', '없는 시간대인데 무언가를 집었다')
   const now = readSessionError('x', 'y', at - 60)
   now && now.label === '토큰 사용량 한도'
     ? ok('이번 실행 중 난 오류는 그대로 찾아 분류한다')
@@ -277,6 +294,15 @@ guide.includes('qa-tester') && guide.includes('마지막 관문')
   slack && slack.label === '토큰 사용량 한도'
     ? ok('시계가 몇 초 어긋나도 놓치지 않는다')
     : bad('시계 여유', '여유가 없으면 진짜 사유를 놓친다')
+
+  // 팀원 기록에만, 그것도 오류가 아닌 문장으로 남은 한도 메시지
+  const sub = readSessionError('x', 'y', Date.parse('2026-08-01T15:00:00Z') / 1000)
+  sub && sub.message.includes('3:50am')
+    ? ok('팀원 기록에 남은 한도 메시지도 찾는다')
+    : bad('팀원 기록', '리드 파일만 봐서 "이유가 기록에 남지 않았습니다"가 된다')
+  sub && sub.label === '토큰 사용량 한도'
+    ? ok('오류 표시가 없는 문장도 한도로 분류한다')
+    : bad('문장 분류', 'is_error만 보면 한도 메시지를 통째로 놓친다')
 
   inLead(/child\.teamviewCanceled = true/)
     ? ok('중지할 때 그 프로세스에 표시를 남긴다')
