@@ -21,6 +21,11 @@ tools: Read, Write, Edit, Grep, Glob, Bash, mcp__figma__get_metadata, mcp__figma
 ### Figma 스펙이 주어졌을 때 (`mcp__figma__*` 도구가 있을 때만)
 - 설계 문서의 **node-id**로 `get_design_context`·`get_screenshot`을 조회해 화면을 확인한다.
   도구가 없으면 마크다운 명세만으로 진행한다.
+- **node-id 없이 부르지 마라.** `get_metadata`·`get_design_context`를 파일 뿌리에서
+  부르면 결과가 7만~10만 자를 넘어 **통째로 버려진다** — 호출은 돌고 결과만 폐기되므로
+  시간과 토큰만 나간다. 실측: 프론트가 `get_metadata`를 node-id 없이 불러
+  `result (73,796 characters) exceeds maximum allowed`로 실패했다. "결과가 너무 크다"는
+  응답을 받으면 **같은 호출을 되풀이하지 말고 더 좁은 노드로 내려가라.**
 - 색·타이포·간격은 `get_variable_defs`의 **토큰을 앱 테마에 매핑**한다(픽셀 하드코딩 금지).
   Figma는 보통 웹 기준이므로 **dp/pt 환산과 폰트 스케일·세이프에어리어**는 플랫폼 규칙을 따른다.
 - `get_code_connect_map`에 매핑된 컴포넌트가 있으면 그대로 쓴다.

@@ -206,8 +206,11 @@ function projectHealth(dir) {
 // 지우기도 애매하다. 앱 데이터 폴더에 프로젝트별로 따로 둔다.
 // ---------------------------------------------------------------------------
 
-const CHAT_KEEP = 200 // 화면이 들고 있는 줄 수와 같게
-const CHAT_MAX_LINES = 2000 // 이보다 커지면 뒤쪽만 남기고 정리한다
+// **한 시간짜리 작업이면 200줄로는 앞부분이 통째로 안 보인다.** 실측: ConvertFlow에
+// 901줄, daily에 591줄이 저장돼 있는데 화면에는 마지막 200줄만 올라왔다 — 기획·설계
+// 단계에서 무슨 이야기가 오갔는지 볼 방법이 없었다.
+const CHAT_KEEP = 1000 // 화면이 들고 있는 줄 수와 같게
+const CHAT_MAX_LINES = 5000 // 이보다 커지면 뒤쪽만 남기고 정리한다
 
 function chatPath(dir) {
   const enc = String(dir).replace(/[^a-zA-Z0-9]/g, '-').slice(-120)

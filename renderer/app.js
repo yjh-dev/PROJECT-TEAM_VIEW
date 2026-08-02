@@ -161,6 +161,9 @@ const lastChatAt = new Map() // 도구 이벤트가 채팅을 도배하지 않�
 
 let activeDir = null
 let lastProjects = [] // 마지막으로 받은 프로젝트 상태(세팅 버튼이 참조한다)
+// 메인의 CHAT_KEEP과 같은 값. 한 시간짜리 작업의 앞부분도 볼 수 있어야 한다.
+const CHAT_KEEP = 1000
+
 const chatLogs = new Map() // dir -> [{ kind, who, text, tool }]
 // 보관된 대화를 다시 그리는 중인지. 그때 저장하면 켤 때마다 두 배로 쌓인다.
 let restoringChat = false
@@ -184,7 +187,11 @@ async function restoreChat(dir) {
   const log = logFor(dir)
   // 이미 이번 실행에서 쌓인 줄이 있으면 그 **앞에** 붙인다(지난 것이 먼저다).
   log.unshift(...saved)
-  while (log.length > 200) log.shift()
+  while (log.length > CHAT_KEEP) log.shift()
+  // **되살린 대화에 나온 사람도 칩에 나와야 한다.** 칩은 새로 말할 때만 다시
+  // 그렸는데, 지난 대화를 불러오는 이 자리는 거기에 걸리지 않는다 — 실측: 901줄을
+  // 되살렸는데 칩은 `전체 +11`뿐이었다(백엔드 305줄, 프론트 221줄이 들어 있었다).
+  if (dir === activeDir) renderTargets()
   if (dir === activeDir) redrawChat(dir)
 }
 
@@ -776,7 +783,7 @@ function addMsg(kind, who, text, opts = {}) {
   // 그건 "리드 · 답변"처럼 꾸며진 문자열이라 나중에 걸러 내기가 어렵다.
   const item = { kind, who, text, tool: Boolean(opts.tool), agent: opts.agent }
   log.push(item)
-  while (log.length > 200) log.shift()
+  while (log.length > CHAT_KEEP) log.shift()
   // 처음 말하는 사람이면 칩에 자리를 내준다.
   if (item.agent && !chipIds.has(item.agent)) renderTargets()
   // 디스크에도 남긴다 — 앱을 끄면 사라지던 것을 이어 볼 수 있게. 지난 대화를 다시
@@ -993,7 +1000,9 @@ function renderMsg(kind, who, text) {
   }
   el.dataset.plain = kind === 'sys' ? text : `${who}: ${text}`
   messagesEl.append(el)
-  while (messagesEl.children.length > 200) messagesEl.firstChild.remove()
+  // 화면에 붙여 두는 줄. **기록은 CHAT_KEEP만큼 들고 있어도 여기서 잘리면 소용없다** —
+  // 실측: 901줄이 저장돼 있는데 화면에는 200줄만 올라왔다.
+  while (messagesEl.children.length > CHAT_KEEP) messagesEl.firstChild.remove()
   messagesEl.scrollTop = messagesEl.scrollHeight
 }
 
