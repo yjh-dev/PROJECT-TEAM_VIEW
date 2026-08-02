@@ -389,6 +389,13 @@ guide.includes('qa-tester') && guide.includes('마지막 관문')
   inLead(/배경으로 넘기고 끝내지 마라/)
     ? ok('배경으로 넘기고 답하는 것을 막았다')
     : bad('배경 실행', 'SendMessage로 맡기고 턴을 끝내는 길이 열려 있다')
+  // 순서에 이름이 없으면 그 단계는 없는 것이 된다 — QA로 한 번, 릴리스로 또 한 번 겪었다.
+  inLead(/release-manager/)
+    ? ok('배포를 요구하면 릴리스를 부르라고 적혀 있다')
+    : bad('릴리스 단계', '지시에 배포가 있어도 아무도 안 부른다 — 실측 0회')
+  inLead(/빠뜨린 것은 밝혀라/)
+    ? ok('요구를 빠뜨렸으면 밝히라고 적혀 있다')
+    : bad('누락 고지', '조용히 빠뜨리면 사람은 다 됐다고 믿는다')
   fs.rmSync(lab2, { recursive: true, force: true })
 }
 
