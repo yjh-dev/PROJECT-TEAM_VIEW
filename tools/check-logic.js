@@ -1017,6 +1017,8 @@ async function accountChecks() {
       constLine('FIGMA_URL'),
       constLine('FIGMA_ADD'),
       constLine('FIGMA_LOGIN'),
+      // **성공 판정표도 main.js 것을 그대로 쓴다.** 여기서 다시 적으면 판정이 바뀌어도 모른다.
+      constLine('WATCH_DONE'),
       // 감시는 실제로 30초씩 기다린다. 검사에서는 흐름만 보면 되므로 짧게 줄인다.
       'const WATCH_EVERY_MS = 1',
       'const WATCH_TRIES = 2',
@@ -1024,7 +1026,9 @@ async function accountChecks() {
       'const calls = global.__calls = []',
       'const replies = global.__replies = new Map()',
       "const runClaude = async (args) => { const k = args.join(' '); calls.push(k); return replies.get(k) ?? { err: null, out: '', errOut: '' } }",
-      "const openInTerminal = (args) => { calls.push('창: ' + args.join(' ')); return global.__terminalOk !== false }",
+      // 창은 **핸들**을 돌려준다(닫으려면 pid가 필요하다). 못 여는 OS는 false 그대로.
+      "const openInTerminal = (args) => { calls.push('창: ' + args.join(' ')); return global.__terminalOk === false ? false : { pid: 4242, exe: 'claude' } }",
+      "const closeTerminal = (w) => { if (w && w.pid) calls.push('창닫기: ' + w.pid) }",
       'const send = () => {}',
       '',
     ].join('\n'),
@@ -1271,6 +1275,84 @@ async function accountChecks() {
     eq('claude.ai 커넥터 도구는 허용 목록에 없다', /mcp__claude_ai_Figma__/.test(ux), 'false')
   }
 
+  // (8-e) **가짜 성공.** 사용자가 한 화면에서 서로 다른 두 말을 봤다:
+  //         상단 배너  `Figma 연결이 끊겼습니다` + [Figma 연결]   ← 맞는 말
+  //         채팅       `— Figma를 다시 연결했습니다 —`            ← 거짓말
+  //       (대화 기록에 그대로 남아 있다.) 그때 실제 상태는 `! Needs authentication`,
+  //       저장된 accessToken 길이는 0이었다.
+  //
+  //       판정이 `what === 'figma' ? env.figma.connected : env.claude.loggedIn`이라
+  //       **`figma`가 아닌 것은 전부 "claude 로그인됨"으로 성공**이 됐다. 이미
+  //       로그인돼 있으면(늘 그렇다) 첫 확인에서 곧장 ok:true다. 기본값으로 성공하는
+  //       길을 여기서 막는다 — 모르면 모른다고 해야 한다.
+  const NEEDS_AUTH = { out: 'figma: https://mcp.figma.com/mcp (HTTP) - ! Needs authentication' }
+  {
+    // 인증이 안 됐으면 창을 띄웠어도 성공이 아니다.
+    reset({ 'auth status': { out: JSON.stringify(LIVE) }, 'mcp list': NEEDS_AUTH })
+    const res = await E.connectFigma('윤사무실 - Figma 연결')
+    eq('인증 안 됐으면 성공이 아니다', res.ok, 'false')
+    eq('인증 안 됐으면 timeout으로 말한다', res.timeout, 'true')
+    eq('돌려주는 env도 연결 안 됨이다', res.env.figma.connected, 'false')
+
+    // 재현했던 구멍 그대로: `figma`가 아닌 이름으로 들어오면 claude 로그인만 보고
+    // 곧장 성공했다. 이제는 **창조차 띄우지 않는다.**
+    for (const what of [undefined, null, '', 'Figma', 'figma ', 'mcp', 0]) {
+      reset({ 'auth status': { out: JSON.stringify(LIVE) }, 'mcp list': NEEDS_AUTH })
+      const r = await E.openAndWatch(what, ['auth', 'login'], '윤사무실 - 시험')
+      if (r.ok !== false || said('창:')) {
+        bad('모르는 항목은 성공이 아니다', `${JSON.stringify(what)} — ${JSON.stringify(r)}`)
+      }
+    }
+    ok('모르는 항목은 창도 안 띄우고 성공도 아니다')
+
+    // claude 쪽 판정이 figma를 대신 답하지 않는지도 못 박는다.
+    reset({ 'auth status': { out: JSON.stringify(LIVE) }, 'mcp list': NEEDS_AUTH })
+    const f = await E.openAndWatch('figma', ['mcp', 'login', 'figma'], '윤사무실 - Figma 연결')
+    eq('claude 로그인만으로 figma를 성공이라 하지 않는다', f.ok, 'false')
+  }
+
+  // (8-f) 화면도 **같은 근거**를 보는가. 배너는 env를, 채팅은 ok만 보고 있었다 —
+  //       근거가 갈린 것이 두 문구가 어긋난 이유다.
+  {
+    const R = loadFrom('renderer/app.js', ['envConfirms'])
+    const OFF = { claude: { loggedIn: true }, figma: { connected: false, present: true } }
+    const ON = { claude: { loggedIn: true }, figma: { connected: true, present: true } }
+    eq('연결 안 됐으면 확인해 주지 않는다', R.envConfirms('figma', OFF), 'false')
+    eq('연결됐을 때만 확인해 준다', R.envConfirms('figma', ON), 'true')
+    eq('env가 없으면 확인해 주지 않는다', R.envConfirms('figma', null), 'false')
+    eq('claude는 로그인 여부로 본다', R.envConfirms('claude', { claude: { loggedIn: false }, figma: {} }), 'false')
+
+    const app = fs.readFileSync(path.join(ROOT, 'renderer/app.js'), 'utf8').replace(/\r\n/g, '\n')
+    // 성공 문구 두 곳이 **모두** envConfirms를 거쳐야 한다. 하나만 고치면 또 갈린다.
+    eq('채팅 줄은 envConfirms를 거친다', /res\?\.ok && envConfirms\(what, res\.env\)\)\s*\{\s*\n\s*\/\/[\s\S]{0,200}?addMsg\('sys'/.test(app), 'true')
+    eq('배너 아래 안내도 envConfirms를 거친다', /if \(res\?\.ok && envConfirms\(what, res\.env\)\) \{\s*\n\s*renderEnv\(res\.env\)\s*\n\s*hintEl/.test(app), 'true')
+    eq('ok만 보고 성공을 적는 곳이 없다', /if \(res\?\.ok\) \{/.test(app), 'false')
+    // 배너가 보는 것과 같은 값인지 — 둘 다 env.figma.connected다.
+    eq('배너도 같은 값을 본다', /if \(!env\.figma\.connected\) \{/.test(app), 'true')
+  }
+
+  // (8-g) **창을 닫는다.** `cmd /k`라 인증이 끝나도 빈 프롬프트 창이 남았다.
+  //       여러 번 누르면 쌓인다(실제로 네 개까지). 성공했으면 읽을 것이 없으니 닫는다.
+  //       실패·시간 초과면 **닫지 않는다** — 실패는 이유를 봐야 하고, 시간 초과는
+  //       아직 브라우저에서 마치는 중일 수 있다.
+  {
+    reset({ 'auth status': { out: JSON.stringify(LIVE) }, 'mcp list': CONNECTED })
+    await E.connectFigma('윤사무실 - Figma 연결')
+    eq('figma 인증이 끝나면 창을 닫는다', said('창닫기: 4242'), 'true')
+
+    reset({ 'auth status': { out: JSON.stringify(LIVE) }, 'mcp list': NEEDS_AUTH })
+    await E.connectFigma('윤사무실 - Figma 연결')
+    eq('시간이 지났으면 창을 두고 온다', said('창닫기'), 'false')
+
+    reset({ 'auth logout': {}, 'auth status': { out: JSON.stringify(LIVE) }, 'mcp list': { out: '' } })
+    await E.switchAccount('claude')
+    eq('claude 계정 전환도 끝나면 창을 닫는다', said('창닫기: 4242'), 'true')
+
+    reset({ 'auth logout': {}, 'auth status': { out: JSON.stringify({ ...LIVE, loggedIn: false }) } })
+    await E.switchAccount('claude')
+    eq('로그인이 안 끝났으면 창을 두고 온다', said('창닫기'), 'false')
+  }
+
   // (9) claude — logout이 실패하면 로그인 창을 띄우지 않는다(반쯤 나간 상태 금지)
   {
     reset({ 'auth logout': { err: new Error('exit 1'), errOut: '네트워크에 연결할 수 없습니다' } })
@@ -1380,7 +1462,9 @@ function terminalChecks() {
     ['quoteForCmd', 'openInTerminal'],
     [
       'const calls = global.__spawnCalls = []',
-      'const spawn = (file, args, opts) => { calls.push({ file, args, opts }); return { on() {}, unref() {} } }',
+      'const spawn = (file, args, opts) => { calls.push({ file, args, opts }); return { pid: 1234, on() {}, unref() {} } }',
+      // 실물 findWindowPid는 PowerShell을 부른다. 여기서 보는 것은 명령줄이므로 세워만 둔다.
+      'const findWindowPid = async (ppid, exe) => { calls.push({ find: [ppid, exe] }); return 4242 }',
       src.slice(i, src.indexOf('\n', i)),
       '',
     ].join('\n'),
@@ -1391,8 +1475,8 @@ function terminalChecks() {
   const lineOf = (args, title, exe) => {
     reset()
     const rv = T.openInTerminal(args, title, exe)
-    const c = spawned()[0]
-    return { rv, line: c ? c.args[1] : null, opts: c ? c.opts : null, count: spawned().length }
+    const c = spawned().find((x) => x.args)
+    return { rv, line: c ? c.args[1] : null, opts: c ? c.opts : null, count: spawned().filter((x) => x.args).length }
   }
 
   // 창으로 띄우는 figma 명령은 **인증(login)뿐이다.** 등록(`mcp add`)은 사람 손이 필요
@@ -1403,7 +1487,10 @@ function terminalChecks() {
   // (1) 사용자가 실제로 눌렀던 그 버튼 — 제목에 `-`가 들어 있다(예전에 여기서 터졌다)
   {
     const r = lineOf(FIGMA, '윤사무실 - Figma 연결')
-    eq('Figma 연결 창을 띄운다', r.rv, 'true')
+    eq('Figma 연결 창을 띄운다', Boolean(r.rv), 'true')
+    // 창을 닫으려면 **누구인지**를 알아야 한다 — 핸들을 돌려주고 손자 pid를 찾아 둔다.
+    eq('창 핸들을 돌려준다', typeof r.rv, 'object')
+    eq('손자 pid를 찾으러 간다', spawned().some((x) => x.find), 'true')
     eq('Figma 명령줄이 그대로다', r.line, 'start "윤사무실 - Figma 연결" cmd /k claude mcp login figma')
     // 이 셋이 이 고장의 본체다.
     eq('제목을 두 겹으로 감싸지 않는다', /\\"/.test(r.line), 'false')
@@ -1459,15 +1546,33 @@ function terminalChecks() {
       ['제목에 &', ['auth', 'login'], '윤사무실 - T & calc'],
     ]) {
       const r = lineOf(args, title)
-      eq(`${label} → 띄우지 않는다`, r.rv, 'false')
+      eq(`${label} → 띄우지 않는다`, Boolean(r.rv), 'false')
       eq(`${label} → spawn을 부르지도 않는다`, r.count, '0')
     }
   }
 
-  // (5) 실패를 삼키지 않는다 — false를 돌려줘야 호출부가 `manual` 문구를 띄운다.
+  // (5) 실패를 삼키지 않는다 — falsy를 돌려줘야 호출부가 `manual` 문구를 띄운다.
   {
     const m = src.slice(src.indexOf('async function openAndWatch('), src.indexOf('\n}\n', src.indexOf('async function openAndWatch(')))
-    eq('창을 못 띄우면 호출부가 manual을 준다', /if \(!openInTerminal\([\s\S]*?manual:/.test(m), 'true')
+    eq('창을 못 띄우면 호출부가 manual을 준다', /const win = openInTerminal\([\s\S]*?if \(!win\)[\s\S]*?manual:/.test(m), 'true')
+  }
+
+  // (6) 창을 **어떻게 짚는가.** 여기가 이 고장의 위험한 쪽이다.
+  //
+  //     실측: 이 PC의 기본 콘솔이 Windows Terminal이라
+  //     `tasklist /FI "WINDOWTITLE eq 윤사무실 - 제목시험"`이 우리 cmd가 아니라
+  //     **사용자의 다른 탭까지 들고 있는 WindowsTerminal.exe(pid 39648, 우리 창보다
+  //     17분 먼저 떠 있던 것)**를 가리켰다. 제목으로 죽였으면 사용자가 쓰던 터미널이
+  //     통째로 날아갔다. 그래서 제목으로 찾는 길은 **다시 생기면 안 된다.**
+  {
+    // 주석에는 남겨 둔다(왜 안 되는지가 근거다). **코드에만** 없어야 한다.
+    const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+    eq('창을 제목으로 찾지 않는다', /WINDOWTITLE/i.test(code), 'false')
+    eq('왜 안 되는지는 주석에 남아 있다', /WINDOWTITLE/i.test(src), 'true')
+    eq('창은 pid로만 닫는다', /taskkill'?,\s*\['\/PID'/.test(src), 'true')
+    eq('pid가 없으면 아무것도 죽이지 않는다', /if \(!win \|\| typeof win !== 'object' \|\| !win\.pid\) return/.test(src), 'true')
+    // 부모 pid만 맞으면 남의 창을 잡을 수 있다(pid는 재사용된다). 명령줄까지 본다.
+    eq('부모 pid와 명령줄을 함께 맞춘다', /ParentProcessId=\$\{Number\(parentPid\)\}/.test(src) && /includes\(exe\)/.test(src), 'true')
   }
 }
 

@@ -482,16 +482,95 @@ function openInTerminal(args, title, exe = 'claude') {
     })
     child.on('error', (e) => console.error('터미널 창을 띄우지 못했습니다:', e.message))
     child.unref()
-    return true
+    // 나중에 이 창을 닫으려면 **누구인지**를 알아야 한다. spawn이 준 pid는 `start`를
+    // 실행하고 곧 끝나는 부모라 창과 무관하다 — 창을 쥔 것은 손자 cmd다.
+    const win = { pid: null, exe }
+    findWindowPid(child.pid, exe).then((pid) => {
+      win.pid = pid
+    })
+    return win
   } catch (e) {
     console.error('터미널 창을 띄우지 못했습니다:', e.message)
     return false
   }
 }
 
+// 창이 생길 때까지 잠깐 걸린다. 조금씩 늘려 가며 네 번만 본다(총 5초 남짓).
+const WINDOW_PID_TRIES = [300, 700, 1500, 2500]
+
+/**
+ * `start`가 띄운 **손자 cmd**의 pid를 찾는다. 부모 pid로 짚는다.
+ *
+ * **창 제목으로는 못 짚는다 — 실측으로 확인했다.** 이 PC의 기본 콘솔이
+ * Windows Terminal이라 `tasklist /FI "WINDOWTITLE eq 윤사무실 - …"`이 우리 cmd가 아니라
+ * **사용자의 다른 탭까지 담고 있는 WindowsTerminal.exe**(우리 창보다 17분 먼저 떠 있던
+ * 프로세스)를 가리켰다. 그걸 죽이면 사용자가 쓰던 터미널이 통째로 날아간다.
+ * `IMAGENAME eq cmd.exe`를 같이 걸면 이번엔 아무것도 안 잡힌다 — 핸드오프된 cmd에는
+ * 자기 창이 없기 때문이다. 그래서 제목은 사람이 읽는 용도로만 쓴다.
+ *
+ * `wmic`은 최신 Windows에서 빠져서 PowerShell로 묻는다. 못 찾으면 null —
+ * **창을 못 닫을 뿐, 다른 것을 죽이지는 않는다.**
+ */
+function findWindowPid(parentPid, exe) {
+  return new Promise((resolve) => {
+    if (!parentPid) return resolve(null)
+    const script =
+      `Get-CimInstance Win32_Process -Filter "Name='cmd.exe' and ParentProcessId=${Number(parentPid)}" | ` +
+      'ForEach-Object { "$($_.ProcessId) |CMD| $($_.CommandLine)" }'
+    let i = 0
+    const attempt = () => {
+      execFile(
+        'powershell',
+        ['-NoProfile', '-NonInteractive', '-Command', script],
+        { windowsHide: true, timeout: 10_000, encoding: 'utf8' },
+        (err, out) => {
+          for (const l of String(out ?? '').split(/\r?\n/)) {
+            const m = l.match(/^(\d+) \|CMD\| (.*)$/)
+            // 부모가 맞아도 명령줄까지 확인한다. pid는 재사용되므로 둘 다 맞아야 우리 것이다.
+            if (m && m[2].includes(exe)) return resolve(Number(m[1]))
+          }
+          if (err && i === 0) console.error('창 pid를 찾지 못했습니다:', err.message)
+          if (++i >= WINDOW_PID_TRIES.length) return resolve(null)
+          setTimeout(attempt, WINDOW_PID_TRIES[i])
+        },
+      )
+    }
+    setTimeout(attempt, WINDOW_PID_TRIES[0])
+  })
+}
+
+/**
+ * 우리가 띄운 창을 닫는다. **우리가 띄운 것만** — pid를 손에 쥐고 있을 때만 죽인다.
+ *
+ * `cmd /k`로 띄우는 이유는 사용자가 결과를 읽어야 해서다. 그런데 성공하면 읽을 것이
+ * 없다 — `claude mcp login`·`claude auth login`은 인증이 끝나면 스스로 끝나고
+ * **빈 프롬프트 창만 남는다.** 여러 번 시도하면 그 빈 창이 쌓인다(실제로 네 개까지).
+ * 그래서 성공했을 때만 닫는다. 실패·시간 초과면 남겨 둔다 — 실패는 이유를 봐야 하고,
+ * 시간 초과는 아직 브라우저에서 마치는 중일 수 있다.
+ */
+function closeTerminal(win) {
+  if (!win || typeof win !== 'object' || !win.pid) return
+  // /T는 콘솔 호스트(conhost)까지 같이 정리한다. 실측으로 이 조합만 창이 사라졌다.
+  execFile('taskkill', ['/PID', String(win.pid), '/T', '/F'], { windowsHide: true, timeout: 10_000 }, (err) => {
+    if (err) console.error('창을 닫지 못했습니다:', err.message)
+  })
+}
+
 // 최대 3분 동안 30초 간격으로 확인한다. 브라우저 로그인은 보통 1분 안에 끝난다.
 const WATCH_EVERY_MS = 30_000
 const WATCH_TRIES = 6
+
+/**
+ * 무엇이 끝났다고 볼 것인가. **모르는 항목은 성공으로 치지 않는다.**
+ *
+ * 전에는 `what === 'figma' ? env.figma.connected : env.claude.loggedIn`이었다.
+ * `figma`가 아닌 것은 전부 "claude 로그인됨"으로 판정하는 모양이라, 이미 로그인돼
+ * 있으면(늘 그렇다) 무엇을 물어보든 **첫 확인에서 곧장 성공**이 됐다. 실제로
+ * `openAndWatch(undefined, …)`가 `figma.connected:false`인 env를 달고 `ok:true`를
+ * 돌려주는 것을 재현했다. 여기서 기본값으로 성공하는 길을 없앤다 —
+ * 모르면 모른다고 하는 것이 이 앱의 규칙이다.
+ */
+const WATCH_DONE = { figma: (env) => env.figma.connected === true, claude: (env) => env.claude.loggedIn === true }
 
 /**
  * 창을 띄운 뒤 **끝났는지 지켜본다** — 사람이 브라우저에서 마치는 동안 앱이 알아채야지,
@@ -501,16 +580,28 @@ const WATCH_TRIES = 6
  * 두 벌로 두면 한쪽만 고쳐져 어긋난다 — 같은 화면을 두 규칙이 그리게 된다.
  */
 async function openAndWatch(what, args, title) {
-  if (!openInTerminal(args, title)) {
+  // 무엇이 끝났다고 볼지 모르면 **창부터 띄우지 않는다.** 지켜볼 기준이 없는데
+  // 창을 띄우면 사람만 움직이고 앱은 아무것도 판정하지 못한다.
+  const done = WATCH_DONE[what]
+  if (!done) return { ok: false, error: '알 수 없는 항목입니다' }
+
+  const win = openInTerminal(args, title)
+  if (!win) {
     return { ok: false, manual: `claude ${args.join(' ')}`, error: '이 OS에서는 터미널을 자동으로 열 수 없습니다' }
   }
   for (let i = 0; i < WATCH_TRIES; i++) {
     await new Promise((r) => setTimeout(r, WATCH_EVERY_MS))
     const env = await checkEnv({ force: true })
     send('env:status', env)
-    const done = what === 'figma' ? env.figma.connected : env.claude.loggedIn
-    if (done) return { ok: true, env }
+    if (done(env)) {
+      // 성공했으면 창에 읽을 것이 없다 — `cmd /k`가 남긴 빈 프롬프트를 치운다.
+      closeTerminal(win)
+      return { ok: true, env }
+    }
   }
+  // **시간이 지났다고 창을 닫지 않는다.** 사용자가 아직 브라우저에서 마치는 중일 수
+  // 있고, 창을 뺏으면 거기서 끝낼 방법이 사라진다.
+  //
   // 실패 응답에는 `error`가 늘 있어야 화면이 한 갈래로 처리할 수 있다. `timeout`은
   // 그 위에 얹는 사정이다(화면은 지금도 timeout을 먼저 본다 — 그 길을 막지 않는다).
   return { ok: false, timeout: true, error: '3분 안에 끝나지 않았습니다 — 창에서 마친 뒤 "다시 확인"을 눌러 주세요', env: await checkEnv({ force: true }) }

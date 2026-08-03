@@ -3408,6 +3408,25 @@ let switching = ''
 // `claude mcp list`가 서버마다 헬스 체크를 해서 실제로 부를 때마다 몇 초 걸린다.
 const ENV_POLL_MS = 60_000
 
+/**
+ * 성공했다고 **말해도 되는가.**
+ *
+ * 사용자가 한 화면에서 서로 다른 두 말을 봤다:
+ *   · 상단 배너 `Figma 연결이 끊겼습니다` + [Figma 연결]  ← 맞는 말
+ *   · 채팅 `— Figma를 다시 연결했습니다 —`                 ← 거짓말
+ * (대화 기록에 그대로 남아 있다.) 그때 실제 상태는 `! Needs authentication`이었고
+ * 저장된 accessToken은 길이 0이었다.
+ *
+ * 갈라진 이유는 **근거가 달랐기** 때문이다. 배너는 `env.figma.connected`를 보는데
+ * 채팅은 메인이 준 `res.ok`만 봤다. 그래서 메인이 한 번이라도 ok를 잘못 내면
+ * 화면 두 곳이 서로 다른 말을 한다. 이제 둘 다 **같은 env**를 본다 —
+ * 확인되지 않으면 확인되지 않았다고 말한다.
+ */
+function envConfirms(what, env) {
+  if (!env) return false
+  return what === 'figma' ? env.figma?.connected === true : env.claude?.loggedIn === true
+}
+
 /** 지금 가장 먼저 막고 있는 것 하나. 여러 개면 순서대로 하나씩 푼다. */
 function envBlocker(env) {
   if (!env) return null
@@ -3705,7 +3724,9 @@ async function switchAccount(what) {
   const res = await callBridge('switchAccount', what)
   switching = ''
 
-  if (res?.ok) {
+  // **`ok`만으로 성공을 적지 않는다.** 배너와 같은 근거(env)로 한 번 더 확인한다 —
+  // 이 줄은 채팅 기록 파일에 남아서, 틀리면 틀린 채로 남는다.
+  if (res?.ok && envConfirms(what, res.env)) {
     // 채팅 기록에는 **누구로 바뀌었는지 적지 않는다** — 이메일·조직은 남의 정보고
     // 기록은 파일로 남는다. 무슨 일이 있었는지만 한 줄.
     addMsg('sys', '', what === 'figma' ? '— Figma를 다시 연결했습니다 —' : '— Claude 계정을 바꿨습니다 —')
@@ -3719,10 +3740,13 @@ async function switchAccount(what) {
   } else if (res?.manual) {
     // 창을 띄울 수 없는 컴퓨터. 명령을 사람이 직접 쳐야 한다.
     showConnMsg(`${res.error || '앱이 창을 띄우지 못했습니다'} — 터미널에서 직접 실행하세요.`, res.manual)
-  } else if (res?.timeout) {
+  } else if (res?.timeout || res?.ok) {
     // **실패로 단정하지 않는다.** 로그인 창은 아직 열려 있을 수 있고, 거기서
     // 마치면 실제로는 성공이다. 메인이 준 문구가 이미 그 말을 하고 있으므로
     // 그대로 쓴다 — 여기서 덧붙이면 같은 말이 두 번 된다.
+    //
+    // `res.ok`인데 여기까지 왔다면 **메인은 됐다는데 env가 그렇다고 말해 주지 않는
+    // 경우**다. 그것도 "모른다"이지 "됐다"가 아니다 — 같은 문구로 처리한다.
     showConnMsg(res.error || '시간이 지났습니다 — 창에서 로그인을 마쳤는지 확인하고 [상태 다시 확인]을 누르세요')
   } else {
     showConnMsg(res?.error || '계정을 바꾸지 못했습니다')
@@ -3796,7 +3820,9 @@ async function startLogin(what) {
   const res = await window.teamView.login(what)
   envActEl.disabled = false
   envAgainEl.disabled = false
-  if (res?.ok) {
+  // 성공 문구는 **배너와 같은 근거로만** 낸다. `ok`만 믿었더니 배너는 "끊겼습니다",
+  // 채팅은 "연결됐습니다"가 한 화면에 같이 떴다.
+  if (res?.ok && envConfirms(what, res.env)) {
     renderEnv(res.env)
     hintEl.textContent = what === 'figma' ? 'Figma가 연결됐습니다' : 'Claude에 로그인했습니다'
     return
@@ -3807,8 +3833,9 @@ async function startLogin(what) {
     envMsgEl.textContent = `터미널에서 직접 실행하세요: ${res.manual}`
     return
   }
-  renderEnv(res?.env)
-  if (res?.timeout) {
+  renderEnv(res?.env ?? lastEnv)
+  // `ok`인데 env가 확인해 주지 않은 경우도 여기로 온다. 아직 안 끝난 것과 같게 말한다.
+  if (res?.timeout || res?.ok) {
     envEl.hidden = false
     envMsgEl.textContent += '  (아직 완료되지 않았습니다 — 끝났으면 "다시 확인")'
   }
