@@ -31,9 +31,37 @@ async function main() {
   const layout = await import(R('layout.js'))
   const room = await import(R('room.js'))
   const agentsMod = await import(R('agents.js'))
-  const { SPOTS, routeTo, setObstacles, isReachable } = layout
 
-  const agents = agentsMod.buildAgents()
+  // 기본 팀(10명)과 **정원을 꽉 채운 팀**을 따로 본다.
+  //
+  // 고용으로 자리가 늘어나면서, 기본 팀에서는 비어 있던 칸에 책상이 들어선다.
+  // 그 책상이 통로를 막으면 화면에서는 "그 사람만 안 움직인다"로만 나타난다.
+  // 정원까지 채운 배치도 길이 살아 있어야 자리를 늘린 것이 안전하다.
+  const full = Array.from({ length: agentsMod.SEAT_COUNT }, (_, seat) => ({ id: `seat-${seat}`, seat }))
+  const runs = [
+    { name: '기본 팀', agents: agentsMod.buildAgents() },
+    { name: `정원(${agentsMod.SEAT_COUNT}명)`, agents: agentsMod.buildAgents(full) },
+  ]
+
+  let total = 0
+  const problems = []
+  for (const run of runs) {
+    const found = audit(layout, room, run.agents)
+    total += found.count
+    for (const p of found.problems) problems.push(`[${run.name}] ${p}`)
+  }
+
+  if (problems.length) {
+    console.error(`동선 문제 ${problems.length}건:`)
+    for (const p of problems) console.error('  - ' + p)
+    process.exit(1)
+  }
+  console.log(`동선 검사 통과 (배치 ${runs.length}가지 · 지점 ${total}곳)`)
+}
+
+/** 배치 하나를 검사한다. 가구는 그 배치의 자리에서 다시 계산한다. */
+function audit(layout, room, agents) {
+  const { SPOTS, routeTo, setObstacles, isReachable } = layout
   const rects = room.propFootprints()
   for (const a of agents.values()) {
     rects.push(...room.workstationFootprint(a.desk.gx, a.desk.gy))
@@ -87,12 +115,7 @@ async function main() {
     }
   }
 
-  if (problems.length) {
-    console.error(`동선 문제 ${problems.length}건:`)
-    for (const p of problems) console.error('  - ' + p)
-    process.exit(1)
-  }
-  console.log(`동선 검사 통과 (지점 ${targets.length}곳)`)
+  return { problems, count: targets.length }
 }
 
 main().catch((err) => {

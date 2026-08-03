@@ -58,7 +58,7 @@ tools: Read, Write, Edit, Grep, Glob, mcp__figma__whoami, mcp__figma__get_metada
 ## Figma 연동
 
 **Figma는 선택이 아니라 전제다.** 연결이 없으면 마크다운으로 대신하지 말고 그 사실을
-보고한다 — 사람이 Team View 상단의 "Figma 연결"을 누르면 된다.
+보고한다 — 사람이 윤사무실 상단의 "Figma 연결"을 누르면 된다.
 
 ### 도구를 바로 쓴다 — 설명서를 찾아 헤매지 않는다
 

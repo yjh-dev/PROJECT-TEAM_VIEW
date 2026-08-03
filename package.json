@@ -27,7 +27,7 @@
   },
   "build": {
     "appId": "dev.yjh.teamview",
-    "productName": "Team View",
+    "productName": "윤사무실",
     "directories": {
       "output": "release"
     },
@@ -51,10 +51,10 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
-      "artifactName": "TeamView-Setup-${version}-${arch}.${ext}"
+      "artifactName": "YunOffice-Setup-${version}-${arch}.${ext}"
     },
     "portable": {
-      "artifactName": "TeamView-Portable-${version}-${arch}.${ext}"
+      "artifactName": "YunOffice-Portable-${version}-${arch}.${ext}"
     },
     "afterPack": "build/after-pack.js"
   },

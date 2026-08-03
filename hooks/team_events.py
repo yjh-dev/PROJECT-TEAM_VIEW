@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Claude Code 훅 → team-view 이벤트 기록기.
+"""Claude Code 훅 → 윤사무실 이벤트 기록기.
 
 훅 JSON을 stdin으로 받아 `<프로젝트>/.claude/team-events.jsonl`에 한 줄을 덧붙인다.
 인자로 어떤 훅에서 불렸는지 알려준다:  pre | post | subagent_stop | stop | session | prompt
@@ -28,7 +28,7 @@
 회사에 대해:
   앱 지시를 처리하는 주체는 `.claude/team-worker.json`에 클레임을 적는다. 두 가지가 있다.
 
-  1. **회사**(팀뷰 앱 자신 = 지금 방식): 앱이 대기열을 지켜보다가 `claude -p --continue`로
+  1. **회사**(윤사무실 앱 자신 = 지금 방식): 앱이 대기열을 지켜보다가 `claude -p --continue`로
      지시를 하나씩 실행한다. 클레임에 `mode: "poller"`를 적고 **타이머로 30초마다
      갱신한다.** 회사가 띄운 claude에는 `TEAMVIEW_POLLER`가 환경변수로 실려 오므로
      훅은 그 세션을 알아본다.
@@ -511,7 +511,7 @@ def main():
     if kind == "pre" and os.path.exists(cancel_flag):
         write_events(log_path, [{"type": "cancel", "agent": "lead", "detail": "사용자가 작업을 취소했습니다"}])
         why = (
-            "사용자가 Team View 앱에서 작업 취소를 눌렀습니다. "
+            "사용자가 윤사무실 앱에서 작업 취소를 눌렀습니다. "
             "지금 하던 일을 중단하고, 어디까지 했는지만 짧게 보고한 뒤 멈추세요. "
             "다른 도구를 쓰거나 작업을 이어가지 마세요."
         )
@@ -572,7 +572,7 @@ def main():
                 else:
                     lines.append(f"- {body}")
             reason = (
-                "Team View 앱에서 전달된 지시가 있습니다. 아래를 처리하세요.\n"
+                "윤사무실 앱에서 전달된 지시가 있습니다. 아래를 처리하세요.\n"
                 + "\n".join(lines)
             )
             if named:

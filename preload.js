@@ -9,6 +9,12 @@ contextBridge.exposeInMainWorld('teamView', {
   removeProject: (dir) => ipcRenderer.invoke('project:remove', dir),
   activateProject: (dir) => ipcRenderer.invoke('project:activate', dir),
   setupProject: (dir, parts) => ipcRenderer.invoke('project:setup', { dir, parts }),
+  // 팀원 고용·해고. 명단은 디스크(`.claude/agents/*.md`)가 진실이라 화면이 따로
+  // 들고 있지 않는다 — 바뀔 때마다 다시 물어본다.
+  listTeam: (dir) => ipcRenderer.invoke('team:list', { dir }),
+  hireAgent: (dir, id) => ipcRenderer.invoke('team:hire', { dir, id }),
+  createAgent: (dir, spec) => ipcRenderer.invoke('team:create', { dir, ...spec }),
+  fireAgent: (dir, id) => ipcRenderer.invoke('team:fire', { dir, id }),
   // 대화 보관 — 앱을 껐다 켜도 프로젝트별로 남아 있다
   loadChat: (dir) => ipcRenderer.invoke('chat:load', dir),
   appendChat: (dir, msg) => ipcRenderer.invoke('chat:append', { dir, msg }),
@@ -18,6 +24,9 @@ contextBridge.exposeInMainWorld('teamView', {
   checkRequirements: () => ipcRenderer.invoke('env:requirements'),
   install: (key) => ipcRenderer.invoke('env:install', key),
   login: (what) => ipcRenderer.invoke('env:login', what),
+  // 계정 전환. 로그인은 "아직 안 붙은" 길, 전환은 "붙어 있는 걸 바꾸는" 길이라 따로 둔다
+  // (이미 로그인돼 있으면 `claude auth login`이 그냥 끝나서 계정을 못 바꿨다).
+  switchAccount: (what) => ipcRenderer.invoke('env:switch', { what }),
   onEnv: (cb) => ipcRenderer.on('env:status', (_e, env) => cb(env)),
   listProjects: () => ipcRenderer.invoke('project:list'),
   sendCommand: (payload) => ipcRenderer.invoke('command:send', payload),

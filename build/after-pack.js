@@ -34,6 +34,26 @@ function findRcedit() {
   return null
 }
 
+/**
+ * exe에 박힌 ProductName이 기대한 값과 같은가.
+ *
+ * 'MATCH' / 'DIFF:<읽은 값>'을 돌려준다. PowerShell을 못 부르면 null(모름).
+ * 판정만 문자열로 건너오므로 코드페이지와 무관하다.
+ */
+function readBackVerdict(exe, want) {
+  const ps =
+    "$v = (Get-Item -LiteralPath $env:TV_EXE).VersionInfo.ProductName;" +
+    " if ($v -eq $env:TV_WANT) { 'MATCH' } else { 'DIFF:' + $v }"
+  try {
+    return execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', ps], {
+      encoding: 'utf8',
+      env: { ...process.env, TV_EXE: exe, TV_WANT: want },
+    }).trim()
+  } catch {
+    return null
+  }
+}
+
 exports.default = async (context) => {
   if (context.electronPlatformName !== 'win32') return
 
@@ -78,11 +98,17 @@ exports.default = async (context) => {
   // 이 훅이 건너뛰어도 남는 것은 로그 한 줄짜리 경고뿐이라, 긴 빌드 출력에 묻히면
   // `ProductName: Electron`인 exe가 그대로 나간다(실제로 그렇게 나갔다). 값을 도로
   // 읽어 확인하고, 안 박혔으면 빌드를 세운다.
-  const got = execFileSync(rcedit, [exe, '--get-version-string', 'ProductName'], {
-    encoding: 'utf8',
-  }).trim()
-  if (got !== info.productName) {
-    throw new Error(`아이콘·버전 정보가 적용되지 않았습니다 (ProductName="${got}", 기대="${info.productName}")`)
+  //
+  // 다만 **rcedit의 `--get-version-string`으로 읽으면 안 된다.** 그 출력은 콘솔
+  // 코드페이지를 타서 ASCII가 아닌 글자가 `?`로 뭉개진다. 제품 이름이 한글이 되자
+  // exe에는 제대로 박혔는데도 `ProductName="????"`로 돌아와 빌드가 섰다(실측).
+  // 그래서 **값을 파이프로 건네지 말고 비교를 PowerShell 안에서 끝내고 판정만**
+  // 받는다 — 이름은 환경변수로 넘어가 유니코드 그대로 도착한다.
+  const verdict = readBackVerdict(exe, info.productName)
+  if (verdict === null) {
+    console.warn('  ⚠ 버전 정보를 되읽지 못했습니다 — 박혔는지 확인되지 않았습니다')
+  } else if (verdict !== 'MATCH') {
+    throw new Error(`아이콘·버전 정보가 적용되지 않았습니다 (${verdict}, 기대="${info.productName}")`)
   }
   console.log(`  ✓ 아이콘·버전 정보 적용 (${info.productName} ${info.version}) — 되읽어 확인함`)
 }
