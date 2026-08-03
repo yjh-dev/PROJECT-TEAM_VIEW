@@ -991,8 +991,11 @@ guide.includes('qa-tester') && guide.includes('마지막 관문')
 //   개인정보    email·orgName은 화면과 IPC 응답에만 쓴다. orgId는 아예 읽지 않는다
 //   전환        로그아웃하면 **돌고 있는 claude가 인증을 잃어 지시가 전부 실패한다** —
 //               처리 중이면 메인에서 거절해야 한다(화면만 믿으면 늦는다)
-//   반쯤 나간 상태  logout이 실패했는데 로그인 창을 띄우면 무엇이 참인지 알 수 없다.
-//               figma는 remove가 실패했는데 add하면 같은 이름이 두 번 등록된다
+//   반쯤 나간 상태  logout이 실패했는데 로그인 창을 띄우면 무엇이 참인지 알 수 없다
+//   figma 인증   **`mcp add`는 등록만 하고 끝난다 — 인증을 시작하지 않는다.** 실제로
+//               `Figma 연결`을 눌러도 "Added HTTP MCP server figma …" 두 줄만 찍히고
+//               아무 일도 안 일어났다. 브라우저를 여는 명령은 `mcp login`이다.
+//               그래서 **어떤 명령이 어떤 순서로 불리는가**를 여기서 못 박는다.
 async function accountChecks() {
   console.log('\n로그인 계정 표시·전환')
   const src = fs.readFileSync(path.join(ROOT, 'main.js'), 'utf8').replace(/\r\n/g, '\n')
@@ -1004,12 +1007,16 @@ async function accountChecks() {
 
   const E = loadFrom(
     'main.js',
-    ['parseAuthStatus', 'checkEnv', 'openAndWatch', 'runningCompanies', 'firstLine', 'switchAccount'],
+    ['parseAuthStatus', 'checkEnv', 'openAndWatch', 'runningCompanies', 'firstLine', 'figmaRegistered', 'connectFigma', 'switchAccount'],
     [
       "const path = require('path')",
       'let envCache = null',
       'const ENV_TTL_MS = 300000',
       constLine('NOT_FOUND'),
+      // 명령줄 자체가 검사 대상이다 — 여기서 다시 적으면 main.js와 어긋나도 모른다.
+      constLine('FIGMA_URL'),
+      constLine('FIGMA_ADD'),
+      constLine('FIGMA_LOGIN'),
       // 감시는 실제로 30초씩 기다린다. 검사에서는 흐름만 보면 되므로 짧게 줄인다.
       'const WATCH_EVERY_MS = 1',
       'const WATCH_TRIES = 2',
@@ -1165,21 +1172,103 @@ async function accountChecks() {
     eq('노는 회사만 있으면 막지 않는다', res.busy, 'undefined')
   }
 
-  // (8) figma — remove가 실패하면 add하지 않는다(같은 이름이 두 번 등록된다)
+  // (8) figma 첫 연결 — **등록(add)과 인증(login)은 다른 명령이다.**
+  //     `mcp add`만 부르면 등록만 되고 `! Needs authentication`에서 멈춘다. 실제로
+  //     이 상태로 나가서 "버튼을 눌러도 아무 일도 안 일어난다"가 됐다.
+  const ADD = 'mcp add -s user --transport http figma https://mcp.figma.com/mcp'
+  const CONNECTED = { out: 'figma: https://mcp.figma.com/mcp (HTTP) - ✔ Connected' }
+  const NOT_REGISTERED = { 'mcp get figma': { err: new Error('exit 1'), errOut: 'No MCP server named "figma".' } }
   {
-    reset({ 'mcp remove figma': { err: new Error('exit 1'), errOut: 'No MCP server found with name: figma' } })
-    const res = await E.switchAccount('figma')
-    eq('remove 실패는 실패로 돌려준다', res.ok, 'false')
-    eq('remove 실패면 add를 부르지 않는다', said('mcp add'), 'false')
-    eq('remove 실패면 창도 안 띄운다', said('창:'), 'false')
-    eq('왜 실패했는지 알려 준다', res.error.includes('No MCP server found'), 'true')
+    // 등록이 없을 때: add(조용히) → login(창). 사람이 마쳐야 하는 것은 login뿐이다.
+    reset({ ...NOT_REGISTERED, 'auth status': { out: JSON.stringify(LIVE) }, 'mcp list': CONNECTED })
+    const res = await E.connectFigma('윤사무실 - Figma 연결')
+    eq('등록이 없으면 add를 부른다', said(ADD), 'true')
+    eq('add 다음에 login을 부른다', said('창: mcp login figma'), 'true')
+    eq('add가 login보다 먼저다', global.__calls.indexOf(ADD) < global.__calls.indexOf('창: mcp login figma'), 'true')
+    eq('add는 창을 띄우지 않는다(사람 손이 필요 없다)', said('창: mcp add'), 'false')
+    eq('스코프는 user다(회사 폴더에서도 보여야 한다)', /-s user/.test(ADD) && said(ADD), 'true')
+    eq('인증까지 되면 성공으로 끝난다', res.ok, 'true')
 
-    reset({ 'auth status': { out: JSON.stringify(LIVE) }, 'mcp list': { out: 'figma: - ✔ Connected' } })
+    // 이미 등록돼 있으면 add를 **다시 부르지 않는다.** 같은 이름이 있으면 exit 1로
+    // 실패한다(실측: "MCP server figma already exists in user config").
+    reset({ 'auth status': { out: JSON.stringify(LIVE) }, 'mcp list': CONNECTED })
+    await E.connectFigma('윤사무실 - Figma 연결')
+    eq('이미 등록돼 있으면 add를 안 부른다', said('mcp add'), 'false')
+    eq('등록돼 있어도 login은 부른다', said('창: mcp login figma'), 'true')
+
+    // add가 실패하면 인증 창을 띄우지 않는다 — 등록도 안 된 채로 창만 뜨면 헛수고다.
+    reset({ ...NOT_REGISTERED, [ADD]: { err: new Error('exit 1'), errOut: '네트워크에 연결할 수 없습니다' } })
+    const bad2 = await E.connectFigma('윤사무실 - Figma 연결')
+    eq('add 실패는 실패로 돌려준다', bad2.ok, 'false')
+    eq('add 실패면 창을 안 띄운다', said('창:'), 'false')
+    eq('왜 실패했는지 알려 준다', bad2.error.includes('네트워크'), 'true')
+  }
+
+  // (8-b) figma 다시 연결 — logout → login.
+  //       등록 정보(~/.claude.json)와 OAuth 토큰(~/.claude/.credentials.json의 mcpOAuth)은
+  //       **다른 파일**에 산다. 그래서 remove/add로는 토큰이 안 지워져 같은 계정으로
+  //       도로 붙는다 — 계정을 바꾸려면 logout이어야 한다.
+  {
+    reset({ 'auth status': { out: JSON.stringify(LIVE) }, 'mcp list': CONNECTED })
     const good = await E.switchAccount('figma')
-    eq('remove가 성공하면 이어서 add한다', said('mcp add --transport http figma https://mcp.figma.com/mcp'), 'true')
-    eq('add는 새 창으로 띄운다', said('창: mcp add'), 'true')
-    eq('remove가 add보다 먼저다', global.__calls[0], 'mcp remove figma')
-    eq('연결되면 성공으로 끝난다', good.ok, 'true')
+    eq('logout이 먼저다', global.__calls.indexOf('mcp logout figma') < global.__calls.indexOf('창: mcp login figma'), 'true')
+    eq('logout 뒤에 인증 창을 띄운다', said('창: mcp login figma'), 'true')
+    eq('등록은 건드리지 않는다(remove 금지)', said('mcp remove'), 'false')
+    eq('이미 등록돼 있으면 add도 안 부른다', said('mcp add'), 'false')
+    eq('다시 인증되면 성공으로 끝난다', good.ok, 'true')
+
+    // 앞 단계가 실패하면 다음을 실행하지 않는다 — 지난 계정이 남은 채 창만 뜨면
+    // 같은 계정으로 다시 붙고도 "바꿨다"고 믿게 된다.
+    reset({ 'mcp logout figma': { err: new Error('exit 1'), errOut: '자격증명을 지울 수 없습니다' } })
+    const bad3 = await E.switchAccount('figma')
+    eq('logout 실패는 실패로 돌려준다', bad3.ok, 'false')
+    eq('logout 실패면 login을 안 부른다', said('mcp login'), 'false')
+    eq('logout 실패면 창도 안 띄운다', said('창:'), 'false')
+    eq('왜 실패했는지 알려 준다', bad3.error.includes('자격증명'), 'true')
+
+    // 등록조차 없으면 지울 것도 없다 — logout을 건너뛰고 add → login.
+    reset({ ...NOT_REGISTERED, 'auth status': { out: JSON.stringify(LIVE) }, 'mcp list': CONNECTED })
+    await E.switchAccount('figma')
+    eq('등록이 없으면 logout을 건너뛴다', said('mcp logout'), 'false')
+    eq('등록이 없으면 add부터 한다', global.__calls.indexOf(ADD) < global.__calls.indexOf('창: mcp login figma'), 'true')
+  }
+
+  // (8-c) 창으로 띄우는 명령은 login뿐이다. add를 창으로 띄우면 예전 고장이 그대로
+  //       돌아온다(등록만 하고 프롬프트로 돌아가 3분 뒤 timeout).
+  {
+    eq('main.js가 mcp login을 쓴다', /'mcp',\s*'login',\s*'figma'/.test(src), 'true')
+    eq('main.js에 mcp remove figma가 더는 없다', /'mcp',\s*'remove',\s*'figma'/.test(src), 'false')
+    eq('창에 건네는 figma 인자는 FIGMA_LOGIN뿐이다', /openAndWatch\('figma',\s*FIGMA_LOGIN,/.test(src), 'true')
+    eq('env:login이 figma를 connectFigma로 보낸다', /if \(what === 'figma'\) return connectFigma\(/.test(src), 'true')
+    eq('switchAccount도 같은 함수를 쓴다', /connectFigma\('윤사무실 - Figma 다시 연결', \{ relogin: true \}\)/.test(src), 'true')
+  }
+
+  // (8-d) checkEnv는 **앱이 만든 `figma`만** 연결로 센다. 같은 목록에 claude.ai 커넥터
+  //       `claude.ai Figma`가 ✔ Connected로 떠 있어도 인정하면 안 된다 — 커넥터의 도구는
+  //       `mcp__claude_ai_Figma__*`로 붙는데 ux-designer는 `mcp__figma__*`만 허용한다.
+  //       인정해 버리면 배너는 초록인데 팀원은 "Figma가 연결되지 않았습니다"를 보고한다.
+  {
+    const LIST_CONNECTOR_ONLY =
+      'claude.ai Figma: https://mcp.figma.com/mcp - ✔ Connected\n' +
+      'claude.ai Canva: https://mcp.canva.com/mcp - ! Needs authentication\n'
+    reset({ 'auth status': { out: JSON.stringify(LIVE) }, 'mcp list': { out: LIST_CONNECTOR_ONLY } })
+    const only = await E.checkEnv({ force: true })
+    eq('claude.ai 커넥터만 있으면 연결로 세지 않는다', only.figma.connected, 'false')
+    eq('등록됨으로도 세지 않는다', only.figma.present, 'false')
+
+    reset({
+      'auth status': { out: JSON.stringify(LIVE) },
+      'mcp list': { out: LIST_CONNECTOR_ONLY + 'figma: https://mcp.figma.com/mcp (HTTP) - ! Needs authentication\n' },
+    })
+    const both = await E.checkEnv({ force: true })
+    eq('둘 다 있으면 앱 항목의 상태를 따른다', both.figma.connected, 'false')
+    eq('앱 항목이 있으면 등록됨이다', both.figma.present, 'true')
+
+    // ux-designer가 실제로 무엇을 부르는지가 이 판단의 근거다. 여기가 바뀌면 위 규칙도
+    // 다시 봐야 한다 — 그래서 같이 못 박는다.
+    const ux = fs.readFileSync(path.join(ROOT, 'templates/agents/ux-designer.md'), 'utf8')
+    eq('ux-designer는 mcp__figma__* 도구를 쓴다', /mcp__figma__whoami/.test(ux), 'true')
+    eq('claude.ai 커넥터 도구는 허용 목록에 없다', /mcp__claude_ai_Figma__/.test(ux), 'false')
   }
 
   // (9) claude — logout이 실패하면 로그인 창을 띄우지 않는다(반쯤 나간 상태 금지)
@@ -1306,17 +1395,16 @@ function terminalChecks() {
     return { rv, line: c ? c.args[1] : null, opts: c ? c.opts : null, count: spawned().length }
   }
 
-  const FIGMA = ['mcp', 'add', '--transport', 'http', 'figma', 'https://mcp.figma.com/mcp']
+  // 창으로 띄우는 figma 명령은 **인증(login)뿐이다.** 등록(`mcp add`)은 사람 손이 필요
+  // 없어 조용히 돌리고, 애초에 `add`는 인증을 시작하지도 않는다(그래서 창을 띄워 봐야
+  // 등록 문구 두 줄만 찍히고 프롬프트로 돌아갔다 — 이 고장의 본체다).
+  const FIGMA = ['mcp', 'login', 'figma']
 
-  // (1) 사용자가 실제로 눌렀던 그 버튼 — 인자에 `-`로 시작하는 것과 URL이 섞여 있다
+  // (1) 사용자가 실제로 눌렀던 그 버튼 — 제목에 `-`가 들어 있다(예전에 여기서 터졌다)
   {
     const r = lineOf(FIGMA, '윤사무실 - Figma 연결')
     eq('Figma 연결 창을 띄운다', r.rv, 'true')
-    eq(
-      'Figma 명령줄이 그대로다',
-      r.line,
-      'start "윤사무실 - Figma 연결" cmd /k claude mcp add --transport http figma https://mcp.figma.com/mcp',
-    )
+    eq('Figma 명령줄이 그대로다', r.line, 'start "윤사무실 - Figma 연결" cmd /k claude mcp login figma')
     // 이 셋이 이 고장의 본체다.
     eq('제목을 두 겹으로 감싸지 않는다', /\\"/.test(r.line), 'false')
     eq('libuv가 다시 인용하지 못하게 한다', r.opts.windowsVerbatimArguments, 'true')
@@ -1333,7 +1421,14 @@ function terminalChecks() {
     eq(
       'Figma 다시 연결(계정 전환)',
       lineOf(FIGMA, '윤사무실 - Figma 다시 연결').line,
-      'start "윤사무실 - Figma 다시 연결" cmd /k claude mcp add --transport http figma https://mcp.figma.com/mcp',
+      'start "윤사무실 - Figma 다시 연결" cmd /k claude mcp login figma',
+    )
+    // 등록 명령에는 `--transport` 같은 `-`로 시작하는 인자와 URL이 섞여 있다. 지금은
+    // 창으로 띄우지 않지만, 누가 다시 창으로 돌려도 명령줄이 깨지지는 않아야 한다.
+    eq(
+      'Figma 등록 명령줄(창으로 띄우지는 않는다)',
+      lineOf(['mcp', 'add', '-s', 'user', '--transport', 'http', 'figma', 'https://mcp.figma.com/mcp'], '윤사무실 - Figma 등록').line,
+      'start "윤사무실 - Figma 등록" cmd /k claude mcp add -s user --transport http figma https://mcp.figma.com/mcp',
     )
     eq(
       'Claude 계정 전환',

@@ -3504,7 +3504,7 @@ function connRows(env) {
       // Figma 쪽에는 계정 정보가 없다. 연결됐는지만 안다.
       who: '연결됨',
       sub: '',
-      title: 'Figma는 로그아웃이 없어, 연결을 지우고 다시 붙이는 방식으로 인증합니다',
+      title: '다른 Figma 계정으로 바꾸려면 — 지금 인증을 지우고 새 창에서 다시 인증합니다',
       act: switchAct('다시 연결', 'figma', blockWhy),
     })
   } else if (!c.loggedIn) {
@@ -3520,15 +3520,15 @@ function connRows(env) {
       act: null,
     })
   } else if (f.present) {
-    // **이미 등록돼 있는데 인증만 풀린 상태다.** 여기서 첫 연결(mcp add)을 부르면
-    // 같은 이름이 이미 있어 실패한다 — 지우고 다시 붙이는 길로 보내야 풀린다.
+    // **이미 등록돼 있는데 인증만 풀린 상태다.** 등록(`mcp add`)은 이미 끝났으니 남은
+    // 것은 인증뿐이다 — 지난 자격증명을 지우고 다시 인증하는 길로 보낸다.
     rows.push({
       key: 'figma',
       state: 'warn',
       name: 'Figma',
       who: '인증 필요',
       sub: '기획안·화면설계서는 Figma에 만듭니다',
-      title: 'Figma는 로그아웃이 없어, 연결을 지우고 다시 붙이는 방식으로 인증합니다',
+      title: '등록은 돼 있고 인증만 남았습니다 — 새 창에서 브라우저 인증을 마치면 됩니다',
       act: switchAct('다시 연결', 'figma', blockWhy),
     })
   } else {
@@ -3735,9 +3735,9 @@ async function switchAccount(what) {
 function switchPrompt(what, email) {
   if (what === 'figma') {
     return (
-      'Figma 연결을 다시 만듭니다.\n\n' +
-      '· Figma는 로그아웃이 없어, 지금 연결을 지우고 다시 붙이는 방식으로 인증합니다.\n' +
-      '· 새 창이 열립니다 — 거기서 인증을 마쳐야 끝납니다.\n' +
+      'Figma를 다시 인증합니다.\n\n' +
+      '· 지금 저장된 Figma 인증을 지우고 새로 인증합니다(등록은 그대로 둡니다).\n' +
+      '· 새 창이 열립니다 — 거기서 브라우저 인증을 마쳐야 끝납니다.\n' +
       '· 돌고 있는 작업이 있으면 인증을 잃어 실패합니다.'
     )
   }

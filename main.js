@@ -420,6 +420,12 @@ async function checkEnv({ force = false } = {}) {
   // 로그인도 안 된 상태에서 MCP를 물어봐야 의미가 없다(느리기만 하다).
   if (value.claude.loggedIn) {
     const mcp = await runClaude(['mcp', 'list'])
+    // **이름이 정확히 `figma`인 줄만 센다.** 같은 목록에 `claude.ai Figma`(claude.ai 계정에
+    // 붙은 커넥터)가 이미 `✔ Connected`로 떠 있을 수 있지만, 그것을 "연결됨"으로 쳐 주면
+    // 안 된다 — claude.ai 커넥터는 도구 이름이 `mcp__claude_ai_Figma__*`로 붙는데(실측:
+    // 지난 세션 기록에 `mcp__claude_ai_Gmail__*`·`mcp__claude_ai_Google_Drive__*`가 그대로
+    // 남아 있다), 화면설계를 맡는 ux-designer의 `tools:`는 `mcp__figma__*`만 허용한다.
+    // 커넥터를 인정하면 배너는 초록인데 팀원은 "Figma가 연결되지 않았습니다"라고 보고한다.
     const line = (mcp.out + mcp.errOut).split(/\r?\n/).find((l) => /^\s*figma\s*:/i.test(l))
     value.figma.present = Boolean(line)
     value.figma.connected = Boolean(line && /connected/i.test(line) && !/needs auth/i.test(line))
@@ -520,6 +526,74 @@ function firstLine(text) {
   return String(text ?? '').trim().split(/\r?\n/)[0].slice(0, 200)
 }
 
+// ── Figma 연결 ─────────────────────────────────────────────────────────────
+//
+// **`claude mcp add`는 등록만 하고 그 자리에서 끝난다. 인증을 시작하지 않는다.**
+// 실측: `Figma 연결`을 누르면 창에 두 줄만 찍히고 프롬프트로 돌아왔다 —
+//   Added HTTP MCP server figma with URL: https://mcp.figma.com/mcp to local config
+//   File modified: C:\Users\...\.claude.json [project: ...]
+// 그리고 `claude mcp list`는 계속 `figma: ... - ! Needs authentication`이었다. 앱은
+// 3분을 기다리다 timeout으로 끝났고, 사용자는 "아무 일도 안 일어난다"를 봤다.
+// 브라우저 OAuth를 여는 명령은 따로 있다 — `claude mcp login <name>`.
+//
+// 그래서 둘로 나눈다.
+//  · `add`는 사람 손이 필요 없다 → 조용히(runClaude) 돌린다. 창을 띄울 이유가 없다.
+//  · `login`만 창으로 띄운다. `mcp login`은 **stdin이 터미널이어야** 한다(실측:
+//    "stdin isn't a terminal, so authentication can't be completed here").
+//
+// 스코프는 `-s user`다. 기본값 `local`은 **폴더마다 따로** 저장된다
+// (`~/.claude.json`의 `projects[cwd].mcpServers`). 앱은 자기 폴더에서 등록하는데 팀원은
+// 회사 폴더를 cwd로 돌아서(아래 spawn의 `cwd: dir`) 그 등록을 못 봤다 — 실측으로
+// `.claude.json`에 서로 다른 프로젝트 3곳에 `figma`가 따로 박혀 있었다. user 스코프는
+// 어느 폴더에서 물어도 보인다.
+const FIGMA_URL = 'https://mcp.figma.com/mcp'
+const FIGMA_ADD = ['mcp', 'add', '-s', 'user', '--transport', 'http', 'figma', FIGMA_URL]
+const FIGMA_LOGIN = ['mcp', 'login', 'figma']
+
+/**
+ * 등록돼 있는가. `claude mcp get`은 있으면 0, 없으면 1로 끝난다(실측).
+ * `mcp list`와 달리 로그인 여부와 무관하게 답하므로 등록 판정은 이쪽이 정확하다.
+ */
+async function figmaRegistered() {
+  const r = await runClaude(['mcp', 'get', 'figma'])
+  return !r.err
+}
+
+/**
+ * Figma를 잇는다. 첫 연결(env:login)과 다시 연결(env:switch)이 같이 쓴다.
+ *
+ * `relogin`이면 먼저 **자격증명을 지운다.** 등록 정보(`~/.claude.json`)와 OAuth 토큰
+ * (`~/.claude/.credentials.json`의 `mcpOAuth["figma|<url 해시>"]`)은 **서로 다른 파일**에
+ * 산다 — 실측으로 확인했다. 그래서 예전처럼 `remove` → `add`를 해도 토큰은 그대로 남아
+ * 같은 계정으로 도로 붙는다. 계정을 바꾸려면 `mcp logout`이 맞다. 등록은 건드리지 않아
+ * "지웠는데 못 붙인" 반쯤 나간 상태도 안 생긴다.
+ *
+ * 이미 등록돼 있으면 `add`를 **부르지 않는다.** 같은 이름이 있으면 exit 1로 실패한다
+ * (실측: "MCP server figma already exists in user config").
+ */
+async function connectFigma(title, { relogin = false } = {}) {
+  const registered = await figmaRegistered()
+
+  if (relogin && registered) {
+    const out = await runClaude(['mcp', 'logout', 'figma'])
+    // 앞 단계가 실패하면 다음을 실행하지 않는다 — 지난 계정이 남은 채로 창만 띄우면
+    // 사용자는 같은 계정으로 다시 붙고도 "바꿨다"고 믿는다.
+    if (out.err) {
+      return { ok: false, error: `Figma 인증을 지우지 못했습니다 — ${firstLine(out.errOut || out.out) || '알 수 없는 오류'}` }
+    }
+  }
+
+  if (!registered) {
+    const add = await runClaude(FIGMA_ADD)
+    if (add.err) {
+      return { ok: false, error: `Figma를 등록하지 못했습니다 — ${firstLine(add.errOut || add.out) || '알 수 없는 오류'}` }
+    }
+  }
+
+  envCache = null // 방금 바꿔 놓고 캐시된 지난 판정을 돌려주면 안 된다
+  return openAndWatch('figma', FIGMA_LOGIN, title)
+}
+
 /**
  * 계정을 **바꾼다**. 로그인과 다르다 — 이미 로그인돼 있으면 `claude auth login`은
  * "이미 로그인됨"으로 끝나서 다른 계정으로 갈 수가 없었다. 먼저 나가야 한다.
@@ -537,14 +611,9 @@ async function switchAccount(what) {
   }
 
   if (what === 'figma') {
-    // Figma는 로그아웃이 없다. 지우고 다시 붙이는 것이 재인증 경로다.
-    // **지우기가 실패하면 붙이지 않는다** — 같은 이름이 두 번 등록될 수 있다.
-    const rm = await runClaude(['mcp', 'remove', 'figma'])
-    if (rm.err) {
-      return { ok: false, error: `Figma 연결을 지우지 못했습니다 — ${firstLine(rm.errOut || rm.out) || '알 수 없는 오류'}` }
-    }
-    envCache = null // 방금 바꿔 놓고 캐시된 "연결됨"을 돌려주면 안 된다
-    return openAndWatch('figma', ['mcp', 'add', '--transport', 'http', 'figma', 'https://mcp.figma.com/mcp'], '윤사무실 - Figma 다시 연결')
+    // 다시 연결 = 지난 자격증명을 지우고(logout) 다시 인증한다(login). 왜 remove/add가
+    // 아닌지는 connectFigma 주석에 있다 — 토큰이 등록 정보와 다른 파일에 산다.
+    return connectFigma('윤사무실 - Figma 다시 연결', { relogin: true })
   }
 
   // 로그아웃은 사람 손이 필요 없다 — 조용히 끝내고 로그인 창만 띄운다.
@@ -2348,9 +2417,10 @@ ipcMain.handle('env:install', async (_e, key) => {
  * 마치는 동안 앱이 알아서 알아채야지, 다시 눌러 보라고 하면 안 된다.
  */
 ipcMain.handle('env:login', async (_e, what) => {
-  const args = what === 'figma' ? ['mcp', 'add', '--transport', 'http', 'figma', 'https://mcp.figma.com/mcp'] : ['auth', 'login']
-  const title = what === 'figma' ? '윤사무실 - Figma 연결' : '윤사무실 - Claude 로그인'
-  return openAndWatch(what, args, title)
+  // Figma는 등록(add)과 인증(login)이 별개 명령이다 — connectFigma가 순서를 쥔다.
+  // 사람이 브라우저에서 마쳐야 하는 것은 `login`뿐이라 창도 그때만 뜬다.
+  if (what === 'figma') return connectFigma('윤사무실 - Figma 연결')
+  return openAndWatch(what, ['auth', 'login'], '윤사무실 - Claude 로그인')
 })
 
 /**
