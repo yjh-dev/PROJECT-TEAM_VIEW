@@ -57,6 +57,18 @@ app.whenReady().then(async () => {
   await win.loadFile(path.join(RENDERER, 'index.html'))
   await new Promise((r) => setTimeout(r, 2600)) // 상태 반영·첫 렌더 대기
 
+  // 열어야 보이는 화면은 **실제로 눌러서** 연다. 스텁이 상태를 꽂아 주는 방식으로는
+  // 여는 길 자체(버튼 → 팝오버 위치·hidden 해제)가 검사에서 빠진다.
+  if (S.startsWith('team')) {
+    await win.webContents.executeJavaScript(OPEN_TEAM)
+    await new Promise((r) => setTimeout(r, 900)) // 명단을 읽어 목록을 그릴 때까지
+  }
+  // 연결(로그인 계정)은 ☰ 안에 있다. 열지 않으면 그 줄은 검사에서 통째로 빠진다.
+  if (S.startsWith('acct')) {
+    await win.webContents.executeJavaScript(OPEN_MENU)
+    await new Promise((r) => setTimeout(r, 600))
+  }
+
   let out
   try {
     out = await win.webContents.executeJavaScript(SCRIPT)
@@ -73,6 +85,23 @@ app.whenReady().then(async () => {
   console.log(JSON.stringify({ 시나리오: S, 창: `${W}x${H}`, ...out }))
   app.quit()
 })
+
+// ☰ → [팀원 관리] → [+ 직접 만들기]까지 눌러 둔다. 만들기 폼은 막혀 있으면
+// (처리 중·자리 없음) 열리지 않는 것이 정상이라 눌러 보기만 한다.
+// ☰만 연다. 팀원 패널은 열지 않는다 — 그쪽을 열면 ☰가 자리를 내주며 닫혀서
+// 연결 줄이 화면에서 사라진다.
+const OPEN_MENU = `(() => {
+  document.getElementById('menu').click()
+  return true
+})()`
+
+const OPEN_TEAM = `(() => {
+  document.getElementById('menu').click()
+  document.getElementById('team-manage').click()
+  const nw = document.getElementById('team-new')
+  if (nw && !nw.disabled) nw.click()
+  return true
+})()`
 
 // 페이지 안에서 도는 검사. 문자열이라 여기 백틱을 쓰면 안 된다(한 번 깨뜨렸다).
 const SCRIPT = `(() => {

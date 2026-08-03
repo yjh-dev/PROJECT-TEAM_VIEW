@@ -5,7 +5,7 @@
 // **화면의 움직임은 전부 실제 이벤트에서 나온다.** 가짜 활동은 만들지 않는다.
 
 import { POSES, drawSprite } from './sprites.js'
-import { ROSTER, buildAgents, agentOrCreate, LEAD_ID } from './agents.js'
+import { buildAgents, applyTeam, agentOrCreate, labelOf, LEAD_ID, PRESET_SEATS, SEAT_COUNT } from './agents.js'
 import { STAGE_W, STAGE_H, toScreen, depth, drawShadow } from './iso.js'
 import {
   drawFloor,
@@ -22,7 +22,15 @@ import {
   propFootprints,
   workstationFootprint,
 } from './room.js'
-import { routeTo, interiorWallSegments, DOORWAYS, SPOTS, setObstacles } from './layout.js'
+import {
+  routeTo,
+  interiorWallSegments,
+  DOORWAYS,
+  SPOTS,
+  setObstacles,
+  DOOR_LOUNGE_GX,
+  WALL_LOUNGE_Y,
+} from './layout.js'
 
 const canvas = document.getElementById('stage')
 const ctx = canvas.getContext('2d')
@@ -126,7 +134,8 @@ function refreshObstacles() {
   for (const a of agents.values()) rects.push(...workstationFootprint(a.desk.gx, a.desk.gy))
   setObstacles(rects)
   // 이미 잡아 둔 길은 옛 지도 기준이다. 다음 프레임에 다시 짜게 지운다.
-  for (const a of agents.values()) {
+  // 나가는 중인 사람도 같이 — 자기 책상이 사라진 지도를 들고 걷고 있다.
+  for (const a of onStage()) {
     a.goal = null
     a.path = null
   }
@@ -148,6 +157,17 @@ let lastFrame = performance.now()
 const nodes = new Map()
 const lastChatAt = new Map() // 도구 이벤트가 채팅을 도배하지 않도록
 
+// 해고돼서 **문으로 걸어 나가는 중**인 사람들. 명단(agents)에서는 이미 빠졌지만
+// 화면에서는 아직 걷고 있다. 팝 하고 사라지면 무슨 일이 일어났는지 알 수 없다.
+const leaving = new Map()
+
+/** 지금 화면에 그려야 할 사람 전부(명단 + 나가는 중). */
+const onStage = () => (leaving.size ? [...agents.values(), ...leaving.values()] : [...agents.values()])
+
+// 사무실 출입문. 고용된 사람이 들어오고 해고된 사람이 나가는 자리다.
+// 좌표를 여기 적지 않고 도면(layout.js)에서 가져온다 — 두 군데 적으면 어긋난다.
+const DOOR = { gx: DOOR_LOUNGE_GX, gy: WALL_LOUNGE_Y }
+
 // ---------- 여러 프로젝트 ----------
 //
 // 회사는 최대 3개가 동시에 돌지만 **사무실은 한 번에 하나만 그린다.** 셋을 나란히
@@ -161,6 +181,9 @@ const lastChatAt = new Map() // 도구 이벤트가 채팅을 도배하지 않�
 
 let activeDir = null
 let lastProjects = [] // 마지막으로 받은 프로젝트 상태(세팅 버튼이 참조한다)
+// 프로젝트별 팀 명단 [{ id, scope, seat }]. **탭을 옮길 때 그 회사의 명단으로**
+// 사무실을 세우려면 들고 있어야 한다 — 명단은 프로젝트마다 다르다.
+const teamByDir = new Map()
 // 메인의 CHAT_KEEP과 같은 값. 한 시간짜리 작업의 앞부분도 볼 수 있어야 한다.
 const CHAT_KEEP = 1000
 
@@ -544,13 +567,43 @@ function beginWork(agent, now) {
   agent.toolCount = 0
 }
 
+// 지난 기록에만 남아 있는 이름을 담아 두는 곳. 명단에 없으므로 **화면에는 그리지
+// 않지만**, 이벤트 처리는 그대로 돌려야 결과물·집계가 맞는다.
+const ghosts = new Map()
+
+/**
+ * 이 이벤트의 주인공. 명단에 없으면 새로 만들어 앉히지만, **다시 읽는 기록이면
+ * 만들지 않는다.**
+ *
+ * 해고한 팀원은 파일에서 사라져도 로그에는 그대로 남아 있다. 탭을 옮길 때마다
+ * 그 기록이 통째로 재생되므로, 여기서 걸러 내지 않으면 **해고한 사람이 자리를 잡고
+ * 되살아난다.** 지금 없는 사람을 그리는 것은 이 앱이 하지 않기로 한 일이다.
+ * 반대로 실시간 이벤트는 그대로 만든다 — 진짜 일하고 있는 사람을 숨기면 안 된다.
+ */
+function actorFor(ev) {
+  const id = ev.agent || LEAD_ID
+  if (!ev._replay || agents.has(id)) {
+    const known = agents.size
+    const a = agentOrCreate(agents, id)
+    // 명단에 없던 팀원이면 자리(책상·파티션)가 새로 생긴다 — 통행 격자를 다시 만든다
+    if (agents.size !== known) refreshObstacles()
+    return a
+  }
+  if (!ghosts.has(id)) ghosts.set(id, agentOrCreate(new Map(), id))
+  return ghosts.get(id)
+}
+
 function applyEvent(ev) {
   collectOutput(ev) // 결과물 패널은 지난 기록에서도 쌓는다 — 켤 때마다 다시 세워야 한다
   const now = performance.now()
-  const known = agents.size
-  const agent = agentOrCreate(agents, ev.agent || LEAD_ID)
-  // 명단에 없던 팀원이면 자리(책상·파티션)가 새로 생긴다 — 통행 격자를 다시 만든다
-  if (agents.size !== known) refreshObstacles()
+  // 인사 이벤트는 **일이 아니다.** 캐릭터를 만들지도, 작업 배지를 붙이지도 않는다.
+  // 들어오고 나가는 연출은 명단(projects:status의 team)이 바뀔 때 한다 —
+  // 그래야 앱에서 누른 경우와 밖에서 파일을 고친 경우가 같게 보인다.
+  if (ev.type === 'hire' || ev.type === 'fire') {
+    applyHireFire(ev)
+    return
+  }
+  const agent = actorFor(ev)
 
   const history = isHistory(ev)
 
@@ -661,6 +714,136 @@ function applyEvent(ev) {
   // 그 팀원을 클릭하면 볼 수 있다(흐린 말풍선).
   agent.lastEventAt = history ? now - IDLE_LEAVE_MS - 1000 : now
   if (!ev._replay) chatFromEvent(ev, agent)
+}
+
+// ---------- 고용·해고 ----------
+//
+// 명단이 바뀌는 길은 둘이다: 이 앱의 [팀원 관리]와, 사람이 직접 `.claude/agents/`를
+// 고치는 것. **둘이 같게 보여야 한다** — 그래서 캐릭터가 들고 나는 연출은 명단
+// (projects:status의 team)이 바뀔 때 하고, 이벤트는 채팅 한 줄만 맡는다.
+
+// 방금 이 앱에서 처리한 인사. 같은 내용이 이벤트로 한 번 더 오므로 채팅에 두 줄이
+// 되는 것을 막는다(앱에서 누른 쪽이 경로까지 적어 주므로 그쪽을 남긴다).
+const selfActs = new Map()
+const SELF_ACT_MS = 15_000
+
+// 명단을 이미 세운 프로젝트. 첫 명단과 그 뒤의 변화를 가르는 표시다.
+let teamAppliedFor = null
+
+function notedSelf(type, id) {
+  selfActs.set(`${type}:${id}`, Date.now())
+}
+
+function wasSelf(type, id) {
+  const at = selfActs.get(`${type}:${id}`)
+  return at != null && Date.now() - at < SELF_ACT_MS
+}
+
+/** 해고된 사람에게 보낸 대기 지시를 걷는다. 받을 사람이 없는 지시가 남으면 안 된다. */
+function dropQueuedFor(id) {
+  let n = 0
+  for (let i = queuedFor.length - 1; i >= 0; i--) {
+    if (queuedFor[i].id !== id) continue
+    queuedFor.splice(i, 1)
+    n++
+  }
+  const a = agents.get(id)
+  if (a) a.queued = 0
+  return n
+}
+
+function applyHireFire(ev) {
+  const id = ev.agent
+  if (!id) return
+  if (ev.type === 'fire') dropQueuedFor(id)
+  // 지난 기록을 다시 읽는 중이면 채팅에 또 쓰지 않는다(켤 때마다 쌓인다)
+  if (ev._replay || wasSelf(ev.type, id)) return
+  addMsg(
+    'sys',
+    '',
+    ev.type === 'hire'
+      ? `— ${nameWithId(id)} 합류 — 다음 지시부터 함께 일합니다 —`
+      : `— ${nameWithId(id)} 해고 — 이 사람 앞으로 온 대기 지시는 리드가 받습니다 —`,
+  )
+}
+
+/** 고용된 사람이 문으로 들어와 제 자리로 걸어간다. 자리에서 솟아나면 안 된다. */
+function enterFromDoor(a, now) {
+  a.gx = DOOR.gx
+  a.gy = DOOR.gy
+  a.pose = 'walk'
+  a.seat = null
+  a.goal = null
+  a.path = null
+  // **작업 배지는 붙이지 않는다** — 들어온 것은 일이 아니다. 배지(meta)는 active일
+  // 때만 나오므로, 말풍선만 잠깐 띄우는 이 방법이 그 규칙을 그대로 지킨다.
+  a.task = '오늘부터 함께합니다'
+  a.lastEventAt = now
+}
+
+/** 해고된 사람이 자리에서 일어나 문으로 걸어 나간다. 팝 하고 사라지면 안 된다. */
+function leaveThroughDoor(a, now) {
+  a.active = false
+  a.working = false
+  a.queued = 0
+  a.task = null
+  a.act = null
+  a.goal = null
+  a.path = null
+  a.plan = { kind: 'leave', dest: DOOR, until: now + 30_000, bubble: '그동안 감사했습니다' }
+  leaving.set(a.id, a)
+}
+
+/** 나가는 사람을 화면에서 지운다. 이름표·말풍선도 같이 걷는다. */
+function removeFromStage(a) {
+  leaving.delete(a.id)
+  const n = nodes.get(a.id)
+  if (n) {
+    n.tag.remove()
+    n.bubble.remove()
+    nodes.delete(a.id)
+  }
+  if (target === a.id) {
+    // 없는 사람에게 지시를 보내고 있으면 안 된다.
+    target = 'all'
+    renderTargets()
+  }
+}
+
+/**
+ * 새 명단을 화면에 반영한다. **있는 사람은 객체를 살려 둔다** — 통째로 다시
+ * 만들면 걸어가던 애니메이션도 말풍선도 대기 배지도 다 날아간다.
+ */
+function syncTeam(list) {
+  if (!Array.isArray(list)) return
+  const now = performance.now()
+
+  // **처음 받은 명단은 인사가 아니다.** 앱은 명단을 알기 전까지 기본 팀을 세워 두는데,
+  // 그것과 실제 명단의 차이를 고용·해고로 연출하면 켜자마자 없던 사람이 문으로
+  // 걸어 나간다(실측: 켤 때마다 모바일·디버거가 퇴사했다). 그 회사의 첫 명단은
+  // 그냥 그 회사의 모습이다 — 통째로 세우고 연출하지 않는다.
+  if (teamAppliedFor !== activeDir) {
+    teamAppliedFor = activeDir
+    agents = buildAgents(list)
+    leaving.clear()
+    nodes.clear()
+    overlay.replaceChildren()
+    refreshObstacles()
+    renderTargets()
+    refreshTeam()
+    return
+  }
+
+  const { added, removed } = applyTeam(agents, list)
+  if (!added.length && !removed.length) return
+  for (const a of added) enterFromDoor(a, now)
+  for (const a of removed) {
+    dropQueuedFor(a.id)
+    leaveThroughDoor(a, now)
+  }
+  refreshObstacles() // 책상이 생기고 사라졌다 — 통행 격자를 다시 만든다
+  renderTargets()
+  refreshTeam() // 요약 줄(팀원 N명 · 자리 M칸)과 열려 있는 목록도 따라간다
 }
 
 // ---------- 결과물 ----------
@@ -1079,12 +1262,16 @@ function renderTargets() {
   // 말한 적 있는 사람과 지금 고른 사람만 두고, 나머지는 접는다.
   // 누구의 줄인지는 `agent`(id)에 있다. `who`는 "리드 · 답변"처럼 꾸며진 이름이라
   // 그대로 맞춰 보면 아무도 못 찾는다 — 실측에서 열한 명이 전부 접혔다.
+  //
+  // 명단은 **지금 회사에 있는 사람**이다. 고정 표(ROSTER)를 쓰면 해고한 사람이
+  // 칩으로 남고, 새로 고용한 사람은 칩이 없어 고를 수 없다.
   const log = logFor(activeDir)
   const spoke = new Set(log.map((m) => m.agent).filter(Boolean))
   const named = (r) => log.some((m) => String(m.who ?? '').startsWith(r.label))
-  const shown = ROSTER.filter((r) => spoke.has(r.id) || named(r) || target === r.id)
+  const roster = [...agents.values()]
+  const shown = roster.filter((r) => spoke.has(r.id) || named(r) || target === r.id)
   chipIds = new Set(shown.map((r) => r.id))
-  const rest = ROSTER.filter((r) => !shown.includes(r))
+  const rest = roster.filter((r) => !shown.includes(r))
   for (const r of shown) mk(r.id, r.label, r.shirt)
   if (rest.length && !targetsOpen) {
     const more = mk('__more', `+${rest.length}`, null)
@@ -1314,7 +1501,8 @@ function update(dt, now) {
   sweepStaleQueued()
   scheduleIdle(now)
 
-  for (const a of agents.values()) {
+  // 나가는 중인 사람도 함께 움직인다. 명단에서는 이미 빠졌지만 아직 걷고 있다.
+  for (const a of onStage()) {
     // **일하는 중인지는 이벤트 간격이 아니라 상태로 판단한다.**
     //
     // 예전에는 "마지막 이벤트 + 2.6초" 안에 있어야 일하는 중이었다. 그런데 긴 답을
@@ -1324,7 +1512,13 @@ function update(dt, now) {
     // 이벤트가 없지만 첫 도구에서 active가 되고 세션이 쉬면 풀린다.
     const working = a.active
     a.working = working
-    if (a.plan && (now >= a.plan.until || working)) a.plan = null
+    // 나가는 사람의 계획은 지우지 않는다 — 그 계획이 문까지 가는 길이다.
+    // 다만 길이 막혀 시간이 다 되면 그때는 그냥 내보낸다(영원히 서 있지 않게).
+    if (a.plan?.kind === 'leave') {
+      if (now >= a.plan.until) removeFromStage(a)
+    } else if (a.plan && (now >= a.plan.until || working)) {
+      a.plan = null
+    }
 
     // 일이 없으면 rest(=자기 의자)로 돌아간다. 유휴 행동이 있을 때만 자리를 뜬다.
     const goal = working ? a.work : a.plan ? a.plan.dest : a.rest
@@ -1351,7 +1545,10 @@ function update(dt, now) {
     // 목적지 도착 판정 — 커피는 한 잔 늘고, 분리수거는 쌓인 컵을 비운다.
     if (dist <= 0.25 && a.plan && !a.plan.done && a.path.length === 1) {
       a.plan.done = true
-      if (a.plan.kind === 'coffee') {
+      if (a.plan.kind === 'leave') {
+        removeFromStage(a) // 문에 닿았다 — 여기서 화면을 떠난다
+        continue
+      } else if (a.plan.kind === 'coffee') {
         a.cups = Math.min(MAX_CUPS, a.cups + 1)
         a.plan.bubble = a.cups >= MAX_CUPS ? '책상에 컵이 너무 많네…' : '한 잔 받았습니다'
       } else if (a.plan.kind === 'trash') {
@@ -1460,7 +1657,7 @@ function syncOverlay(now) {
 
   // 1단계 — 내용과 기준 위치를 채운다. 위치 보정은 크기를 잰 뒤에 한다.
   const items = []
-  for (const a of agents.values()) {
+  for (const a of onStage()) {
     const { tag, bubble } = nodesFor(a)
     const { x, y } = toScreen(a.gx, a.gy)
 
@@ -1616,6 +1813,8 @@ function draw(t) {
     // 팔걸이는 앉은 캐릭터 **앞**에 그려야 팔을 걸친 것처럼 보인다
     items.push({ kind: 'arms', d: depth(a.chair.gx, a.chair.gy), a })
   }
+  // 나가는 사람은 **사람만** 그린다. 자리는 이미 비었으므로 책상·의자는 없다.
+  for (const a of leaving.values()) items.push({ kind: 'agent', d: depth(a.gx, a.gy), a })
   for (const p of PROPS) items.push({ kind: 'prop', d: depth(p.gx, p.gy), p })
   items.sort((p, q) => p.d - q.d || RANK[p.kind] - RANK[q.kind])
 
@@ -1747,7 +1946,11 @@ on('onReset', ({ dir } = {}) => {
   if (dir) activeDir = dir
   restoreChat(dir) // 지난 대화를 되살린다(프로젝트당 한 번)
   queuedFor.length = 0
-  agents = buildAgents()
+  // **그 프로젝트의 명단으로** 세운다. 프로젝트마다 팀원이 다르므로 기본 팀으로
+  // 세우면 탭을 옮기는 순간 해고한 사람이 잠깐 되살아난다.
+  agents = buildAgents(teamByDir.get(dir))
+  leaving.clear()
+  ghosts.clear()
   refreshObstacles()
   nodes.clear()
   overlay.replaceChildren()
@@ -1790,12 +1993,6 @@ const USAGE_ROWS = [
   ['cacheWrite', '캐시 기록', '다음에 다시 쓰려고 저장한 양'],
   ['cacheRead', '캐시 읽기', '저장해 둔 것을 재사용한 양 — 새로 보낸 것이 아닙니다'],
 ]
-
-const AGENT_LABEL = {
-  lead: '리드', planner: '기획', 'ux-designer': '디자인', 'frontend-dev': '프론트',
-  'backend-dev': '백엔드', 'mobile-dev': '모바일', 'code-reviewer': '리뷰',
-  'qa-tester': 'QA', debugger: '디버거', 'release-manager': '릴리스', scout: '조사',
-}
 
 let lastUsage = null
 
@@ -1845,7 +2042,7 @@ function fillUsage() {
       if (!a.output) continue
       const tr = document.createElement('tr')
       const n = document.createElement('td')
-      n.textContent = AGENT_LABEL[a.name] || a.name
+      n.textContent = labelFor(a.name)
       const v = document.createElement('td')
       v.className = 'num'
       v.textContent = fmtTokens(a.output)
@@ -1879,7 +2076,15 @@ function toggleMenu(show) {
   menuPop.hidden = !next
   menuBtn.setAttribute('aria-expanded', String(next))
   if (!next) return
+  // 둘이 겹치면 뒤에 있는 것을 읽을 수 없다. ☰를 열면 팀원 패널은 자리를 비운다
+  // (팀원 패널은 ☰ 안에서 열리므로 반대 방향은 서로를 부르는 길이다).
+  toggleTeamPop(false)
   fillUsage()
+  refreshTeam() // 요약 줄은 메뉴를 여는 순간이 가장 정확해야 한다
+  // 지난번에 띄운 소식(오류·시간 초과)을 다음에 열 때까지 들고 있지 않는다.
+  // 처리 중인지도 여는 순간이 가장 정확하다.
+  showConnMsg('')
+  renderConn(lastEnv)
   // 버튼 오른쪽 끝에 맞춰 아래로. 화면 밖으로 나가지 않게 민다.
   const r = menuBtn.getBoundingClientRect()
   menuPop.style.top = `${Math.round(r.bottom + 6)}px`
@@ -1911,7 +2116,418 @@ function refreshMenuDot() {
   menuBtn.title = need ? '설정·상태·기록 — 손볼 것이 있습니다' : '설정·상태·기록'
 }
 
-on('onStatus', ({ projects, activeDir: active, max, chatWidth, usage }) => {
+// ---------------------------------------------------------------------------
+// 팀원 관리 (고용·해고)
+//
+// 명단은 `.claude/agents/*.md` 파일 그 자체다. 고용은 정의를 그 폴더에 놓는 것이고
+// 해고는 **지우는 게 아니라 옮기는 것**이다 — 사람이 고쳐 둔 정의가 사라지면
+// 되살릴 수단이 없다. 그래서 해고는 물어보고, 고용은 묻지 않는다(되돌리기 쉽다).
+//
+// 조작은 전부 ☰ 안에서 한다. 상단 바와 사무실 화면은 "지금 누가 일하는지"를 보는
+// 자리라 인사 기능이 낄 곳이 아니다.
+
+const teamSumEl = document.getElementById('team-sum')
+const teamManageEl = document.getElementById('team-manage')
+const teamPop = document.getElementById('team-pop')
+const teamDirEl = document.getElementById('team-dir')
+const teamBusyEl = document.getElementById('team-busy')
+const teamNowEl = document.getElementById('team-now')
+const teamNowHeadEl = document.getElementById('team-now-h')
+const teamAvailEl = document.getElementById('team-avail')
+const teamAvailHeadEl = document.getElementById('team-avail-h')
+const teamNewBtn = document.getElementById('team-new')
+const teamFormEl = document.getElementById('team-form')
+
+// 해고한 정의를 보관하는 곳. **메인의 FIRED_DIRNAME과 같아야 한다** — 확인 창에
+// 어디로 옮기는지 적기 위해서만 쓴다(실제 경로는 처리한 뒤 응답에서 받아 적는다).
+const FIRED_DIR_HINT = '.claude/team-fired/'
+
+let teamInfo = null // 마지막으로 읽은 listTeam 결과
+let teamErr = '' // 명단을 못 읽었을 때의 이유
+let teamLoadedFor = null // 명단을 읽어 둔 프로젝트(같은 것을 300ms마다 다시 읽지 않게)
+let teamBusySeen = false // 마지막으로 그린 '처리 중' 상태
+
+/**
+ * 메인 통로를 부른다. **없는 통로여도 화면이 죽지 않는다** — preload가 앱보다 낡을 수
+ * 있고(설치본을 덮어쓰다 만 경우, 메인이 아직 그 통로를 안 만든 경우), 그때 예외가
+ * 나면 여기서 화면이 통째로 멈춘다.
+ */
+async function callBridge(name, ...args) {
+  const fn = window.teamView?.[name]
+  if (typeof fn !== 'function') {
+    return { ok: false, error: '이 기능은 앱을 다시 켠 뒤에 쓸 수 있습니다 (연결 통로가 없습니다)' }
+  }
+  try {
+    return (await fn(...args)) ?? { ok: false, error: '응답이 없습니다' }
+  } catch (err) {
+    return { ok: false, error: String(err?.message ?? err) }
+  }
+}
+
+/** 이름과 id를 같이 적는다. 이름이 곧 id면 한 번만. */
+function nameWithId(id) {
+  const label = labelFor(id)
+  return label === id ? id : `${label}(${id})`
+}
+
+async function refreshTeam() {
+  if (!activeDir) {
+    teamInfo = null
+    teamErr = ''
+    renderTeamUi()
+    return
+  }
+  const res = await callBridge('listTeam', activeDir)
+  teamInfo = res?.ok ? res : null
+  teamErr = res?.ok ? '' : (res?.error ?? '명단을 읽지 못했습니다')
+  renderTeamUi()
+}
+
+function renderTeamUi() {
+  renderTeamSummary()
+  renderWelcomeCount()
+  renderTeamPanel()
+}
+
+/**
+ * 첫 화면의 "팀원 N명". 손으로 적어 두면 명단이 바뀌는 지금은 금방 거짓말이 된다.
+ *
+ * 여기서 세는 것은 **세팅이 넣어 주는 기본 팀원 수**다. 카탈로그를 쓰지 않는 이유가
+ * 둘 있다: 이 안내는 프로젝트가 하나도 없을 때만 뜨므로 그때는 카탈로그가 아예 없고,
+ * 카탈로그에는 해고자와 그 프로젝트에서 직접 만든 팀원까지 섞여 있어 "새 폴더에
+ * 넣어 줄 사람 수"와 다르다(실측: 카탈로그 14 · 실제 템플릿 10).
+ */
+function renderWelcomeCount() {
+  document.getElementById('welcome-n').textContent = String(PRESET_SEATS.length)
+}
+
+/** 자리를 차지하는 사람들. 리드는 자기 자리가 따로라 여기 세지 않는다. */
+function seatedMembers() {
+  return (teamInfo?.members ?? []).filter((m) => m.id !== LEAD_ID)
+}
+
+function freeSeats() {
+  if (!teamInfo) return null
+  if (Number.isInteger(teamInfo.free)) return teamInfo.free
+  return Math.max(0, (teamInfo.capacity ?? SEAT_COUNT) - seatedMembers().length)
+}
+
+/** ☰ 안의 한 줄 요약. 여기까지가 평소에 보이는 전부다. */
+function renderTeamSummary() {
+  teamManageEl.disabled = !activeDir
+  if (!activeDir) {
+    teamSumEl.textContent = '프로젝트를 붙이면 팀원을 고용할 수 있습니다'
+    return
+  }
+  if (!teamInfo) {
+    teamSumEl.textContent = teamErr || '명단을 읽는 중…'
+    return
+  }
+  const free = freeSeats()
+  teamSumEl.textContent = `팀원 ${seatedMembers().length}명 · 자리 ${free}칸 남음`
+}
+
+/** 팝오버 위치 — ☰ 버튼 아래, 오른쪽 끝에 맞춰. 화면 밖으로 나가지 않게 민다. */
+function placeTeamPop() {
+  const r = menuBtn.getBoundingClientRect()
+  teamPop.style.top = `${Math.round(r.bottom + 6)}px`
+  const w = teamPop.offsetWidth || 400
+  teamPop.style.left = `${Math.round(Math.max(8, Math.min(r.right - w, window.innerWidth - w - 8)))}px`
+}
+
+function toggleTeamPop(show) {
+  const next = show ?? teamPop.hidden
+  teamPop.hidden = !next
+  teamManageEl.setAttribute('aria-expanded', String(next))
+  if (!next) return
+  placeTeamPop()
+  refreshTeam()
+}
+
+teamManageEl.addEventListener('click', (e) => {
+  e.stopPropagation() // 바깥 클릭으로 곧바로 닫히지 않게
+  toggleMenu(false) // ☰는 자리를 내준다 — 둘이 겹치면 뒤에 있는 것을 읽을 수 없다
+  toggleTeamPop(true)
+})
+
+document.getElementById('team-close').addEventListener('click', () => {
+  toggleTeamPop(false)
+  teamManageEl.focus()
+})
+
+document.addEventListener('click', (e) => {
+  if (!teamPop.hidden && !teamPop.contains(e.target)) toggleTeamPop(false)
+})
+
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || teamPop.hidden) return
+  toggleTeamPop(false)
+  teamManageEl.focus()
+})
+
+/** 이 프로젝트가 지금 지시를 처리하는 중인가. 탭 배지와 같은 값을 본다. */
+function teamBusyNow() {
+  return Boolean(teamInfo?.busy) || lastProjects.find((p) => p.dir === activeDir)?.company === 'busy'
+}
+
+/** 지금 팀 구성을 바꿀 수 없는 이유. 없으면 빈 문자열. */
+function teamBlockReason() {
+  if (!activeDir) return '프로젝트를 먼저 붙이세요'
+  if (!teamInfo) return teamErr
+  // 처리 중에 팀원 파일이 바뀌면 그 세션이 무엇을 들고 있는지 알 수 없게 된다.
+  if (teamBusyNow()) return '지금 지시가 돌고 있습니다 — 끝나거나 취소한 뒤에'
+  return ''
+}
+
+function renderTeamPanel() {
+  if (teamPop.hidden) return // 닫혀 있으면 다시 그릴 이유가 없다
+  teamDirEl.textContent = activeDir ? baseName(activeDir) : ''
+  teamDirEl.title = activeDir ?? ''
+
+  const blocked = teamBlockReason()
+  teamBusyEl.hidden = !blocked
+  teamBusyEl.textContent = blocked
+
+  const members = seatedMembers()
+  const free = freeSeats()
+  teamNowHeadEl.textContent = `지금 일하는 사람 (${members.length})`
+  teamAvailHeadEl.textContent =
+    free === 0 ? '고용할 수 있는 사람 — 자리가 없습니다' : '고용할 수 있는 사람'
+
+  teamNowEl.replaceChildren()
+  if (!members.length) {
+    teamNowEl.append(teamNote(teamInfo ? '팀원이 없습니다 — 리드가 혼자 일합니다' : '명단을 읽지 못했습니다'))
+  }
+  for (const m of members) teamNowEl.append(memberRow(m, blocked))
+
+  // 이미 팀에 있는 사람은 뺀다 — 위 목록과 같은 줄이 두 번 보이면 헷갈린다.
+  const pool = (teamInfo?.catalog ?? []).filter((c) => c.state !== 'employed')
+  teamAvailEl.replaceChildren()
+  if (!pool.length) {
+    teamAvailEl.append(teamNote('더 부를 사람이 없습니다 — 아래에서 직접 만들 수 있습니다'))
+  }
+  for (const c of pool) teamAvailEl.append(catalogRow(c, blocked, free))
+
+  // 자리가 없으면 만들기도 막힌다. 이유는 버튼 옆이 아니라 머리에 이미 적혀 있다.
+  document.getElementById('ta-make').disabled = Boolean(blocked) || free === 0
+  teamNewBtn.disabled = Boolean(blocked) || free === 0
+}
+
+function teamNote(text) {
+  const p = document.createElement('p')
+  p.className = 'team-empty'
+  p.textContent = text
+  return p
+}
+
+/** 목록 한 줄의 뼈대. 서버·파일에서 온 값은 전부 textContent로만 넣는다. */
+function teamRow({ mark, id, desc, on = false }) {
+  const row = document.createElement('div')
+  row.className = `team-row${on ? ' on' : ''}`
+
+  const mk = document.createElement('span')
+  mk.className = 'mk'
+  mk.textContent = mark
+  mk.setAttribute('aria-hidden', 'true')
+
+  const who = document.createElement('span')
+  who.className = 'who'
+  const nm = document.createElement('span')
+  nm.className = 'nm'
+  nm.textContent = labelFor(id)
+  const idEl = document.createElement('span')
+  idEl.className = 'id'
+  idEl.textContent = id
+  who.append(nm, idEl)
+
+  const d = document.createElement('p')
+  d.className = 'desc'
+  d.textContent = desc
+
+  row.append(mk, who, d)
+  return row
+}
+
+function memberRow(m, blocked) {
+  const live = agents.get(m.id)
+  const row = teamRow({
+    mark: live?.active ? '●' : '○',
+    id: m.id,
+    desc: m.fireable
+      ? m.desc || '(설명이 없는 팀원 정의입니다)'
+      : `${m.desc || ''}${m.desc ? ' · ' : ''}전역 팀원 — 여기서는 해고할 수 없습니다`.trim(),
+    on: Boolean(live?.active),
+  })
+  if (!m.fireable) return row // 전역 팀원: 이 프로젝트 밖의 것이라 여기서 건드리지 않는다
+
+  const btn = document.createElement('button')
+  btn.type = 'button'
+  btn.className = 'act'
+  btn.textContent = '해고'
+  btn.title = blocked || `${m.id} 정의를 보관함으로 옮깁니다 (지우지 않습니다)`
+  btn.disabled = Boolean(blocked)
+  btn.addEventListener('click', () => doFire(m))
+  row.append(btn)
+  return row
+}
+
+function catalogRow(c, blocked, free) {
+  const back = c.state === 'fired'
+  const bits = []
+  if (c.desc) bits.push(c.desc)
+  // 도구 목록이 비어 있는 것은 **"도구 없음"이 아니라 "제한 없음"**이다
+  // (정의에 tools를 안 쓰면 전부 물려받는다). 없다고 적으면 거짓말이 된다.
+  bits.push(c.tools?.length ? c.tools.join(', ') : '도구 제한 없음')
+  if (back) bits.push('해고한 사람 — 그때 파일 그대로 돌아옵니다')
+  const row = teamRow({ mark: back ? '↩' : '+', id: c.id, desc: bits.join(' · ') })
+
+  const btn = document.createElement('button')
+  btn.type = 'button'
+  btn.className = 'act'
+  btn.textContent = back ? '복직' : '고용'
+  btn.disabled = Boolean(blocked) || free === 0
+  btn.title = blocked || (free === 0 ? '자리가 없습니다 — 먼저 누군가를 해고하세요' : `${c.id}을(를) 팀에 넣습니다`)
+  btn.addEventListener('click', () => doHire(c))
+  row.append(btn)
+  return row
+}
+
+/** 고용은 **묻지 않는다** — 파일 한 장이 생길 뿐이고 해고로 곧바로 되돌릴 수 있다. */
+async function doHire(c) {
+  const res = await callBridge('hireAgent', activeDir, c.id)
+  if (!res?.ok) {
+    teamBusyEl.hidden = false
+    teamBusyEl.textContent = res?.error ?? '고용하지 못했습니다'
+    if (res?.busy || res?.full) refreshTeam()
+    return
+  }
+  notedSelf('hire', res.id)
+  addMsg(
+    'sys',
+    '',
+    `— ${nameWithId(res.id)} ${res.from === 'fired' ? '복직' : '고용'} — ${res.path}` +
+      `${res.from === 'fired' ? ' (해고 전 정의 그대로입니다)' : ''} · 다음 지시부터 함께 일합니다 —`,
+  )
+  refreshTeam()
+}
+
+/**
+ * 해고는 **묻고 나서** 한다. 파일을 옮기는 일이고, 사람이 고쳐 둔 정의가 걸려 있다.
+ * 무엇이 어디로 가는지·되돌리면 어떻게 되는지·보낸 지시는 어떻게 되는지를 그대로 적는다.
+ */
+async function doFire(m) {
+  const waiting = queuedFor.filter((q) => q.id === m.id).length
+  const ok = confirm(
+    `${nameWithId(m.id)}을(를) 해고합니다.\n\n` +
+      `  지금 파일   ${m.file ?? `${activeDir}\\.claude\\agents\\${m.id}.md`}\n` +
+      `  옮길 곳     ${activeDir}\\${FIRED_DIR_HINT.replace(/\//g, '\\')}${m.id}.md\n\n` +
+      `· 지우지 않고 옮기기만 합니다 — 복직하면 이 파일이 그대로 돌아옵니다.\n` +
+      // **취소가 아니라 리드에게 넘기는 것**이다(메인의 requeueToLead). 실제 동작과
+      // 다른 말을 확인 창에 적으면, 그 자리에서 사용자가 잘못된 판단을 하게 된다.
+      `· 이 사람 앞으로 온 대기 지시는 취소되지 않고 리드가 받습니다` +
+      `${waiting ? ` (앱에서 보낸 것 ${waiting}건)` : ''}.\n` +
+      `· 이미 돌고 있는 지시는 건드리지 않습니다. 바뀐 명단은 다음 지시부터 반영됩니다.`,
+  )
+  if (!ok) return
+  const res = await callBridge('fireAgent', activeDir, m.id)
+  if (!res?.ok) {
+    teamBusyEl.hidden = false
+    teamBusyEl.textContent = res?.error ?? '해고하지 못했습니다'
+    if (res?.busy) refreshTeam()
+    return
+  }
+  notedSelf('fire', res.id)
+  dropQueuedFor(res.id)
+  addMsg(
+    'sys',
+    '',
+    `— ${nameWithId(res.id)} 해고 — ${res.movedTo}로 옮겼습니다` +
+      // 몇 건이 넘어갔는지는 **메인이 실제로 고쳐 쓴 수**(requeued)를 그대로 적는다.
+      `${res.requeued ? ` · 이 사람 앞으로 온 대기 지시 ${res.requeued}건은 리드가 받습니다` : ''}` +
+      ` · 복직하면 이 파일이 그대로 돌아옵니다 —`,
+  )
+  refreshTeam()
+}
+
+// ---------- 직접 만들기 ----------
+//
+// 카탈로그에 없는 팀원을 이 프로젝트에만 둔다. 파일 이름이 되는 값이라 id는
+// 소문자·숫자·하이픈만 받고, **틀린 값은 그 입력 바로 아래에** 적는다 —
+// 화면을 옮겨 가며 무엇이 틀렸는지 찾게 하지 않는다.
+
+const TA_ID_RE = /^[a-z0-9][a-z0-9-]{0,39}$/
+const taFields = {
+  id: document.getElementById('ta-id'),
+  label: document.getElementById('ta-label'),
+  desc: document.getElementById('ta-desc'),
+}
+
+function taError(which, text) {
+  const el = document.getElementById(which === 'form' ? 'ta-err' : `ta-${which}-err`)
+  el.hidden = !text
+  el.textContent = text ?? ''
+}
+
+function clearTaErrors() {
+  for (const which of ['id', 'label', 'desc', 'form']) taError(which, '')
+}
+
+/**
+ * 서버가 준 한 줄짜리 이유를 **가장 그럴듯한 입력 아래로** 보낸다.
+ * 응답에는 어느 칸이 틀렸는지가 없다(이유 한 줄뿐이다). 이유가 방금 적은 id를
+ * 그대로 부르는 경우가 많아서(`data-analyst은(는) 이미 팀에 있습니다`) 그것도 본다.
+ */
+function showCreateError(msg, id) {
+  const text = String(msg ?? '만들지 못했습니다')
+  if (/\bid\b/i.test(text) || (id && text.includes(id))) return taError('id', text)
+  if (/설명|무슨 일/.test(text)) return taError('desc', text)
+  taError('form', text)
+}
+
+teamNewBtn.addEventListener('click', () => {
+  const open = teamFormEl.hidden
+  teamFormEl.hidden = !open
+  teamNewBtn.setAttribute('aria-expanded', String(open))
+  if (open) taFields.id.focus()
+})
+
+teamFormEl.addEventListener('submit', async (e) => {
+  e.preventDefault()
+  clearTaErrors()
+  const id = taFields.id.value.trim().toLowerCase()
+  const label = taFields.label.value.trim()
+  const description = taFields.desc.value.trim()
+  // 서버도 같은 것을 검사하지만(그쪽이 진짜다), 여기서 먼저 걸러야 어느 칸이
+  // 틀렸는지 알려 줄 수 있다 — 서버 응답에는 이유 한 줄만 온다.
+  if (!id) return taError('id', 'id를 적어주세요')
+  if (!TA_ID_RE.test(id)) return taError('id', '영문 소문자·숫자·하이픈만 쓸 수 있습니다 (예: data-analyst)')
+  if (!description) return taError('desc', '무슨 일을 하는 팀원인지 한 줄로 적어주세요')
+
+  const tools = [...teamFormEl.querySelectorAll('#ta-tools input:checked')].map((el) => el.value)
+  const btn = document.getElementById('ta-make')
+  btn.disabled = true
+  const res = await callBridge('createAgent', activeDir, { id, label, description, tools })
+  btn.disabled = false
+  if (!res?.ok) {
+    if (res?.code === 'VALIDATION') showCreateError(res.error, id)
+    else taError('form', res?.error ?? '만들지 못했습니다')
+    if (res?.busy || res?.full) refreshTeam()
+    return
+  }
+  notedSelf('hire', res.id)
+  addMsg(
+    'sys',
+    '',
+    `— ${label || res.id}(${res.id}) 합류 — ${res.path}` +
+      `${res.basedOn ? ` (${res.basedOn} 정의를 본으로 삼았습니다)` : ''} · 역할에 맞게 그 파일을 고쳐 쓰면 됩니다 —`,
+  )
+  teamFormEl.reset()
+  teamFormEl.hidden = true
+  teamNewBtn.setAttribute('aria-expanded', 'false')
+  refreshTeam()
+})
+
+on('onStatus', ({ projects, activeDir: active, max, chatWidth, usage, team }) => {
   renderUsage(usage)
   if (!widthApplied && chatWidth) {
     widthApplied = true
@@ -1920,6 +2536,26 @@ on('onStatus', ({ projects, activeDir: active, max, chatWidth, usage }) => {
   activeDir = active
   lastProjects = projects
   renderTabs(projects, active, max)
+
+  // 명단은 **활성 프로젝트 것만** 온다. 못 받았으면(옛 메인) 지금 명단을 그대로 둔다.
+  if (Array.isArray(team) && active) {
+    teamByDir.set(active, team)
+    syncTeam(team)
+  }
+  // 프로젝트를 처음 보거나 옮겼을 때 한 번만 읽는다. 상태는 300ms마다 오므로
+  // 그때마다 디스크를 뒤지게 하면 안 된다.
+  if (active && teamLoadedFor !== active) {
+    teamLoadedFor = active
+    refreshTeam()
+  }
+  // 처리 중이 되고 풀리는 것은 **열려 있는 목록의 버튼을 살리고 죽인다.**
+  if (teamPop.hidden) teamBusySeen = teamBusyNow()
+  else if (teamBusySeen !== teamBusyNow()) {
+    teamBusySeen = teamBusyNow()
+    renderTeamPanel()
+  }
+  // 계정 바꾸기도 같다 — 작업이 시작되면 죽고, 끝나면 살아나야 한다.
+  refreshConnBusy()
 
   updateComposer() // 프로젝트가 붙고 떨어질 때마다 입력창이 따라가야 한다
   const me = projects.find((p) => p.dir === active)
@@ -1985,7 +2621,7 @@ function missingParts(health) {
   if (!h.hooks) out.push({ key: 'hooks', label: '훅 — 팀 활동을 화면에 기록합니다' })
   if (!h.agents) out.push({ key: 'agents', label: '팀원 — 없으면 리드가 혼자 일합니다' })
   if (!h.guide) out.push({ key: 'guide', label: 'CLAUDE.md — 어떤 일이 누구 몫인지 알려줍니다' })
-  // 빠진 건 없지만 **팀원 정의가 앱보다 낡은** 경우. 팀뷰를 고쳐도 이미 세팅된
+  // 빠진 건 없지만 **팀원 정의가 앱보다 낡은** 경우. 윤사무실을 고쳐도 이미 세팅된
   // 프로젝트는 옛 규칙 그대로라, 알려 주지 않으면 왜 다르게 도는지 알 수 없다.
   if (!out.length && h.stale > 0) {
     out.push({
@@ -2118,7 +2754,12 @@ function renderTabs(projects, active, max) {
     if (running) {
       running.className = 'st run'
       running.textContent = '▶'
-      running.title = p.run.url ? `실행 중 — ${p.run.url}` : '실행 중 (주소 확인 중)'
+      // 여기서도 주소만 보고 "돌고 있다"고 하지 않는다 — 살아 있는지 확인된 뒤에만.
+      running.title = p.run.dead
+        ? '실행 중이지만 서버가 죽었습니다'
+        : p.run.ready && p.run.url
+          ? `실행 중 — ${p.run.url}`
+          : '실행 중 (주소 확인 중)'
     }
 
     // 배지 하나에 무엇을 담을지: **진행 중이면 진행을, 조용하면 왜 조용한지**를 보여준다.
@@ -2406,13 +3047,29 @@ function renderRun(p) {
     : `npm run ${r.script} 로 띄웁니다 (앱이 관리하므로 지시가 끝나도 살아 있습니다)`
 
   // 주소는 자식이 뱉는 줄에서 주워 온다 — 포트를 우리가 정하지 않기 때문이다.
-  const ready = r.running && r.url
-  runUrlEl.hidden = !ready
+  //
+  // **주소를 본 것과 서버가 사는 것은 다르다.** 예전에는 주소가 보이는 순간 링크를
+  // 내줬는데, 실측(08-02 12:52:47)에서 vite가 주소를 찍고 곧바로 죽었다. 앱은 그
+  // 4분 25초 동안 눌러도 열리지 않는 링크를 "실행 준비됨"으로 들고 있었다.
+  // 이제 메인이 짧게 지켜본 뒤에만 `ready`를 준다.
+  const ready = r.running && r.url && r.ready
+  runUrlEl.hidden = !r.running
   if (ready) {
+    runUrlEl.className = ''
     runUrlEl.textContent = r.url.replace(/^https?:\/\//, '')
     runUrlEl.title = `${r.url} 를 브라우저에서 엽니다`
+  } else if (r.running && r.dead) {
+    // 확인되지 않은 것을 확인된 것처럼 보여 주지 않는다. 프로세스는 남아 있어도
+    // 서버가 죽었으면 그렇게 적는다.
+    runUrlEl.className = 'dead'
+    runUrlEl.textContent = '서버가 죽었습니다'
+    runUrlEl.title = '주소를 내놓은 뒤 죽었습니다 — 오른쪽 클릭으로 실행 로그를 보세요'
+  } else if (r.running && r.url) {
+    runUrlEl.className = ''
+    runUrlEl.textContent = '확인 중…'
+    runUrlEl.title = `${r.url} 을 찾았습니다 — 살아 있는지 확인하는 중입니다`
   } else if (r.running) {
-    runUrlEl.hidden = false
+    runUrlEl.className = ''
     runUrlEl.textContent = '준비 중…'
     runUrlEl.removeAttribute('title')
   }
@@ -2440,18 +3097,29 @@ on('onCommandFailed', ({ dir, code, lines, why }) => {
   if (dir !== activeDir) return
   // **왜 실패했는지를 맨 앞에 크게 적는다.** 예전에는 "코드 1로 끝남"만 남아서,
   // 사용량 한도에 걸린 것을 세션 기록을 직접 뒤져야 알 수 있었다.
-  const head = why?.label
-    ? `⚠ 지시를 처리하지 못했습니다 — ${why.label}`
-    : `⚠ 지시 처리가 코드 ${code}로 끝났습니다`
+  //
+  // **기다릴 일과 손볼 일을 가른다.** 실측(08-02 08:13:58): 사유는 로그에
+  // `토큰 사용량 한도: … resets 6:50pm (Asia/Seoul)`로 남았는데 결과는 `코드 1`이었다.
+  // 고쳐야 하는 실패와 똑같이 보여서, 망가진 것이 없는데도 원인을 찾아 나서게 된다.
+  // 풀리는 시각은 그 문구 안에 이미 있다 — 사용자가 정말 알고 싶은 값이다.
+  const head = why?.wait
+    ? `⏳ 지금은 처리할 수 없습니다 — ${why.label}` +
+      (why.resetAt ? `\n${why.resetAt}에 풀립니다. 그때 다시 보내세요.` : '')
+    : why?.label
+      ? `⚠ 지시를 처리하지 못했습니다 — ${why.label}`
+      : `⚠ 지시 처리가 코드 ${code}로 끝났습니다`
   const parts = [head]
   if (why?.message) parts.push(why.message)
   if (why?.hint) parts.push(why.hint)
   const tail = (lines ?? []).filter(Boolean).slice(-6).join('\n')
   if (tail) parts.push(tail)
-  addMsg('warn', '실행', parts.join('\n\n'))
-  hintEl.textContent = why?.label
-    ? `${why.label} — 대화를 확인하세요`
-    : '지시 처리가 실패했습니다 — 대화에 이유가 남았습니다'
+  // 기다리면 되는 일은 경고가 아니다 — 빨간 줄로 남기면 매번 무엇이 터진 줄 안다.
+  addMsg(why?.wait ? 'sys' : 'warn', '실행', parts.join('\n\n'))
+  hintEl.textContent = why?.wait
+    ? `${why.label}${why.resetAt ? ` — ${why.resetAt}에 풀립니다` : ' — 풀린 뒤 다시 보내세요'}`
+    : why?.label
+      ? `${why.label} — 대화를 확인하세요`
+      : '지시 처리가 실패했습니다 — 대화에 이유가 남았습니다'
 })
 
 on('onRunFailed', ({ dir, code, lines }) => {
@@ -2706,14 +3374,14 @@ function figmaRow(g) {
   return row
 }
 
-/** 팀원 id를 화면에 쓰는 이름으로. 명단에 없으면 id를 그대로 쓴다. */
+/** 팀원 id를 화면에 쓰는 이름으로. 지금 명단에 있으면 그 이름, 없으면 사전(→id). */
 function labelFor(id) {
-  return ROSTER.find((r) => r.id === id)?.label ?? String(id ?? '')
+  return agents.get(id)?.label ?? labelOf(id)
 }
 
 // ---------- 실행 환경 ----------
 //
-// 팀뷰는 Claude Code 위에서 도는 앱이다. claude가 없거나 로그인이 안 돼 있으면
+// 윤사무실은 Claude Code 위에서 도는 앱이다. claude가 없거나 로그인이 안 돼 있으면
 // 지시를 보내도 **아무 일도 일어나지 않는다.** 그런데 화면상으로는 그냥 조용한
 // 것과 구분되지 않아서 앱이 고장 난 줄 안다. 맨 위에서 먼저 말해 준다.
 //
@@ -2724,8 +3392,18 @@ const envMsgEl = document.getElementById('env-msg')
 const envActEl = document.getElementById('env-act')
 const envAgainEl = document.getElementById('env-again')
 const connEl = document.getElementById('conn')
+const connNoteEl = document.getElementById('conn-note')
+const connCopyEl = document.getElementById('conn-copy')
+const connRecheckEl = document.getElementById('conn-recheck')
 
 let lastEnv = null
+// 계정 줄에 붙는 한 줄 소식(바꾸는 중 생긴 오류·시간 초과). 상태가 60초마다 다시
+// 그려지므로 화면 밖에 들고 있어야 살아남는다. 메뉴를 다시 열면 지운다.
+let connMsg = ''
+let connCmd = '' // 사람이 직접 쳐야 하는 명령(manual)
+// 지금 바꾸는 중인 것. 메인은 중복 실행을 막지 않는다 — 두 번 누르면 로그아웃이
+// 두 번 돌고 창이 두 개 뜬다. 막는 것은 화면 몫이다.
+let switching = ''
 // 확인 주기. 메인이 결과를 캐시하므로 대부분은 캐시가 답한다 —
 // `claude mcp list`가 서버마다 헬스 체크를 해서 실제로 부를 때마다 몇 초 걸린다.
 const ENV_POLL_MS = 60_000
@@ -2758,63 +3436,318 @@ function envBlocker(env) {
 }
 
 /**
- * 연결 상태 두 줄. 배너와 달리 **문제가 없어도 보인다.**
+ * 연결 두 줄. 배너와 달리 **문제가 없어도 보인다.**
  *
  * 배너만 두면 "지금 연결돼 있다"는 확인을 할 수 없다. 지시를 보내기 전에 눈으로
- * 확인하고 싶은 것이 바로 이 둘이라, 상단에 계속 켜 둔다.
+ * 확인하고 싶은 것이 바로 이 둘이라 ☰ 안에 계속 켜 둔다.
+ *
+ * 여기서 **누구로 로그인돼 있는지**까지 적는다. 회사 계정과 개인 계정을 오가면
+ * 지금 어느 쪽으로 일하고 있는지가 결과를 가르는데, 화면에는 점 두 개뿐이었다.
+ *
+ * 줄마다 버튼은 **하나**다. 줄 전체를 누르게 하면 그 안의 버튼과 겹쳐서
+ * 어디를 누른 것인지 알 수 없게 된다.
  */
-function connItems(env) {
+function connRows(env) {
   const c = env?.claude ?? {}
   const f = env?.figma ?? {}
-  const claude = !c.installed
-    ? { state: 'bad', text: 'Claude 미설치', title: 'claude CLI가 없습니다 — npm i -g @anthropic-ai/claude-code' }
-    : !c.loggedIn
-      ? { state: 'bad', text: 'Claude 로그아웃', title: '로그인해야 팀원이 일할 수 있습니다 (눌러서 로그인)' }
-      : {
-          state: 'ok',
-          text: 'Claude',
-          title: `로그인됨 — ${c.email ?? '계정 정보 없음'}${c.plan ? ` (${c.plan})` : ''}\n눌러서 상태를 다시 확인합니다`,
-        }
-  const figma = f.connected
-    ? { state: 'ok', text: 'Figma', title: '연결됨 — 기획안·화면설계서를 만들 수 있습니다\n눌러서 상태를 다시 확인합니다' }
-    : !c.loggedIn
-      ? { state: 'off', text: 'Figma', title: 'Claude 로그인 후 확인할 수 있습니다' }
-      : {
-          state: 'warn',
-          text: f.present ? 'Figma 인증 필요' : 'Figma 미연결',
-          title: '기획안·화면설계서는 Figma에 만듭니다 (눌러서 연결)',
-        }
-  return [
-    { key: 'claude', ...claude },
-    { key: 'figma', ...figma },
-  ]
+  // 처리 중이면 바꾸기를 **누르기 전에** 막는다. 메인도 거절하지만, 누르고 나서
+  // 거절당하는 것과 애초에 죽어 있는 것은 다른 경험이다.
+  const block = busyCompanies()
+  const blockWhy = block.length ? busyReason(block) : ''
+  const rows = []
+
+  if (!c.installed) {
+    rows.push({
+      key: 'claude',
+      state: 'bad',
+      name: 'Claude',
+      who: '설치 안 됨',
+      sub: 'npm i -g @anthropic-ai/claude-code',
+      title: 'claude CLI가 없습니다 — 팀원이 일할 수 없습니다',
+      act: { kind: 'recheck', label: '다시 확인' },
+    })
+  } else if (!c.loggedIn) {
+    rows.push({
+      key: 'claude',
+      state: 'off',
+      name: 'Claude',
+      who: '로그인 필요',
+      sub: '로그인해야 팀원이 일할 수 있습니다',
+      title: '새 창에서 로그인을 마치면 자동으로 이어집니다',
+      act: { kind: 'login', label: '연결하기' },
+    })
+  } else {
+    // 구독 등급. 메인은 새 이름(subscriptionType)과 옛 이름(plan)을 **둘 다** 준다 —
+    // 같은 값이라 한 번만 적는다. 옛 메인은 plan만 주므로 그쪽으로 떨어진다.
+    const grade = c.subscriptionType ?? c.plan
+    rows.push({
+      key: 'claude',
+      state: 'ok',
+      name: 'Claude',
+      // 이메일이 주된 정보다. **구버전 메인은 이메일을 주지 않는다** — 그때도
+      // 줄이 비어 보이지 않게 상태만이라도 적는다.
+      who: c.email || '로그인됨 (계정 정보 없음)',
+      // 구독 등급·조직은 보조다. 둘 다 없으면 줄 자체를 만들지 않는다.
+      sub: [grade, c.orgName].filter(Boolean).join(' · '),
+      // 인증 방식은 보조 줄까지 차지할 값은 아니라 마우스를 올렸을 때만 보인다.
+      // 등급 자리에 이미 같은 값이 올라와 있으면(옛 메인의 plan) 두 번 적지 않는다.
+      title: c.authMethod && c.authMethod !== grade ? `인증 방식: ${c.authMethod}` : '로그인됨',
+      act: switchAct('계정 바꾸기', 'claude', blockWhy),
+    })
+  }
+
+  if (f.connected) {
+    rows.push({
+      key: 'figma',
+      state: 'ok',
+      name: 'Figma',
+      // Figma 쪽에는 계정 정보가 없다. 연결됐는지만 안다.
+      who: '연결됨',
+      sub: '',
+      title: 'Figma는 로그아웃이 없어, 연결을 지우고 다시 붙이는 방식으로 인증합니다',
+      act: switchAct('다시 연결', 'figma', blockWhy),
+    })
+  } else if (!c.loggedIn) {
+    // Claude에 로그인하지 않으면 Figma 연결 상태를 물어볼 수단이 없다. 여기서
+    // 버튼을 주면 눌러도 아무 일이 없다 — 그래서 아예 두지 않는다.
+    rows.push({
+      key: 'figma',
+      state: 'off',
+      name: 'Figma',
+      who: '연결 안 됨',
+      sub: 'Claude에 로그인한 뒤 확인할 수 있습니다',
+      title: '',
+      act: null,
+    })
+  } else if (f.present) {
+    // **이미 등록돼 있는데 인증만 풀린 상태다.** 여기서 첫 연결(mcp add)을 부르면
+    // 같은 이름이 이미 있어 실패한다 — 지우고 다시 붙이는 길로 보내야 풀린다.
+    rows.push({
+      key: 'figma',
+      state: 'warn',
+      name: 'Figma',
+      who: '인증 필요',
+      sub: '기획안·화면설계서는 Figma에 만듭니다',
+      title: 'Figma는 로그아웃이 없어, 연결을 지우고 다시 붙이는 방식으로 인증합니다',
+      act: switchAct('다시 연결', 'figma', blockWhy),
+    })
+  } else {
+    rows.push({
+      key: 'figma',
+      state: 'warn',
+      name: 'Figma',
+      who: '연결 안 됨',
+      sub: '기획안·화면설계서는 Figma에 만듭니다',
+      title: '',
+      act: { kind: 'login', label: '연결하기' },
+    })
+  }
+  return rows
+}
+
+/**
+ * 바꾸기 버튼 하나. **한 번에 하나만 돌 수 있다** — 메인은 중복 실행을 막지 않아서,
+ * 빠르게 두 번 누르면 `auth logout`이 두 번 돌고 창이 두 개 뜬다. 응답이 올 때까지
+ * 버튼을 죽여 두는 것이 유일한 방어선이라, 그 상태를 **다시 그려도 살아남게** 여기
+ * 둔다(60초마다 오는 상태 갱신이 버튼을 새로 만든다).
+ */
+function switchAct(label, key, blockWhy) {
+  if (switching) {
+    return {
+      kind: 'switch',
+      label: switching === key ? '바꾸는 중…' : label,
+      block: '바꾸는 중입니다 — 새 창에서 마치거나 끝날 때까지 기다려 주세요',
+    }
+  }
+  return { kind: 'switch', label, block: blockWhy }
+}
+
+/** 한 줄을 그린다. 값은 전부 textContent로만 넣는다(이메일·조직명은 남의 글자다). */
+function connRow(r) {
+  const row = document.createElement('div')
+  row.className = `conn-row ${r.state}`
+  if (r.title) row.title = r.title
+
+  const led = document.createElement('span')
+  led.className = 'led'
+  led.setAttribute('aria-hidden', 'true')
+
+  const who = document.createElement('span')
+  who.className = 'conn-who'
+  const nm = document.createElement('span')
+  nm.className = 'conn-nm'
+  nm.textContent = r.name
+  const acct = document.createElement('span')
+  acct.className = 'conn-acct'
+  acct.textContent = r.who
+  who.append(nm, acct)
+
+  row.append(led, who)
+
+  if (r.act) {
+    const btn = document.createElement('button')
+    btn.type = 'button'
+    btn.className = 'conn-act'
+    btn.textContent = r.act.label
+    // 지금 못 하는 것은 **감추지 않고 죽인다.** 이유는 아래 줄에 이미 적혀 있다.
+    btn.disabled = Boolean(r.act.block)
+    if (r.act.block) btn.title = r.act.block
+    btn.addEventListener('click', (e) => {
+      // **누르는 순간 이 줄은 다시 그려진다.** 그러면 이 버튼은 DOM에서 떨어져 나가고,
+      // 바깥 클릭을 보는 쪽에서는 "메뉴 밖을 눌렀다"로 보여 ☰가 통째로 닫혔다 —
+      // 결과 문구가 뜨는 자리가 같이 사라졌다. 여기서 멈춘다.
+      e.stopPropagation()
+      if (r.act.kind === 'recheck') return recheckEnv()
+      if (r.act.kind === 'login') return startLogin(r.key)
+      switchAccount(r.key)
+    })
+    row.append(btn)
+  }
+
+  if (r.sub) {
+    const sub = document.createElement('p')
+    sub.className = 'conn-sub'
+    sub.textContent = r.sub
+    row.append(sub)
+  }
+  return row
 }
 
 function renderConn(env) {
+  const rows = connRows(env)
   connEl.replaceChildren()
-  for (const it of connItems(env)) {
-    const el = document.createElement('span')
-    el.className = `conn-item ${it.state}`
-    el.title = it.title
-    const led = document.createElement('span')
-    led.className = 'led'
-    el.append(led, document.createTextNode(it.text))
-    // 문제가 있으면 누르는 순간 그걸 푸는 절차로, 정상이면 다시 확인으로 간다.
-    const act = () => {
-      if (it.state === 'ok' || it.state === 'off') recheckEnv()
-      else startLogin(it.key)
-    }
-    // span이라 키보드로는 닿지 않았다. 상태를 확인하고 로그인까지 가는 통로라 열어 둔다.
-    el.tabIndex = 0
-    el.setAttribute('role', 'button')
-    el.addEventListener('click', act)
-    el.addEventListener('keydown', (e) => {
-      if (e.key !== 'Enter' && e.key !== ' ') return
-      e.preventDefault()
-      act()
-    })
-    connEl.append(el)
+  for (const r of rows) connEl.append(connRow(r))
+  // 바꾸다 생긴 소식이 있으면 그것을, 없으면 지금 왜 못 바꾸는지를 적는다.
+  // 처리 중 안내는 **바꿀 수 있는 줄이 있을 때만** 뜻이 있다.
+  const block = busyCompanies()
+  const canSwitch = rows.some((r) => r.act?.kind === 'switch')
+  const note = connMsg || (canSwitch && block.length ? busyReason(block) : '')
+  connNoteEl.hidden = !note
+  connNoteEl.textContent = note
+}
+
+/** 지금 지시를 처리 중인 회사 이름들. 계정을 바꾸면 그 세션이 인증을 잃는다. */
+function busyCompanies() {
+  return lastProjects.filter((p) => p.company === 'busy').map((p) => baseName(p.dir))
+}
+
+// 마지막으로 그린 '처리 중' 목록. 상태는 300ms마다 오므로 바뀌었을 때만 다시 그린다.
+let connBusySeen = ''
+
+/** 작업이 시작되고 끝나는 것을 열려 있는 연결 줄에 반영한다. */
+function refreshConnBusy() {
+  const now = busyCompanies().join('|')
+  if (now === connBusySeen) return
+  connBusySeen = now
+  if (!menuPop.hidden) renderConn(lastEnv)
+}
+
+/**
+ * 이름 뒤 주격 조사. 회사 이름은 사람이 지은 폴더 이름이라 받침이 제각각이다
+ * (`ConvertFlow가` / `사무실이`). 한글이 아니면 열린 소리로 읽어 '가'로 둔다.
+ */
+function subjectParticle(name) {
+  const last = String(name).slice(-1).charCodeAt(0)
+  if (last < 0xac00 || last > 0xd7a3) return '가'
+  return (last - 0xac00) % 28 === 0 ? '가' : '이'
+}
+
+function busyReason(names) {
+  const who = names.join(', ')
+  const tail = names.length > 1 ? '에서' : subjectParticle(who)
+  return `${who}${tail} 지시를 처리 중입니다 — 지금 계정을 바꾸면 그 작업이 인증을 잃고 실패합니다`
+}
+
+/**
+ * 계정 줄에 붙는 한 줄 소식. 다시 그려도 남고, 메뉴를 닫으면 사라진다.
+ * `cmd`는 사람이 직접 쳐야 하는 명령 — 화면 글자는 집어 갈 수 없어 복사 버튼을 낸다.
+ */
+function showConnMsg(text, cmd = '') {
+  connMsg = text
+  connCmd = cmd
+  connNoteEl.hidden = !text
+  connNoteEl.textContent = text
+  connCopyEl.hidden = !cmd
+  connCopyEl.textContent = cmd ? `명령 복사: ${cmd}` : ''
+}
+
+connCopyEl.addEventListener('click', async () => {
+  if (!connCmd) return
+  await window.teamView.copyText(connCmd)
+  // 눌렀는데 아무 일도 안 일어난 것처럼 보이면 또 누른다. 복사됐다는 것만 알린다.
+  connCopyEl.textContent = '복사했습니다 — 터미널에 붙여넣으세요'
+})
+
+/**
+ * 로그인 계정을 바꾼다.
+ *
+ * **되돌리기 쉬운 일이 아니다** — 먼저 로그아웃하고, 마지막은 브라우저에서 사람이
+ * 마쳐야 끝난다. 중간에 그만두면 아무 계정으로도 로그인되지 않은 상태로 남는다.
+ * 그래서 무엇이 일어나는지 적고 물어본 뒤에 한다.
+ *
+ * 실패 문구는 **메인이 준 것을 그대로** 쓴다. 여기서 새로 지어내면 실제로 무엇이
+ * 막혔는지와 화면의 말이 어긋난다. 우리가 보태는 것은 "그래서 뭘 하면 되는지"뿐이다.
+ */
+async function switchAccount(what) {
+  if (switching) return // 두 번 누르면 로그아웃이 두 번 돈다
+  const block = busyCompanies()
+  // 돌고 있는 작업이 있으면 **묻지 않는다.** 물어서 될 일이 아니라 지금은 안 되는 일이다.
+  if (block.length) {
+    showConnMsg(busyReason(block))
+    renderConn(lastEnv)
+    return
   }
+  if (!confirm(switchPrompt(what, lastEnv?.claude?.email))) return
+
+  switching = what
+  showConnMsg('')
+  renderConn(lastEnv) // 버튼이 '바꾸는 중…'으로 죽는다
+  const res = await callBridge('switchAccount', what)
+  switching = ''
+
+  if (res?.ok) {
+    // 채팅 기록에는 **누구로 바뀌었는지 적지 않는다** — 이메일·조직은 남의 정보고
+    // 기록은 파일로 남는다. 무슨 일이 있었는지만 한 줄.
+    addMsg('sys', '', what === 'figma' ? '— Figma를 다시 연결했습니다 —' : '— Claude 계정을 바꿨습니다 —')
+    renderEnv(res.env ?? lastEnv)
+    return
+  }
+  if (res?.busy) {
+    // 메인이 거절했다. 어느 회사가 잡고 있는지는 응답이 알려 준다(우리가 본 것보다 정확하다).
+    const names = Array.isArray(res.running) && res.running.length ? res.running : busyCompanies()
+    showConnMsg(names.length ? busyReason(names) : res.error || '지금은 바꿀 수 없습니다 — 돌고 있는 작업이 있습니다')
+  } else if (res?.manual) {
+    // 창을 띄울 수 없는 컴퓨터. 명령을 사람이 직접 쳐야 한다.
+    showConnMsg(`${res.error || '앱이 창을 띄우지 못했습니다'} — 터미널에서 직접 실행하세요.`, res.manual)
+  } else if (res?.timeout) {
+    // **실패로 단정하지 않는다.** 로그인 창은 아직 열려 있을 수 있고, 거기서
+    // 마치면 실제로는 성공이다. 메인이 준 문구가 이미 그 말을 하고 있으므로
+    // 그대로 쓴다 — 여기서 덧붙이면 같은 말이 두 번 된다.
+    showConnMsg(res.error || '시간이 지났습니다 — 창에서 로그인을 마쳤는지 확인하고 [상태 다시 확인]을 누르세요')
+  } else {
+    showConnMsg(res?.error || '계정을 바꾸지 못했습니다')
+  }
+  // 실패해도 상태는 달라져 있을 수 있다(로그아웃까지는 됐을 수 있다). 받은 것을 쓴다.
+  renderEnv(res?.env ?? lastEnv)
+}
+
+/** 확인 창 문구. 지금 계정·새 창이 뜬다는 것·돌고 있는 작업이 있으면 실패한다는 것. */
+function switchPrompt(what, email) {
+  if (what === 'figma') {
+    return (
+      'Figma 연결을 다시 만듭니다.\n\n' +
+      '· Figma는 로그아웃이 없어, 지금 연결을 지우고 다시 붙이는 방식으로 인증합니다.\n' +
+      '· 새 창이 열립니다 — 거기서 인증을 마쳐야 끝납니다.\n' +
+      '· 돌고 있는 작업이 있으면 인증을 잃어 실패합니다.'
+    )
+  }
+  return (
+    'Claude 계정을 바꿉니다.\n\n' +
+    `  지금 계정   ${email || '(계정 정보 없음)'}\n\n` +
+    '· 먼저 로그아웃하고 새 로그인 창이 열립니다 — 거기서 로그인을 마쳐야 끝납니다.\n' +
+    '· 돌고 있는 작업이 있으면 인증을 잃어 실패합니다.\n' +
+    '· 로그아웃은 이 앱에서 되돌릴 수 없습니다(다시 로그인해야 합니다).'
+  )
 }
 
 function renderEnv(env) {
@@ -2841,10 +3774,14 @@ function renderEnv(env) {
 /** 상태를 다시 잰다. 재는 동안 점이 깜빡여 '멈춤'과 구분된다. */
 async function recheckEnv() {
   for (const el of connEl.children) el.classList.add('checking')
+  connRecheckEl.disabled = true
   renderEnv(await window.teamView.checkEnv({ force: true }))
+  connRecheckEl.disabled = false
   // 설치를 마치고 돌아오는 길목이기도 하다 — 같이 다시 본다.
   recheckNeeds()
 }
+
+connRecheckEl.addEventListener('click', recheckEnv)
 
 /**
  * 로그인/연결을 시작한다. 브라우저에서 사람이 마쳐야 하므로 앱은 창을 띄우고
@@ -2882,7 +3819,7 @@ envAgainEl.addEventListener('click', recheckEnv)
 
 // ---------- 설치 안내 ----------
 //
-// 팀뷰는 앱만 있어서는 동작하지 않는다. claude CLI를 띄우고, 그 활동은 python 훅이
+// 윤사무실은 앱만 있어서는 동작하지 않는다. claude CLI를 띄우고, 그 활동은 python 훅이
 // 기록한다. 다른 PC에 exe만 옮기면 **화면은 뜨지만 아무 일도 일어나지 않는데**
 // 무엇이 없어서인지 알 방법이 없다. 시작할 때 먼저 확인하고 설치를 돕는다.
 //
@@ -2967,6 +3904,7 @@ recheckNeeds()
 setInterval(() => window.teamView.checkEnv().then(renderEnv), ENV_POLL_MS)
 
 renderTargets()
+renderTeamUi() // 요약 줄과 첫 화면의 팀원 수를 채워 둔다(명단은 상태가 오면 다시 읽는다)
 refreshObstacles()
 resize()
 requestAnimationFrame(loop)

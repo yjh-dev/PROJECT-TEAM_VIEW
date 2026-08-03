@@ -138,7 +138,7 @@ body {
   font-size: 12px;
 }
 
-/* 실행 환경 배너 — 팀뷰가 돌아갈 조건이 빠졌을 때만 나타난다.
+/* 실행 환경 배너 — 윤사무실이 돌아갈 조건이 빠졌을 때만 나타난다.
    맨 위에 두는 이유: 이게 안 되면 아래 무엇을 눌러도 아무 일도 일어나지 않는다. */
 #env {
   display: flex;
@@ -279,8 +279,11 @@ button:hover {
   border-radius: 999px;
   white-space: nowrap;
   background: rgba(255, 255, 255, 0.07);
-  /* 11px 작은 글씨라 AA 기준(4.5:1)을 넘겨야 읽힌다 — 실측 3.47이었다. */
-  color: #a7b0c4;
+  /* 11px 작은 글씨라 AA 기준(4.5:1)을 넘겨야 읽힌다 — 실측 3.47이었다.
+     **고른 탭 위에서 다시 한 번 떨어진다**: 선택된 탭은 배경이 밝아(#2f3a52)
+     같은 색이 4.22까지 내려간다. 지금까지 검사 갈래에 "고른 탭 + 조용한 회사"가
+     없어서 이 조합만 빠져 있었다. 두 배경 모두에서 넘는 값으로 잡는다(최소 4.82). */
+  color: #b4bccd;
 }
 
 .tab .st.busy {
@@ -336,71 +339,95 @@ button:hover {
   background: rgba(247, 118, 142, 0.16);
 }
 
-/* ---------- 연결 상태 점 ----------
-   Claude와 Figma가 지금 쓸 수 있는 상태인지. 문제가 있을 때만 보이면 "연결돼 있다"는
-   확인을 할 수 없어서, 정상일 때도 계속 켜 둔다. 마우스를 올리면 계정·플랜까지 보인다. */
+/* ---------- 연결 (계정 표시·전환) ----------
+   Claude와 Figma가 지금 쓸 수 있는 상태인지, 그리고 **누구로 로그인돼 있는지.**
+   문제가 있을 때만 보이면 "연결돼 있다"는 확인을 할 수 없어서 정상일 때도 켜 둔다.
+
+   이메일이 주된 정보고 구독 등급·조직은 보조 줄이다. 조직명은 길다
+   (`...'s Organization`, 회사 계정은 더 길다) — **줄여서 감추면 어느 조직인지
+   알 수 없으므로 자르지 않고 줄을 넘긴다.** 팀원 목록에서 쓰던 방식 그대로다. */
 
 #conn {
   display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-shrink: 0;
+  flex-direction: column;
 }
 
-.conn-item {
-  display: flex;
-  align-items: center;
-  gap: 5px;
+.conn-row {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) auto;
+  gap: 2px 8px;
+  align-items: start;
+  padding: 8px 0;
+  border-top: 1px solid var(--line);
   font-size: 12px;
-  color: var(--muted);
-  cursor: pointer;
-  padding: 3px 7px;
-  border-radius: 5px;
 }
 
-.conn-item:hover {
-  background: rgba(255, 255, 255, 0.06);
+.conn-row:first-child {
+  border-top: 0;
+  padding-top: 0;
 }
 
-.conn-item .led {
+.conn-row > .led {
+  grid-column: 1;
+  grid-row: 1;
   width: 8px;
   height: 8px;
+  /* 첫 줄 글자의 가운데에 맞춘다 — 위에 딱 붙으면 이름과 어긋나 보인다. */
+  margin-top: 5px;
   border-radius: 50%;
-  flex-shrink: 0;
   background: #5c6780;
 }
 
-.conn-item.ok .led {
+.conn-row > .conn-who {
+  grid-column: 2;
+  grid-row: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+  min-width: 0;
+}
+
+.conn-row .conn-nm {
+  font-weight: 600;
+}
+
+/* 이메일은 이 줄에서 가장 중요한 정보다 — 흐리게 두지 않는다.
+   긴 주소는 자르지 않고 넘긴다(`@` 뒤가 잘리면 어느 계정인지 모른다). */
+.conn-row .conn-acct {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.conn-row > .conn-sub {
+  grid-column: 2;
+  grid-row: 2;
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.conn-row.ok > .led {
   background: #9ece6a;
   box-shadow: 0 0 6px rgba(158, 206, 106, 0.8);
 }
 
-.conn-item.warn .led {
+.conn-row.warn > .led {
   background: #e0af68;
   box-shadow: 0 0 6px rgba(224, 175, 104, 0.8);
 }
 
-.conn-item.bad .led {
+.conn-row.bad > .led {
   background: #f7768e;
   box-shadow: 0 0 6px rgba(247, 118, 142, 0.8);
 }
 
 /* 확인하는 동안 깜빡인다 — 멈춘 건지 재는 건지 구분되게. */
-.conn-item.checking .led {
+.conn-row.checking > .led {
   background: #7aa2f7;
   animation: breathe 1s ease-in-out infinite;
-}
-
-.conn-item.ok {
-  color: #9ece6a;
-}
-
-.conn-item.warn {
-  color: #e0af68;
-}
-
-.conn-item.bad {
-  color: #f7768e;
 }
 
 #add {
@@ -1159,6 +1186,17 @@ body.resizing * {
   text-decoration: underline;
 }
 
+/* 주소를 내놓고 죽은 서버. **누를 수 있는 것처럼 보이면 안 된다** — 링크 색을 그대로
+   두면 사용자는 계속 눌러 보고, 아무 일도 안 일어난다(실측: 08-02 12:52~12:57). */
+#run-url.dead {
+  color: #ff9e9e;
+  cursor: default;
+}
+
+#run-url.dead:hover {
+  text-decoration: none;
+}
+
 /* `display: inline-flex`가 `[hidden]`의 기본값을 이긴다. 프로젝트가 없을 때도
    빈 링크가 8px짜리로 남아 있었다 — 이 함정만 세 번째다(#messages, #welcome, 여기). */
 #run-url[hidden] {
@@ -1463,10 +1501,56 @@ canvas {
   margin-top: 8px;
 }
 
-#menu-pop #conn {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
+/* **[hidden]은 무엇에도 지지 않아야 한다.** display를 준 요소에는 [hidden]이 안 먹어
+   "감췄는데 계속 보인다"가 이미 세 번 났다(check-ui의 '숨김 실패'). display를 주는
+   규칙보다 뒤에 두고, 아이디로 잡은 것은 같은 무게로 되받는다. */
+#menu-pop [hidden],
+#menu-pop #stack[hidden] {
+  display: none;
+}
+
+/* 연결 줄의 버튼은 메뉴의 세로 버튼들과 다르다 — 계정 옆에 붙는 작은 버튼이다. */
+#menu-pop .conn-row > .conn-act {
+  grid-column: 3;
+  grid-row: 1 / span 2;
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: auto;
+  /* 손이 닿는 크기(24px)보다 아래로 내려가지 않게. 글자만으로는 21px까지 준다. */
+  min-height: 26px;
+  margin: 0;
+  padding: 4px 10px;
+  font-size: 12px;
+  line-height: 1.3;
+  white-space: nowrap;
+  text-align: center;
+}
+
+/* 지금 못 하는 것은 **감추지 않고 죽인다.** 감추면 기능이 없어진 줄 알고,
+   살려 두면 눌러 보고 나서야 안 된다는 걸 알게 된다. 이유는 아래 줄에 적는다. */
+#menu-pop button:disabled {
+  /* 너무 흐리면 무슨 버튼이었는지도 못 읽는다. 죽었다는 것만 보이게 살짝만. */
+  opacity: 0.62;
+  cursor: default;
+}
+
+/* 왜 못 바꾸는지 / 바꾸다 무슨 일이 있었는지. 팀원 패널의 같은 자리와 같은 옷을 입는다. */
+#conn-note {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  background: rgba(224, 175, 104, 0.12);
+  border-radius: 5px;
+  color: #e0af68;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+#conn-recheck {
+  margin-top: 8px;
+  font-size: 12px;
 }
 
 /* 토큰 표 — 네 항목을 합치지 않는다. 실측에서 캐시 읽기가 1.36억, 출력이 100만이라
@@ -1511,6 +1595,278 @@ canvas {
   font-size: 11px;
   line-height: 1.5;
   color: var(--muted);
+}
+
+/* ---------- 팀원 관리 ----------
+   고용·해고는 자주 하는 일이 아니고, 사무실 화면과 상단 바는 이미 꽉 차 있다.
+   그래서 ☰ 안에 요약 한 줄만 두고 실제 조작은 팝오버에서 한다.
+
+   **여닫기는 전부 `hidden`으로 한다.** display를 준 요소에는 [hidden]이 안 먹어
+   "감췄는데 계속 보인다"가 세 번 반복됐다 — 그래서 여기 요소들은 [hidden]을
+   display:none으로 되돌리는 규칙을 각자 갖는다. */
+
+#team-sec #team-sum {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+#team-pop {
+  position: fixed;
+  z-index: 61; /* ☰ 메뉴(60) 위에 뜬다 — 메뉴에서 열기 때문이다 */
+  width: 400px;
+  max-width: calc(100vw - 16px);
+  max-height: 82vh;
+  overflow: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+  font-size: 13px;
+}
+
+#team-pop[hidden],
+#team-pop [hidden] {
+  display: none;
+}
+
+#team-pop header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+}
+
+#team-pop h4 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+#team-dir {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+#team-close {
+  /* 조준할 수 있는 크기로. ×는 글자가 작아 그냥 두면 17x15가 된다. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+/* 지시가 도는 중에는 왜 못 바꾸는지 머리에 적는다. 버튼은 감추지 않고 비활성으로. */
+#team-busy {
+  margin: 0;
+  padding: 9px 14px;
+  background: rgba(224, 175, 104, 0.12);
+  border-bottom: 1px solid var(--line);
+  color: #e0af68;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+#team-pop section {
+  padding: 10px 14px 12px;
+}
+
+#team-pop section + section {
+  border-top: 1px solid var(--line);
+}
+
+#team-pop h5 {
+  margin: 0 0 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.team-row {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) auto;
+  gap: 3px 8px;
+  align-items: start;
+  padding: 8px 0;
+  border-top: 1px solid var(--line);
+}
+
+.team-row:first-child {
+  border-top: 0;
+}
+
+.team-row > .mk {
+  grid-column: 1;
+  grid-row: 1;
+  color: var(--muted);
+  text-align: center;
+}
+
+/* 일하는 중인 사람은 점이 켜진다 — 명단에서도 지금 상태가 보여야 한다. */
+.team-row.on > .mk {
+  color: #9ece6a;
+}
+
+.team-row > .who {
+  grid-column: 2;
+  grid-row: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.team-row .nm {
+  font-weight: 600;
+}
+
+/* 아주 긴 id가 들어와도 줄을 넘겨 이어 쓴다. 줄여서 감추면 어느 팀원인지 모른다. */
+.team-row .id {
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.team-row > .desc {
+  grid-column: 2;
+  grid-row: 2;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.team-row > .act {
+  grid-column: 3;
+  grid-row: 1 / span 2;
+  align-self: center;
+  padding: 5px 12px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+/* 지금 못 하는 것은 **감추지 않고 죽인다.** 감추면 기능이 없어진 줄 알고,
+   그대로 두면 눌러 보고 나서야 안 된다는 걸 알게 된다. 이유는 패널 머리에 있다. */
+#team-pop button:disabled {
+  /* 너무 흐리면 무슨 버튼이었는지도 못 읽는다. 죽었다는 것만 보이게 살짝만. */
+  opacity: 0.62;
+  cursor: default;
+}
+
+.team-empty {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* 직접 만들기 — 필요할 때만 편다. 늘 펴 두면 목록보다 폼이 커진다. */
+#team-new {
+  display: block;
+  width: 100%;
+  text-align: left;
+}
+
+#team-form {
+  margin-top: 10px;
+}
+
+.team-field {
+  margin-bottom: 10px;
+}
+
+.team-field label {
+  display: block;
+  margin-bottom: 3px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.team-field input {
+  width: 100%;
+  padding: 7px 9px;
+  background: #11131a;
+  color: var(--text);
+  border: 1px solid #3a4459;
+  border-radius: 5px;
+  font: inherit;
+}
+
+.team-hint {
+  margin: 3px 0 0;
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+/* 잘못된 값은 **그 입력 바로 아래에** 적는다. 화면을 옮기지 않는다. */
+.team-err {
+  margin: 3px 0 0;
+  font-size: 12px;
+  color: #f7768e;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+#ta-tools {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+}
+
+#ta-tools legend {
+  padding: 0 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+#ta-tools label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin: 3px 12px 3px 0;
+  font-size: 12px;
+}
+
+#ta-tools input {
+  width: 15px;
+  height: 15px;
+  accent-color: #7aa2f7;
+}
+
+.team-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+#team-note {
+  margin: 0;
+  padding: 10px 14px 12px;
+  border-top: 1px solid var(--line);
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+#team-note code {
+  font-size: 11px;
 }
 
 /* 화면에는 안 보이지만 읽어 주는 글자 — ☰만 있으면 무슨 버튼인지 알 수 없다. */

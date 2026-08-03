@@ -22,6 +22,31 @@ const CASES = [
   { scenario: 'missing', w: 1820, h: 1120 },
   { scenario: 'nologin', w: 1820, h: 1120 },
   { scenario: 'stress', w: 1820, h: 1120 },
+  // 주소를 주웠지만 서버가 죽은 실행 / 아직 확인 중인 실행. `#run-url`은
+  // display를 준 요소라 [hidden]이 안 먹는 함정이 이미 세 번 났던 자리다.
+  { scenario: 'rundead', w: 1820, h: 1120 },
+  { scenario: 'rundead', w: 1180, h: 760 },
+  // 팀원 관리 패널. 목록·버튼·만들기 폼이 한꺼번에 뜨는 화면이라 좁은 창에서
+  // 가장 먼저 무너진다. 정원이 차고 처리 중인 갈래(teamfull)는 **버튼이 감춰지지
+  // 않고 비활성으로 죽는지**를 본다 — 눌러도 아무 일 없는 버튼이 남으면 안 된다.
+  { scenario: 'team', w: 1820, h: 1120 },
+  { scenario: 'team', w: 1180, h: 760 },
+  { scenario: 'teamfull', w: 1820, h: 1120 },
+  { scenario: 'teamfull', w: 1180, h: 760 },
+  // ☰의 연결 — 로그인 계정 표시와 전환. 이메일·조직명은 **남이 정한 길이**라
+  // 자리에 맞춰 줄지 않는다. 짧은 계정과 아주 긴 계정을 둘 다 본다.
+  // 처리 중인 갈래(acctbusy)는 팀원 패널과 같은 규칙을 본다 — 버튼이 감춰지지
+  // 않고 **비활성으로 죽는지**.
+  { scenario: 'acct', w: 1820, h: 1120 },
+  { scenario: 'acct', w: 1180, h: 760 },
+  { scenario: 'acctlong', w: 1820, h: 1120 },
+  { scenario: 'acctlong', w: 1180, h: 760 },
+  { scenario: 'acctout', w: 1820, h: 1120 },
+  { scenario: 'acctout', w: 1180, h: 760 },
+  { scenario: 'acctfigma', w: 1820, h: 1120 },
+  { scenario: 'acctfigma', w: 1180, h: 760 },
+  { scenario: 'acctbusy', w: 1820, h: 1120 },
+  { scenario: 'acctbusy', w: 1180, h: 760 },
 ]
 
 // 잘려도 되는 것 — 마우스를 올리면 전문이 보이도록 title을 달아 둔 자리.

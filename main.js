@@ -50,6 +50,9 @@ let activeDir = null // 화면에 사무실을 그리고 있는 프로젝트
 let pumpTimer = null // 모든 감시를 한 타이머로 돌린다(프로젝트마다 두지 않는다)
 let lastStatusJson = '' // 상태가 바뀔 때만 렌더러로 보내기 위한 직전 값
 
+// 설정·좌석·대화 기록이 사는 곳은 `%APPDATA%\<package.json의 name>`이다.
+// 표시 이름은 '윤사무실'이지만 name은 `team-view`로 남겨 뒀다 — 바꾸는 순간
+// Electron이 빈 새 폴더를 보게 돼 붙여 둔 프로젝트·좌석·대화 기록이 통째로 고아가 된다.
 function configPath() {
   return path.join(app.getPath('userData'), CONFIG_NAME)
 }
@@ -125,7 +128,7 @@ function companyState(dir) {
   return Date.now() / 1000 - at > WORKER_TTL_S ? 'closed' : 'foreign'
 }
 
-// 붙인 프로젝트가 팀뷰와 일할 준비가 됐는지 검사한 결과를 잠깐 들고 있는다.
+// 붙인 프로젝트가 윤사무실과 일할 준비가 됐는지 검사한 결과를 잠깐 들고 있는다.
 // 이 파일들은 자주 바뀌지 않으므로 상태를 갱신할 때마다 디스크를 뒤질 이유가 없다.
 const healthCache = new Map() // dir -> { at, health }
 const HEALTH_TTL_MS = 10_000
@@ -139,7 +142,7 @@ function countAgentFiles(dir) {
 }
 
 /**
- * 이 프로젝트가 팀뷰와 일할 준비가 됐는가.
+ * 이 프로젝트가 윤사무실과 일할 준비가 됐는가.
  *
  * 셋 중 하나라도 빠지면 붙여도 원하는 대로 움직이지 않는다. 그런데 지금까지는
  * **붙여서 지시를 보내보고, 안 움직이는 걸 보고 나서야** 알 수 있었다. 실제로
@@ -248,7 +251,7 @@ function appendChat(dir, msg) {
 }
 
 // ---------------------------------------------------------------------------
-// 실행 환경 — 팀뷰는 Claude Code 위에서 돈다
+// 실행 환경 — 윤사무실은 Claude Code 위에서 돈다
 //
 // 팀원이 실제로 일하려면 (1) claude CLI가 깔려 있고 (2) 로그인돼 있어야 한다.
 // 기획·화면설계는 Figma에 만들므로 (3) Figma MCP 연결도 필요하다.
@@ -279,9 +282,9 @@ const runClaude = (args, t) => runCmd('claude', args, t)
 const NOT_FOUND = /not recognized|command not found|ENOENT|없는 명령|찾을 수 없습니다|is not recognized/i
 
 /**
- * 팀뷰가 돌려면 이 컴퓨터에 있어야 하는 것들.
+ * 윤사무실이 돌려면 이 컴퓨터에 있어야 하는 것들.
  *
- * **앱만 복사해서는 동작하지 않는다.** 팀뷰는 claude CLI를 띄우고, 그 활동은 python
+ * **앱만 복사해서는 동작하지 않는다.** 윤사무실은 claude CLI를 띄우고, 그 활동은 python
  * 훅이 기록한다. 다른 PC에 exe만 옮기면 화면은 뜨지만 아무 일도 일어나지 않는데,
  * 무엇이 없어서인지 알 방법이 없다. 그래서 이름을 붙여 하나씩 확인한다.
  *
@@ -349,7 +352,41 @@ let envCache = null
 const ENV_TTL_MS = 5 * 60_000
 
 /**
- * 지금 이 컴퓨터가 팀뷰를 쓸 수 있는 상태인가.
+ * `claude auth status`(출력은 JSON이 기본)를 읽어 **누구로 로그인돼 있는지**까지 알아낸다.
+ *
+ * **절대 던지지 않는다.** 환경 확인이 앱을 막으면 안 된다 — CLI가 올라가 출력 모양이
+ * 바뀌든, 안내 문구가 섞여 오든, 아무 말도 없든 "로그인 안 됨"으로 떨어질 뿐이어야 한다.
+ * 예전에 여기서 던져서 창이 비었던 적이 있다.
+ *
+ * `orgId`는 **일부러 읽지 않는다.** 화면에 보여줄 값이 아니고, 응답이나 로그에 남을
+ * 이유도 없다. 읽지 않으면 샐 수도 없다.
+ */
+function parseAuthStatus(text) {
+  const blank = { loggedIn: false, email: null, orgName: null, subscriptionType: null, authMethod: null }
+  const s = String(text ?? '')
+  const a = s.indexOf('{')
+  const b = s.lastIndexOf('}')
+  if (a < 0 || b <= a) return blank
+  let j = null
+  try {
+    j = JSON.parse(s.slice(a, b + 1))
+  } catch {
+    return blank // JSON이 아니면 로그인 안 된 것으로 본다(예전 동작 그대로)
+  }
+  // 로그인했을 때만 계정 정보를 담는다. 로그아웃 응답에 값이 남아 있어도 새면 안 된다.
+  if (!j || typeof j !== 'object' || !j.loggedIn) return blank
+  const str = (v) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, 200) : null)
+  return {
+    loggedIn: true,
+    email: str(j.email),
+    orgName: str(j.orgName),
+    subscriptionType: str(j.subscriptionType),
+    authMethod: str(j.authMethod),
+  }
+}
+
+/**
+ * 지금 이 컴퓨터가 윤사무실을 쓸 수 있는 상태인가.
  *
  * `claude mcp list`는 서버마다 헬스 체크를 해서 몇 초 걸린다. 그래서 결과를 캐시하고,
  * 로그인 창을 띄운 뒤처럼 **바뀌었을 법한 순간에만** 강제로 다시 본다.
@@ -358,7 +395,15 @@ async function checkEnv({ force = false } = {}) {
   if (!force && envCache && Date.now() - envCache.at < ENV_TTL_MS) return envCache.value
 
   const value = {
-    claude: { installed: false, loggedIn: false, email: null, plan: null },
+    claude: {
+      installed: false,
+      loggedIn: false,
+      email: null,
+      orgName: null,
+      subscriptionType: null,
+      authMethod: null,
+      plan: null,
+    },
     figma: { connected: false, present: false },
   }
 
@@ -367,14 +412,9 @@ async function checkEnv({ force = false } = {}) {
   const notFound = NOT_FOUND.test(combined)
   value.claude.installed = !notFound
   if (!notFound) {
-    try {
-      const j = JSON.parse(auth.out.slice(auth.out.indexOf('{'), auth.out.lastIndexOf('}') + 1))
-      value.claude.loggedIn = Boolean(j.loggedIn)
-      value.claude.email = j.email ?? null
-      value.claude.plan = j.subscriptionType ?? j.authMethod ?? null
-    } catch {
-      /* JSON이 아니면 로그인 안 된 것으로 본다 */
-    }
+    Object.assign(value.claude, parseAuthStatus(auth.out))
+    // plan은 이 값이 생기기 전부터 화면이 쓰던 이름이다. 그대로 채워 둔다.
+    value.claude.plan = value.claude.subscriptionType ?? value.claude.authMethod ?? null
   }
 
   // 로그인도 안 된 상태에서 MCP를 물어봐야 의미가 없다(느리기만 하다).
@@ -390,22 +430,131 @@ async function checkEnv({ force = false } = {}) {
 }
 
 /**
+ * cmd.exe가 삼키면 안 되는 글자들. cmd는 `&`·`|`·`<`·`>`를 만나면 그 자리에서 명령을
+ * 갈라 버리고, `%`는 환경변수로 펼치며, `"`는 우리가 만든 인용을 깨뜨린다.
+ * 지금 인자는 전부 고정 문자열이지만, 나중에 사용자 입력이 섞여도 여기서 막힌다.
+ */
+const CMD_UNSAFE = /["&|<>^%()\r\n]/
+
+/** 공백이 있는 토큰만 인용한다. cmd는 `\"` 이스케이프를 모르므로 홑겹으로만 감싼다. */
+function quoteForCmd(token) {
+  return /\s/.test(token) ? `"${token}"` : token
+}
+
+/**
  * 로그인 창을 띄운다. **새 콘솔 창**으로 여는 이유는 둘 다 사람이 손으로 끝내야 하는
  * 대화형 절차이기 때문이다(브라우저가 열리고 코드를 붙여넣는 식). 앱이 stdio를
  * 가로채면 그 과정을 볼 수도 마칠 수도 없다.
  */
 function openInTerminal(args, title, exe = 'claude') {
-  if (process.platform === 'win32') {
-    // start "제목" cmd /k <exe> ... — 창이 남아야 사용자가 결과를 읽는다
-    spawn('cmd.exe', ['/c', 'start', `"${title}"`, 'cmd', '/k', exe, ...args], {
+  // 다른 OS는 기본 터미널을 특정하기 어렵다 — 명령을 알려 주는 쪽이 정직하다.
+  if (process.platform !== 'win32') return false
+
+  const tokens = [exe, ...args].map(String)
+  // 못 띄우면 조용히 넘어가지 않는다. false를 돌려주면 호출부가 `manual` 문구를 띄운다.
+  if (CMD_UNSAFE.test(title) || tokens.some((t) => CMD_UNSAFE.test(t))) return false
+
+  // start "제목" cmd /k <exe> ... — 창이 남아야 사용자가 브라우저 로그인을 마치고 결과를 읽는다.
+  //
+  // **명령줄을 우리가 직접 만들고 windowsVerbatimArguments로 넘긴다.** 배열로 넘기면
+  // spawn(shell:false)이 libuv 규칙으로 한 번 더 인용해 준다. 그래서 제목을 `"${title}"`로
+  // 감싸 두면 `"\"윤사무실 - Figma 연결\""`가 되는데, cmd는 `\"`를 이스케이프로 읽지 않고
+  // 따옴표 토글로만 읽는다. 결과적으로 제목이 첫 공백에서 잘려 start가 그 다음 토큰을
+  // 실행할 명령으로 착각했다 — 사용자가 실제로 본 오류가
+  // `'-'을(를) 찾을 수 없습니다. 이름을 올바르게 입력했는지 확인하고 다시 시도하십시오.`
+  // 였다(`윤사무실 - Figma 연결`의 `-`가 명령 자리로 밀렸다).
+  //
+  // 제목은 **항상** 감싼다. start는 인용된 첫 토큰만 제목으로 보고, 안 감싸면 그것을
+  // 실행할 명령으로 삼는다(공백 없는 제목이 오면 그대로 터진다).
+  const line = ['start', `"${title}"`, 'cmd', '/k', ...tokens.map(quoteForCmd)].join(' ')
+  try {
+    const child = spawn('cmd.exe', ['/c', line], {
       detached: true,
       stdio: 'ignore',
       windowsHide: false,
-    }).unref()
+      windowsVerbatimArguments: true,
+    })
+    child.on('error', (e) => console.error('터미널 창을 띄우지 못했습니다:', e.message))
+    child.unref()
     return true
+  } catch (e) {
+    console.error('터미널 창을 띄우지 못했습니다:', e.message)
+    return false
   }
-  // 다른 OS는 기본 터미널을 특정하기 어렵다 — 명령을 알려 주는 쪽이 정직하다.
-  return false
+}
+
+// 최대 3분 동안 30초 간격으로 확인한다. 브라우저 로그인은 보통 1분 안에 끝난다.
+const WATCH_EVERY_MS = 30_000
+const WATCH_TRIES = 6
+
+/**
+ * 창을 띄운 뒤 **끝났는지 지켜본다** — 사람이 브라우저에서 마치는 동안 앱이 알아채야지,
+ * 다시 눌러 보라고 하면 안 된다.
+ *
+ * 처음 연결(env:login)과 계정 전환(env:switch)이 이 하나를 같이 쓴다. 전에 감시를
+ * 두 벌로 두면 한쪽만 고쳐져 어긋난다 — 같은 화면을 두 규칙이 그리게 된다.
+ */
+async function openAndWatch(what, args, title) {
+  if (!openInTerminal(args, title)) {
+    return { ok: false, manual: `claude ${args.join(' ')}`, error: '이 OS에서는 터미널을 자동으로 열 수 없습니다' }
+  }
+  for (let i = 0; i < WATCH_TRIES; i++) {
+    await new Promise((r) => setTimeout(r, WATCH_EVERY_MS))
+    const env = await checkEnv({ force: true })
+    send('env:status', env)
+    const done = what === 'figma' ? env.figma.connected : env.claude.loggedIn
+    if (done) return { ok: true, env }
+  }
+  // 실패 응답에는 `error`가 늘 있어야 화면이 한 갈래로 처리할 수 있다. `timeout`은
+  // 그 위에 얹는 사정이다(화면은 지금도 timeout을 먼저 본다 — 그 길을 막지 않는다).
+  return { ok: false, timeout: true, error: '3분 안에 끝나지 않았습니다 — 창에서 마친 뒤 "다시 확인"을 눌러 주세요', env: await checkEnv({ force: true }) }
+}
+
+/** 지금 지시를 처리 중인 회사 이름들. 하나라도 있으면 계정을 건드리면 안 된다. */
+function runningCompanies() {
+  return [...companies.values()].filter((c) => c.child).map((c) => path.basename(c.dir))
+}
+
+/** CLI가 왜 실패했는지 한 줄만. 길게 실으면 화면이 읽히지 않는다. */
+function firstLine(text) {
+  return String(text ?? '').trim().split(/\r?\n/)[0].slice(0, 200)
+}
+
+/**
+ * 계정을 **바꾼다**. 로그인과 다르다 — 이미 로그인돼 있으면 `claude auth login`은
+ * "이미 로그인됨"으로 끝나서 다른 계정으로 갈 수가 없었다. 먼저 나가야 한다.
+ *
+ * 처리 중인 지시가 있으면 거절한다. 로그아웃하는 순간 **돌고 있는 claude가 인증을
+ * 잃어 그 지시가 통째로 실패한다.** 화면에서도 버튼을 막지만, 막는 자리는 여기여야
+ * 한다 — 화면은 상태를 늦게 안다.
+ */
+async function switchAccount(what) {
+  if (what !== 'claude' && what !== 'figma') return { ok: false, error: '알 수 없는 항목입니다' }
+
+  const running = runningCompanies()
+  if (running.length) {
+    return { ok: false, busy: true, running, error: '지시가 처리 중입니다 — 끝나거나 취소한 뒤에 바꾸세요' }
+  }
+
+  if (what === 'figma') {
+    // Figma는 로그아웃이 없다. 지우고 다시 붙이는 것이 재인증 경로다.
+    // **지우기가 실패하면 붙이지 않는다** — 같은 이름이 두 번 등록될 수 있다.
+    const rm = await runClaude(['mcp', 'remove', 'figma'])
+    if (rm.err) {
+      return { ok: false, error: `Figma 연결을 지우지 못했습니다 — ${firstLine(rm.errOut || rm.out) || '알 수 없는 오류'}` }
+    }
+    envCache = null // 방금 바꿔 놓고 캐시된 "연결됨"을 돌려주면 안 된다
+    return openAndWatch('figma', ['mcp', 'add', '--transport', 'http', 'figma', 'https://mcp.figma.com/mcp'], '윤사무실 - Figma 다시 연결')
+  }
+
+  // 로그아웃은 사람 손이 필요 없다 — 조용히 끝내고 로그인 창만 띄운다.
+  // **실패하면 창을 띄우지 않는다.** 반쯤 나간 상태로 두면 무엇이 참인지 알 수 없다.
+  const out = await runClaude(['auth', 'logout'])
+  if (out.err) {
+    return { ok: false, error: `로그아웃하지 못했습니다 — ${firstLine(out.errOut || out.out) || '알 수 없는 오류'}` }
+  }
+  envCache = null
+  return openAndWatch('claude', ['auth', 'login'], '윤사무실 - Claude 계정 전환')
 }
 
 // ---------------------------------------------------------------------------
@@ -419,7 +568,7 @@ function openInTerminal(args, title, exe = 'claude') {
 // 확인을 받는다(renderer의 확인 창 → project:setup).
 // ---------------------------------------------------------------------------
 
-/** 팀뷰가 들고 다니는 템플릿 뿌리. 패키징 후에도 같은 위치다(package.json의 files). */
+/** 윤사무실이 들고 다니는 템플릿 뿌리. 패키징 후에도 같은 위치다(package.json의 files). */
 function templateDir() {
   return path.join(__dirname, 'templates')
 }
@@ -536,8 +685,12 @@ function setupProject(dir, parts = {}) {
       fs.mkdirSync(dst, { recursive: true })
       let added = 0
       let updated = 0
+      // **해고한 사람을 세팅이 되살리면 안 된다.** 갱신을 누를 때마다 내보낸 팀원이
+      // 돌아오면 해고 기능 자체가 무효다.
+      const fired = new Set(firedIds(dir))
       for (const f of fs.readdirSync(src)) {
         if (!f.endsWith('.md')) continue
+        if (fired.has(f.replace(/\.md$/i, ''))) continue
         const target = path.join(dst, f)
         const exists = fs.existsSync(target)
         // 평소에는 있는 파일을 건드리지 않는다. 다만 **갱신을 고른 경우**에는 덮어쓴다 —
@@ -551,6 +704,7 @@ function setupProject(dir, parts = {}) {
       const bits = []
       if (added) bits.push(`팀원 ${added}명 추가`)
       if (updated) bits.push(`팀원 ${updated}명 갱신`)
+      if (fired.size) bits.push(`해고자 ${fired.size}명 제외`)
       done.push(bits.join(' · ') || '팀원 변경 없음')
     }
     if (parts.guide) {
@@ -566,19 +720,538 @@ function setupProject(dir, parts = {}) {
   } catch (err) {
     return { ok: false, error: err.message, done }
   }
-  healthCache.delete(dir) // 방금 바꿨으니 다시 검사한다
+  invalidateTeam(dir) // 방금 바꿨으니 명단·건강 검사를 다시 한다
   return { ok: true, done }
 }
 
 /**
  * 템플릿과 **내용이 다른** 팀원 파일 수.
  *
- * 팀뷰를 고치면 앱 동작은 바로 바뀌지만 **이미 세팅된 프로젝트의 팀원 정의는 그대로**다.
+ * 윤사무실을 고치면 앱 동작은 바로 바뀌지만 **이미 세팅된 프로젝트의 팀원 정의는 그대로**다.
  * 세팅은 "이미 있는 파일을 건드리지 않는" 원칙이라 다시 눌러도 갱신되지 않았다. 그래서
  * 오래 쓴 프로젝트일수록 새 규칙(묻는 말 예외·Figma 강제 같은)을 못 받는다.
  *
  * CLAUDE.md는 비교하지 않는다 — 개요·스택을 사람이 채우는 파일이라 다른 게 정상이다.
  */
+// ---------------------------------------------------------------------------
+// 팀원 고용·해고
+//
+// **명단의 진실은 디스크다.** 앱이 명단을 따로 들고 있으면, 사람이 파일을 손으로
+// 넣거나 지웠을 때 화면과 실제가 어긋난다. Claude Code가 서브에이전트를 찾는 자리를
+// 그대로 읽는다:
+//
+//   [리드(항상 있다, 파일이 없다)] + <프로젝트>/.claude/agents/*.md + ~/.claude/agents/*.md
+//
+// **파일 형식에 새 키를 만들지 않는다.** Claude Code가 모르는 키를 넣으면 그 파일은
+// 윤사무실 전용이 되고, 사람이 claude로 직접 쓸 때 걸림돌이 된다. 화면에 붙는 한글
+// 이름표(label)는 파일이 아니라 렌더러 사전이 정한다.
+// ---------------------------------------------------------------------------
+
+const FIRED_DIRNAME = 'team-fired'
+// 자리 상한. 화면의 책상 칸 수와 같아야 한다(renderer/agents.js의 DESK_CELLS).
+const SEAT_CAPACITY = 14
+
+// 좌석은 **명단 순서가 아니라 id에 묶는다.** 순서에 묶으면 한 명을 해고하는 순간
+// 뒤의 모두가 한 칸씩 밀려 사무실이 통째로 재배치된다 — 어제 보던 화면이 아니게 된다.
+//
+// 이 표는 **지금 배치를 그대로 굳힌 것**이다(renderer/agents.js의 ROSTER 순서 ×
+// DESK_CELLS). 배열 위치가 곧 좌석 번호다. **순서를 바꾸지 마라** — 이미 돌아가는
+// 회사들의 자리가 전부 움직인다. 검사(tools/check-logic.js)가 이 값을 지킨다.
+const PRESET_SEATS = [
+  'planner', // 0
+  'ux-designer', // 1
+  'frontend-dev', // 2
+  'backend-dev', // 3
+  'mobile-dev', // 4
+  'code-reviewer', // 5
+  'qa-tester', // 6
+  'debugger', // 7
+  'release-manager', // 8
+  'scout', // 9
+]
+
+// 파일명이 되는 값이라 안전한 글자만 받는다(경로 탈출·이상한 파일명 방지).
+const SAFE_AGENT_ID = /^[a-z0-9][a-z0-9-]{0,39}$/
+// 도구 이름. MCP 도구는 `mcp__figma__get_screenshot`처럼 밑줄이 섞인다.
+const SAFE_TOOL = /^[A-Za-z][A-Za-z0-9_]{0,79}$/
+
+function agentsDirOf(dir) {
+  return path.join(dir, '.claude', 'agents')
+}
+
+function firedDirOf(dir) {
+  return path.join(dir, '.claude', FIRED_DIRNAME)
+}
+
+/** 이 컴퓨터의 전역 팀원. 어느 프로젝트에서나 부를 수 있고, 여기서 해고하지 못한다. */
+function userAgentsDir() {
+  return path.join(app.getPath('home'), '.claude', 'agents')
+}
+
+/**
+ * 팀원 정의 한 장에서 id·설명·도구를 읽는다.
+ *
+ * **절대 던지지 않는다.** 사람이 손으로 고치는 파일이라 frontmatter가 깨져 있는 일이
+ * 흔한데, 그 한 장 때문에 명단 전체가 비면 사무실이 텅 빈 채로 뜬다. 못 읽으면
+ * 파일명으로 살린다 — 이름 없는 사람이라도 자리에는 앉아 있어야 한다.
+ */
+function parseAgentFile(file) {
+  const out = { id: path.basename(file).replace(/\.md$/i, ''), desc: '', tools: [] }
+  try {
+    const text = fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n')
+    if (!text.startsWith('---\n')) return out // frontmatter가 없으면 파일명이 전부다
+    const end = text.indexOf('\n---', 3)
+    if (end < 0) return out
+    for (const line of text.slice(4, end).split('\n')) {
+      const m = /^(name|description|tools)\s*:\s*(.*)$/.exec(line)
+      if (!m) continue
+      const val = m[2].trim().replace(/^['"]|['"]$/g, '').trim()
+      if (m[1] === 'name') {
+        if (val) out.id = val
+      } else if (m[1] === 'description') {
+        out.desc = val.slice(0, 160) // 목록에 한 줄로 뜨는 값이다. 더 길면 화면만 밀린다.
+      } else {
+        out.tools = val.split(',').map((t) => t.trim()).filter(Boolean)
+      }
+    }
+  } catch {
+    /* 못 읽어도 파일명으로 산다 */
+  }
+  return out
+}
+
+/** 해고자 명단(파일명 기준). 세팅·갱신이 이들을 되살리면 해고 기능 자체가 무효다. */
+function firedIds(dir) {
+  try {
+    return fs
+      .readdirSync(firedDirOf(dir))
+      .filter((f) => f.toLowerCase().endsWith('.md'))
+      .map((f) => f.replace(/\.md$/i, ''))
+  } catch {
+    return [] // 해고자 폴더가 없는 게 보통이다
+  }
+}
+
+/**
+ * id마다 자리 번호를 준다.
+ *
+ *   1. 프리셋에 있는 id는 **언제나** 그 번호다(기존 회사 화면이 움직이지 않게).
+ *   2. 그 밖의 id는 앱 설정(userData)에 적힌 번호를 그대로 쓴다.
+ *   3. 처음 보는 id는 **가장 낮은 빈 번호**를 받고, 그 자리를 설정에 적어 굳힌다.
+ *
+ * **프로젝트 폴더에 쓰지 않는다.** 남의 작업 폴더에 앱 파일을 남기면 커밋에 섞인다
+ * (대화 기록을 userData에 두는 것과 같은 이유).
+ */
+function assignSeats(dir, ids) {
+  const cfg = loadConfig()
+  const all = cfg.seats && typeof cfg.seats === 'object' ? cfg.seats : {}
+  const saved = { ...(all[dir] ?? {}) }
+  const used = new Map() // 번호 -> id
+  const out = new Map() // id -> 번호(또는 null)
+  let dirty = false
+
+  for (const id of ids) {
+    const n = PRESET_SEATS.indexOf(id)
+    if (n < 0) continue
+    out.set(id, n)
+    used.set(n, id)
+    // 프리셋은 코드가 진실이다. 장부에 남아 있으면 지운다(둘이 어긋날 여지를 없앤다).
+    if (saved[id] !== undefined) {
+      delete saved[id]
+      dirty = true
+    }
+  }
+  for (const id of ids) {
+    if (out.has(id)) continue
+    const n = saved[id]
+    // 장부 번호가 프리셋과 부딪히면 **프리셋이 이긴다.** 장부 쪽은 아래에서 다시 적는다.
+    if (!Number.isInteger(n) || n < 0 || n >= SEAT_CAPACITY || used.has(n)) continue
+    out.set(id, n)
+    used.set(n, id)
+  }
+  for (const id of ids) {
+    if (out.has(id)) continue
+    let n = 0
+    while (n < SEAT_CAPACITY && used.has(n)) n++
+    if (n >= SEAT_CAPACITY) {
+      // 자리가 없다. 화면에 그릴 수 없으니 솔직히 비워 보낸다(없는 칸에 그리면 벽 밖이다).
+      out.set(id, null)
+      if (saved[id] !== undefined) {
+        delete saved[id]
+        dirty = true
+      }
+      continue
+    }
+    out.set(id, n)
+    used.set(n, id)
+    if (saved[id] !== n) {
+      saved[id] = n
+      dirty = true
+    }
+  }
+  if (dirty) saveConfig({ ...cfg, seats: { ...all, [dir]: saved } })
+  return out
+}
+
+// 명단은 자주 바뀌지 않는다. 상태를 300ms마다 보내면서 디스크를 매번 뒤질 이유가 없다
+// (projectHealth와 같은 방식·같은 수명).
+const teamCache = new Map() // dir -> { at, team }
+const TEAM_TTL_MS = 10_000
+
+function invalidateTeam(dir) {
+  teamCache.delete(dir)
+  healthCache.delete(dir) // 팀원 수·낡음 판정도 같이 바뀐다
+}
+
+/**
+ * 이 프로젝트의 실제 팀 명단.
+ *
+ * 같은 id가 프로젝트와 전역에 다 있으면 **프로젝트가 이긴다** — Claude Code가 고르는
+ * 것과 같은 규칙이어야 화면과 실제가 어긋나지 않는다.
+ */
+function readTeam(dir) {
+  const hit = teamCache.get(dir)
+  if (hit && Date.now() - hit.at < TEAM_TTL_MS) return hit.team
+
+  const byId = new Map()
+  // 전역을 먼저 읽고 프로젝트로 덮는다(덮는 쪽이 이긴다).
+  for (const [scope, folder] of [['user', userAgentsDir()], ['project', agentsDirOf(dir)]]) {
+    let names = []
+    try {
+      names = fs.readdirSync(folder)
+    } catch {
+      continue // 폴더가 없는 건 흔한 일이다
+    }
+    for (const name of names.sort()) {
+      if (!name.toLowerCase().endsWith('.md')) continue
+      const file = path.join(folder, name)
+      const info = parseAgentFile(file)
+      if (!info.id) continue
+      // 전역 팀원은 이 프로젝트 밖의 것이라 여기서 해고하지 않는다(남의 프로젝트가 같이 잃는다).
+      byId.set(info.id, { ...info, scope, file, fireable: scope === 'project' })
+    }
+  }
+  const ids = [...byId.keys()].sort()
+  const seats = assignSeats(dir, ids)
+  const team = [
+    // 리드는 파일이 없고 언제나 있다. 자리도 따로다(renderer의 LEAD_DESK).
+    { id: 'lead', desc: '팀을 이끌고 일을 나눈다', tools: [], scope: 'lead', file: null, seat: null, fireable: false },
+    ...ids
+      .map((id) => ({ ...byId.get(id), seat: seats.get(id) ?? null }))
+      // 자리 순으로 보낸다. 자리가 없는 사람은 뒤로.
+      .sort((a, b) => (a.seat ?? 99) - (b.seat ?? 99)),
+  ]
+  teamCache.set(dir, { at: Date.now(), team })
+  return team
+}
+
+/** 남은 자리 수. 리드는 자기 자리가 따로라 세지 않는다. */
+function freeSeats(team) {
+  return Math.max(0, SEAT_CAPACITY - team.filter((m) => m.seat !== null).length)
+}
+
+/** 지금 지시를 처리하는 중인가. 처리 중이면 팀 구성을 바꾸지 않는다. */
+function companyBusy(dir) {
+  return Boolean(companies.get(dir)?.child)
+}
+
+/**
+ * 고를 수 있는 팀원 목록(카탈로그).
+ *   employed  — 이미 팀에 있다
+ *   fired     — 해고했다. 다시 부르면 **그 파일이 그대로 돌아온다**
+ *   available — 아직 부른 적 없다
+ */
+function teamCatalog(dir) {
+  const employed = new Set(readTeam(dir).map((m) => m.id))
+  const fired = firedIds(dir)
+  const out = []
+  const seen = new Set()
+  const add = (id, file, state) => {
+    if (seen.has(id)) return
+    seen.add(id)
+    const info = parseAgentFile(file)
+    out.push({ id, desc: info.desc, tools: info.tools, state })
+  }
+  let templates = []
+  try {
+    templates = fs.readdirSync(path.join(templateDir(), 'agents')).filter((f) => f.toLowerCase().endsWith('.md'))
+  } catch {
+    /* 템플릿을 못 읽어도 해고자는 보여 줘야 한다 */
+  }
+  // 화면 순서를 프리셋 자리 순으로 맞춘다(목록과 사무실 배치가 따로 놀지 않게).
+  const order = (f) => {
+    const i = PRESET_SEATS.indexOf(f.replace(/\.md$/i, ''))
+    return i < 0 ? PRESET_SEATS.length : i
+  }
+  for (const f of templates.sort((a, b) => order(a) - order(b) || a.localeCompare(b))) {
+    const id = f.replace(/\.md$/i, '')
+    const state = employed.has(id) ? 'employed' : fired.includes(id) ? 'fired' : 'available'
+    add(id, path.join(templateDir(), 'agents', f), state)
+  }
+  // 카탈로그에 없는 해고자(직접 만든 팀원)도 다시 부를 수 있어야 한다.
+  for (const id of fired) add(id, path.join(firedDirOf(dir), id + '.md'), employed.has(id) ? 'employed' : 'fired')
+  return out
+}
+
+function listTeam(dir) {
+  if (!dir) return { ok: false, error: '프로젝트가 선택되지 않았습니다' }
+  const members = readTeam(dir)
+  return {
+    ok: true,
+    busy: companyBusy(dir),
+    capacity: SEAT_CAPACITY,
+    free: freeSeats(members),
+    members,
+    catalog: teamCatalog(dir),
+  }
+}
+
+/**
+ * 지금 팀 구성을 바꿔도 되는가. 되면 null, 안 되면 그대로 돌려줄 실패 응답.
+ *
+ * **처리 중이면 전부 막는다.** 지시가 도는 중에 팀원이 사라지면 리드가 없는 사람을
+ * 부르다 실패하고, 그 실패는 사용자 눈에 원인 불명으로 보인다. 프런트도 버튼을
+ * 막지만 **여기서 한 번 더 거절한다** — 화면 상태는 언제든 낡을 수 있다.
+ */
+function teamWriteBlock(dir) {
+  if (!dir) return { ok: false, error: '프로젝트가 선택되지 않았습니다' }
+  // 남의 폴더에 파일을 만들거나 옮기는 일이다. 붙여 둔 프로젝트만 허용한다.
+  if (!loadProjects().includes(dir)) return { ok: false, error: '붙어 있지 않은 프로젝트입니다' }
+  if (!fs.existsSync(path.join(dir, '.claude'))) {
+    return { ok: false, error: '아직 세팅되지 않은 프로젝트입니다 — 상단 "세팅하기"를 누르세요' }
+  }
+  if (companyBusy(dir)) {
+    return { ok: false, busy: true, error: '지금 지시를 처리하는 중입니다 — 끝난 뒤에 바꿔주세요' }
+  }
+  return null
+}
+
+/**
+ * 명단이 바뀐 뒤에 할 일.
+ *
+ * 이벤트 한 줄을 남기는 것이 화면과의 유일한 약속이다. **detail을 붙이지 않는다** —
+ * 고용·해고는 작업이 아니라서 작업 배지가 붙으면 안 된다(가짜 활동을 만들지 않는다).
+ */
+function afterTeamChange(dir, type, id) {
+  invalidateTeam(dir)
+  try {
+    appendJsonl(eventsFileFor(dir), { ts: Date.now() / 1000, type, agent: id })
+  } catch {
+    /* 기록에 실패해도 파일은 이미 옮겨졌다. 되돌리지 않는다. */
+  }
+  pumpStatusAll({ force: true })
+}
+
+/**
+ * 카탈로그에서 한 명 고용한다.
+ *
+ * 해고자가 있으면 **그 파일을 우선 복원**한다 — 사람이 고쳐 둔 내용이 있는데
+ * 템플릿으로 덮으면 그 수정이 조용히 사라진다.
+ */
+function hireAgent(dir, rawId) {
+  const blocked = teamWriteBlock(dir)
+  if (blocked) return blocked
+  const id = String(rawId ?? '').trim()
+  if (!SAFE_AGENT_ID.test(id)) return { ok: false, code: 'VALIDATION', error: '팀원 id가 올바르지 않습니다' }
+  const team = readTeam(dir)
+  if (team.some((m) => m.id === id)) return { ok: false, error: `${id}은(는) 이미 팀에 있습니다` }
+  if (freeSeats(team) <= 0) return { ok: false, full: true, error: `자리가 없습니다 (최대 ${SEAT_CAPACITY}명)` }
+
+  const firedFile = path.join(firedDirOf(dir), id + '.md')
+  const tplFile = path.join(templateDir(), 'agents', id + '.md')
+  const from = fs.existsSync(firedFile) ? 'fired' : fs.existsSync(tplFile) ? 'template' : null
+  if (!from) return { ok: false, error: `${id} 정의를 찾지 못했습니다` }
+
+  const target = path.join(agentsDirOf(dir), id + '.md')
+  try {
+    fs.mkdirSync(agentsDirOf(dir), { recursive: true })
+    if (from === 'fired') fs.renameSync(firedFile, target)
+    else fs.copyFileSync(tplFile, target)
+  } catch (err) {
+    return { ok: false, error: `팀원 파일을 만들지 못했습니다: ${err.message}` }
+  }
+  afterTeamChange(dir, 'hire', id)
+  return { ok: true, id, from, path: target }
+}
+
+/** YAML 한 줄에 그대로 넣어도 되는 값인지 보고, 위험하면 따옴표로 감싼다. */
+function yamlValue(s) {
+  return /^[\s'"[\]{}>|*&!%#@`,-]|:\s|\s#/.test(s) ? JSON.stringify(s) : s
+}
+
+/**
+ * 새 팀원 정의 본문을 만든다. **빈 파일을 만들지 않는다.**
+ *
+ * 기존 정의들에는 실제 사고를 겪고 쌓인 공통 규칙이 들어 있다(산출물을 파일로 남길
+ * 것, 확인 절차, 스크린샷을 한 번만 받을 것 등). 껍데기만 만들어 주면 그 기준이
+ * 통째로 빠진 팀원이 생긴다 — 말로만 답하고 끝내는 팀원이 그렇게 나온다.
+ *
+ * 본은 **요청한 도구와 가장 많이 겹치는 정의**로 고른다. Figma 도구를 고른 팀원이
+ * "스크린샷은 한 번만" 규칙을 못 받으면 그 자리에서 토큰이 샌다(실측: 스크린샷 하나
+ * 27만 자가 이후 30여 호출에 곱해졌다).
+ */
+function renderAgentFile({ id, label, description, tools }) {
+  const base = path.join(templateDir(), 'agents')
+  let files = []
+  try {
+    files = fs.readdirSync(base).filter((f) => f.toLowerCase().endsWith('.md'))
+  } catch {
+    return { text: null, basedOn: null }
+  }
+  if (!files.length) return { text: null, basedOn: null }
+
+  const want = new Set(tools.map((t) => t.toLowerCase()))
+  const order = (f) => {
+    const i = PRESET_SEATS.indexOf(f.replace(/\.md$/i, ''))
+    return i < 0 ? PRESET_SEATS.length : i
+  }
+  let pick = null
+  let best = -Infinity
+  for (const f of files.sort((a, b) => order(a) - order(b) || a.localeCompare(b))) {
+    const have = parseAgentFile(path.join(base, f)).tools.map((t) => t.toLowerCase())
+    // 겹치는 도구가 많은 쪽. 같으면 도구 구성이 비슷한 쪽(도구를 안 고르면 가장 단출한 정의).
+    const score = have.filter((t) => want.has(t)).length * 100 - Math.abs(have.length - want.size)
+    if (score > best) {
+      best = score
+      pick = f
+    }
+  }
+  let src = ''
+  try {
+    src = fs.readFileSync(path.join(base, pick), 'utf8').replace(/\r\n/g, '\n')
+  } catch {
+    return { text: null, basedOn: null }
+  }
+  const end = src.indexOf('\n---', 3)
+  // frontmatter를 걷어내고 **역할 선언 한 줄만** 갈아 끼운다. 나머지 문단(원칙·절차·
+  // 출력 규칙)은 본을 그대로 잇는다 — 그게 이 파일을 만드는 이유다.
+  const body = (end < 0 ? src : src.slice(end + 4)).replace(/^\s*\n/, '').replace(/^너는[^\n]*\n/, '').trimStart()
+  const desc = description.replace(/\s+/g, ' ').trim()
+  const head = ['---', `name: ${id}`, `description: ${yamlValue(desc)}`]
+  if (tools.length) head.push(`tools: ${tools.join(', ')}`)
+  head.push('---', '')
+  const text =
+    head.join('\n') +
+    `\n<!-- 윤사무실에서 만든 팀원 정의. 아래 규칙 문단은 templates/agents/${pick}에서 가져왔다. 역할에 맞게 고쳐 써라. -->\n\n` +
+    `너는 ${label || id} 담당이다. ${desc}\n\n` +
+    // 물려받은 문단에는 본 정의의 예시가 그대로 남아 있다(리뷰어를 본으로 삼으면
+    // `git diff`가 절차에 남는 식). 지우면 품질 기준까지 같이 빠지므로, 지우는 대신
+    // **예시가 아니라 수준을 따르라고** 못 박는다.
+    `아래는 기존 팀원 정의에서 물려받은 공통 규칙이다. **네 일에 맞게 읽어라** —` +
+    ` 예시가 네 역할과 다르면 그 예시가 아니라 그 꼼꼼함을 네 일에 적용해라.\n\n` +
+    body
+  return { text, basedOn: pick }
+}
+
+/** 카탈로그에 없는 팀원을 직접 만든다. */
+function createAgent(dir, spec = {}) {
+  const blocked = teamWriteBlock(dir)
+  if (blocked) return blocked
+  const bad = (error) => ({ ok: false, code: 'VALIDATION', error })
+  const id = String(spec.id ?? '').trim().toLowerCase()
+  const label = String(spec.label ?? '').trim().slice(0, 20)
+  const description = String(spec.description ?? '').trim().slice(0, 160)
+  const tools = Array.isArray(spec.tools) ? spec.tools.map((t) => String(t).trim()).filter(Boolean) : []
+
+  if (!id) return bad('id를 적어주세요')
+  if (!SAFE_AGENT_ID.test(id)) return bad('id는 영문 소문자·숫자·하이픈만 쓸 수 있습니다 (예: data-analyst)')
+  if (id === 'lead') return bad('lead는 리드가 쓰는 이름입니다')
+  if (!description) return bad('무슨 일을 하는 팀원인지 한 줄로 적어주세요')
+  for (const t of tools) if (!SAFE_TOOL.test(t)) return bad(`쓸 수 없는 도구 이름입니다: ${t}`)
+  const team = readTeam(dir)
+  if (team.some((m) => m.id === id)) return bad(`${id}은(는) 이미 팀에 있습니다`)
+  if (firedIds(dir).includes(id)) return bad(`${id}은(는) 해고자 명단에 있습니다 — 고용으로 다시 부르세요`)
+  if (fs.existsSync(path.join(templateDir(), 'agents', id + '.md'))) {
+    return bad(`${id}은(는) 기본 팀원입니다 — 목록에서 고용하세요`)
+  }
+  if (freeSeats(team) <= 0) return { ok: false, full: true, error: `자리가 없습니다 (최대 ${SEAT_CAPACITY}명)` }
+
+  const { text, basedOn } = renderAgentFile({ id, label, description, tools })
+  if (!text) return { ok: false, error: '본으로 삼을 팀원 정의를 읽지 못했습니다' }
+  const target = path.join(agentsDirOf(dir), id + '.md')
+  try {
+    fs.mkdirSync(agentsDirOf(dir), { recursive: true })
+    fs.writeFileSync(target, text, 'utf8')
+  } catch (err) {
+    return { ok: false, error: `팀원 파일을 만들지 못했습니다: ${err.message}` }
+  }
+  afterTeamChange(dir, 'hire', id)
+  // label은 파일에 넣지 않는다(새 키를 만들지 않는다). 화면이 쓸 수 있게 돌려만 준다.
+  return { ok: true, id, label, path: target, basedOn }
+}
+
+/**
+ * 대기열에 그 사람 앞으로 온 지시를 리드에게 돌린다.
+ *
+ * 안 그러면 리드가 **없는 사람**을 부르다 실패한다. 그 실패는 사용자 눈에 원인 불명으로
+ * 보인다 — 방금 해고했다는 사실과 이어지지 않기 때문이다.
+ */
+function requeueToLead(dir, id) {
+  const qf = path.join(dir, '.claude', COMMANDS_NAME)
+  let lines
+  try {
+    lines = fs.readFileSync(qf, 'utf8').split(/\r?\n/)
+  } catch {
+    return 0 // 대기열이 없는 게 보통이다
+  }
+  let n = 0
+  const out = []
+  for (const line of lines) {
+    if (!line.trim()) continue
+    let c = null
+    try {
+      c = JSON.parse(line)
+    } catch {
+      out.push(line) // 깨진 줄은 그대로 둔다(우리가 못 읽는다고 지울 이유는 없다)
+      continue
+    }
+    if (c.agent === id) {
+      c.agent = 'lead'
+      n++
+    }
+    out.push(JSON.stringify(c))
+  }
+  if (!n) return 0
+  try {
+    fs.writeFileSync(qf, out.join('\n') + '\n', 'utf8')
+  } catch (err) {
+    logRenderer(`대기열을 리드로 돌리지 못했습니다(${id}): ${err.message}`, '지시')
+    return 0
+  }
+  return n
+}
+
+/**
+ * 해고한다. **지우지 않는다.**
+ *
+ * `.claude/agents/<id>.md` → `.claude/team-fired/<id>.md`로 **옮긴다.** 사람이 고쳐 둔
+ * 정의가 사라지면 되살릴 수단이 없다. 앱이 팀원 정의 파일을 지우는 경로는 만들지 않는다.
+ */
+function fireAgent(dir, rawId) {
+  const blocked = teamWriteBlock(dir)
+  if (blocked) return blocked
+  const id = String(rawId ?? '').trim()
+  if (!id || /[\\/]|\.\./.test(id)) return { ok: false, code: 'VALIDATION', error: '팀원 id가 올바르지 않습니다' }
+  if (id === 'lead') return { ok: false, error: '리드는 해고할 수 없습니다' }
+  const m = readTeam(dir).find((x) => x.id === id)
+  if (!m) return { ok: false, error: `${id}은(는) 팀에 없습니다` }
+  if (!m.fireable || !m.file) {
+    return { ok: false, error: `${id}은(는) 이 컴퓨터 전체의 팀원입니다(~/.claude/agents) — 여기서는 해고할 수 없습니다` }
+  }
+  const movedTo = path.join(firedDirOf(dir), path.basename(m.file))
+  try {
+    fs.mkdirSync(firedDirOf(dir), { recursive: true })
+    fs.renameSync(m.file, movedTo)
+  } catch (err) {
+    return { ok: false, error: `팀원 파일을 옮기지 못했습니다: ${err.message}` }
+  }
+  // 파일을 옮긴 **뒤에** 대기열을 고친다. 순서가 반대면 옮기기가 실패했을 때
+  // 멀쩡한 팀원 앞으로 온 지시만 리드에게 뺏긴다.
+  const requeued = requeueToLead(dir, id)
+  afterTeamChange(dir, 'fire', id)
+  return { ok: true, id, movedTo, requeued }
+}
+
 // ---------------------------------------------------------------------------
 // 작업 전 스냅샷
 //
@@ -838,9 +1511,9 @@ function gitInit(dir) {
     // 사람 정보가 없으면 커밋이 실패한다. 전역 설정을 건드리지 않고 이 커밋에만 붙인다.
     const id = gitIdentity()
     const who = []
-    if (!id.name) who.push('-c', 'user.name=Team View')
-    if (!id.email) who.push('-c', 'user.email=teamview@localhost')
-    execFileSync('git', ['-C', dir, ...who, 'commit', '-m', '첫 상태 — Team View가 되돌릴 지점을 만들었습니다'], {
+    if (!id.name) who.push('-c', 'user.name=윤사무실')
+    if (!id.email) who.push('-c', 'user.email=yunoffice@localhost')
+    execFileSync('git', ['-C', dir, ...who, 'commit', '-m', '첫 상태 — 윤사무실이 되돌릴 지점을 만들었습니다'], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 120000,
@@ -918,8 +1591,12 @@ function staleAgents(dir) {
   const dst = path.join(dir, '.claude', 'agents')
   let n = 0
   try {
+    // 해고한 사람은 '없는 것'이지 '낡은 것'이 아니다. 세지 않으면 갱신 배지가
+    // 영영 남고, 그 배지를 눌러 갱신하면 해고자가 되살아난다.
+    const fired = new Set(firedIds(dir))
     for (const f of fs.readdirSync(src)) {
       if (!f.endsWith('.md')) continue
+      if (fired.has(f.replace(/\.md$/i, ''))) continue
       const want = fs.readFileSync(path.join(src, f), 'utf8')
       let have = null
       try {
@@ -1044,6 +1721,9 @@ function pumpStatusAll({ force = false } = {}) {
     chatWidth: loadConfig().chatWidth || null,
     // 보고 있는 프로젝트 것만 보낸다. 셋 다 담으면 300ms마다 오가는 양이 세 배가 된다.
     usage: activeDir ? usageSummary(activeDir) : null,
+    // 화면이 캐릭터를 세울 실제 명단. **새 채널을 만들지 않는다** — 상태와 명단이
+    // 따로 오면 순서가 어긋나 빈 자리나 유령 캐릭터가 생긴다.
+    team: activeDir ? readTeam(activeDir).map(({ id, scope, seat }) => ({ id, scope, seat })) : null,
   }
   const json = JSON.stringify(payload)
   if (!force && json === lastStatusJson) return
@@ -1215,6 +1895,22 @@ function rendererLogPath() {
   return path.join(app.getPath('userData'), 'renderer.log')
 }
 
+/**
+ * 정상 상태가 가는 곳. **오류 로그와 파일을 나눈다.**
+ *
+ * `renderer.log`는 화면이 까맣게 죽었는데 로그가 텅 비어 있던 일을 겪고 만든
+ * **오류 파일**이다. 그런데 `실행 준비됨`·`작업 종료` 같은 정상 상태가 같이 들어오면서
+ * 87줄 중 대부분이 평상시 기록이 됐다 — 진짜 오류(`화면 프로세스 종료: crashed`,
+ * `보조 프로세스 종료`)가 그 사이에 묻혔다.
+ *
+ * 레벨만 붙이고 한 파일에 두면 결국 사람이 눈으로 걸러야 한다. 파일을 나누면
+ * `renderer.log`를 여는 것만으로 "무엇이 잘못됐나"가 답이 된다. 평상시 흐름이
+ * 필요할 때가 있으므로(누가 실행을 껐다 켰는지 등) 버리지는 않고 옆에 둔다.
+ */
+function activityLogPath() {
+  return path.join(app.getPath('userData'), 'activity.log')
+}
+
 // 로그 파일 상한. 이벤트 로그(512KB)·채팅(2000줄)에는 있는데 여기만 없어서
 // 몇 달 쓰면 한없이 자랐다. 실행이 실패할 때마다 15줄씩 붙기도 한다.
 const LOG_MAX_BYTES = 256 * 1024
@@ -1233,7 +1929,7 @@ function crashContext() {
     `켠 지 ${Math.round((Date.now() - bootAt) / 60000)}분 · 붙은 프로젝트 ${loadProjects().length}개` +
       ` · 보는 중 ${activeDir ? path.basename(activeDir) : '없음'}`,
   )
-  const busy = [...companies.values()].filter((c) => c.child).map((c) => path.basename(c.dir))
+  const busy = runningCompanies()
   lines.push(`실행 중인 지시 ${busy.length}건${busy.length ? ` (${busy.join(', ')})` : ''}` +
     ` · 띄워 둔 서버 ${runners.size}개`)
   try {
@@ -1270,11 +1966,9 @@ ipcMain.handle('ui:error', (_e, info) => {
   return { ok: true }
 })
 
-function logRenderer(line) {
+function appendLog(file, line) {
   const stamped = `[${new Date().toISOString()}] ${line}`
-  console.error('[renderer]', line)
   try {
-    const file = rendererLogPath()
     // 넘치면 **뒤쪽만 남긴다.** 오래된 줄보다 최근 줄이 진단에 쓸모 있다.
     try {
       if (fs.statSync(file).size > LOG_MAX_BYTES) {
@@ -1292,6 +1986,28 @@ function logRenderer(line) {
   }
 }
 
+/**
+ * **잘못된 것만** 여기 적는다. 평상시 상태는 logActivity로 보낸다.
+ *
+ * 파일을 나눈 것만으로는 부족했다. 실측 89줄을 새 분류에 태워 보니 정상 34줄이
+ * 빠지고도 오류 파일에 55줄이 남는데, 그중 **30줄이 자식 프로세스가 죽으며 뱉은
+ * pnpm 스택 트레이스** 한 건이었다. 정작 이 파일을 만든 이유였던 화면 크래시는
+ * `렌더러 프로세스 종료: crashed` 같은 4줄뿐이라 그 사이에 다시 묻힌다.
+ *
+ * 그래서 어디서 난 오류인지 앞에 붙인다 — `[화면]`만 훑으면 앱이 죽은 기록이,
+ * `[실행]`·`[지시]`를 보면 남의 프로세스가 죽은 기록이 나온다. 버리는 것은 없다.
+ */
+function logRenderer(line, where = '화면') {
+  console.error('[renderer]', line)
+  appendLog(rendererLogPath(), `[${where}] ${line}`)
+}
+
+/** 평상시 흐름(실행 시작·중지·작업 종료). 오류 파일을 채우지 않는다. */
+function logActivity(line) {
+  console.log('[activity]', line)
+  appendLog(activityLogPath(), line)
+}
+
 function createWindow() {
   win = new BrowserWindow({
     width: 1820,
@@ -1300,7 +2016,7 @@ function createWindow() {
     minHeight: 760,
     backgroundColor: '#11131a',
     autoHideMenuBar: true,
-    title: 'Team View — 우리 팀 사무실',
+    title: '윤사무실 — 우리 팀이 일하는 곳',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -1378,7 +2094,7 @@ function createWindow() {
     if (crashCount > CRASH_RELOAD_MAX) {
       logRenderer(`    되살리기를 멈춥니다 — ${CRASH_RELOAD_MAX}번을 넘겼습니다`)
       dialog.showErrorBox(
-        'Team View — 화면을 되살리지 못했습니다',
+        '윤사무실 — 화면을 되살리지 못했습니다',
         `화면이 ${crashCount}번 종료됐습니다.\n\n` +
           `팀 작업 자체는 계속 돌고 있습니다(대기열·실행은 화면과 별개입니다).\n` +
           `앱을 다시 켜 주세요. 자세한 내용은 아래 파일에 있습니다:\n${rendererLogPath()}`,
@@ -1413,7 +2129,7 @@ function createWindow() {
 }
 
 /**
- * **팀뷰는 한 번에 하나만 뜬다.**
+ * **윤사무실은 한 번에 하나만 뜬다.**
  *
  * 앱 하나가 프로젝트를 셋까지 다루므로 창을 여러 개 띄울 이유가 없다. 반면 두 개가
  * 뜨면 조용히 망가진다 — `openCompany`는 남의 클레임을 확인하지 않고 덮어쓰기 때문에
@@ -1452,6 +2168,9 @@ if (!app.requestSingleInstanceLock()) {
     // Windows는 이 값이 있어야 알림에 앱 이름과 아이콘이 붙는다. 없으면 알림이
     // "electron.app.Electron" 이름으로 뜨거나 아예 뜨지 않는다.
     if (process.platform === 'win32') app.setAppUserModelId('dev.yjh.teamview')
+    // **앱을 켠 시각을 남긴다.** 기록에 이 줄이 없어서, 실행이 몇 초 만에 멈춘 것이
+    // 사람이 끈 것인지 앱을 껐다 켠 것인지 로그만으로는 가릴 수 없었다.
+    logActivity(`앱을 켰습니다 (v${app.getVersion()}, pid ${process.pid})`)
     // 지난번에 앱이 강제로 끝났다면 서버가 남아 있을 수 있다.
     cleanupOrphanRunners()
     createWindow()
@@ -1552,6 +2271,16 @@ ipcMain.handle('project:setup', (_e, { dir, parts }) => {
   return { ...res, health: projectHealth(dir) }
 })
 
+// ---------- 팀원 고용·해고 IPC ----------
+//
+// 넷 다 **동기**로 처리한다. 큐를 집어가는 타이머와 같은 스레드에서 도니, 파일을
+// 옮기는 사이에 지시가 시작되는 일이 생기지 않는다.
+
+ipcMain.handle('team:list', (_e, { dir } = {}) => listTeam(dir || activeDir))
+ipcMain.handle('team:hire', (_e, { dir, id } = {}) => hireAgent(dir || activeDir, id))
+ipcMain.handle('team:create', (_e, { dir, ...spec } = {}) => createAgent(dir || activeDir, spec))
+ipcMain.handle('team:fire', (_e, { dir, id } = {}) => fireAgent(dir || activeDir, id))
+
 // ---------- 실행 환경 IPC ----------
 
 ipcMain.handle('env:check', (_e, opts) => checkEnv(opts ?? {}))
@@ -1604,7 +2333,7 @@ ipcMain.handle('env:install', async (_e, key) => {
         return { ok: false, error: `${req.needs}가 먼저 필요합니다` }
       }
     }
-    if (!openInTerminal(req.install[1], `Team View - ${req.label} 설치`, req.install[0])) {
+    if (!openInTerminal(req.install[1], `윤사무실 - ${req.label} 설치`, req.install[0])) {
       return { ok: false, manual: cmdText }
     }
     return { ok: true, started: true, cmd: cmdText }
@@ -1620,20 +2349,15 @@ ipcMain.handle('env:install', async (_e, key) => {
  */
 ipcMain.handle('env:login', async (_e, what) => {
   const args = what === 'figma' ? ['mcp', 'add', '--transport', 'http', 'figma', 'https://mcp.figma.com/mcp'] : ['auth', 'login']
-  const title = what === 'figma' ? 'Team View - Figma 연결' : 'Team View - Claude 로그인'
-  if (!openInTerminal(args, title)) {
-    return { ok: false, manual: `claude ${args.join(' ')}`, error: '이 OS에서는 터미널을 자동으로 열 수 없습니다' }
-  }
-  // 최대 3분 동안 30초 간격으로 확인한다. 브라우저 로그인은 보통 1분 안에 끝난다.
-  for (let i = 0; i < 6; i++) {
-    await new Promise((r) => setTimeout(r, 30_000))
-    const env = await checkEnv({ force: true })
-    send('env:status', env)
-    const done = what === 'figma' ? env.figma.connected : env.claude.loggedIn
-    if (done) return { ok: true, env }
-  }
-  return { ok: false, timeout: true, env: await checkEnv({ force: true }) }
+  const title = what === 'figma' ? '윤사무실 - Figma 연결' : '윤사무실 - Claude 로그인'
+  return openAndWatch(what, args, title)
 })
+
+/**
+ * 계정 전환. **로그인과 따로 둔다** — 아직 한 번도 연결 안 한 사람이 밟는 길과,
+ * 이미 붙어 있는 걸 다른 계정으로 바꾸는 길은 밟아야 할 순서가 다르다.
+ */
+ipcMain.handle('env:switch', (_e, payload) => switchAccount(typeof payload === 'string' ? payload : payload?.what))
 
 ipcMain.handle('project:list', () => {
   pumpStatusAll({ force: true })
@@ -1726,7 +2450,7 @@ function cleanupOrphanRunners() {
       ` if ($p -and $p.CommandLine -like ${JSON.stringify('*' + path.basename(row.dir) + '*')}) { 'ours' }`
     execFile('powershell', ['-NoProfile', '-Command', ps], { timeout: 8000 }, (err, out) => {
       if (err || !String(out).includes('ours')) return // 이미 죽었거나 남의 프로세스다
-      logRenderer(`지난번에 남은 서버를 정리합니다 — ${path.basename(row.dir)} (PID ${row.pid})`)
+      logActivity(`지난번에 남은 서버를 정리합니다 — ${path.basename(row.dir)} (PID ${row.pid})`)
       execFile('taskkill', ['/PID', String(row.pid), '/T', '/F'], () => {})
     })
   }
@@ -1750,15 +2474,93 @@ function runState(dir) {
     script: runScriptFor(dir), // 없으면 버튼을 숨긴다
     running: !!r,
     url: r?.url ?? null,
+    // **주소를 본 것과 서버가 사는 것을 가른다.** `url`만 보고 링크를 내주던 탓에,
+    // 주소를 찍고 곧바로 죽은 서버의 링크가 계속 눌리는 채로 남았다(버그 2).
+    ready: !!r?.ready,
+    dead: !!r?.dead,
     startedAt: r?.startedAt ?? null,
   }
 }
 
 /** 자식이 뱉는 줄에서 주소를 줍는다. 포트는 우리가 정하지 않는다(3000이 차 있으면 밀린다). */
 function sniffUrl(text) {
-  const m = /https?:\/\/(?:localhost|127\.0\.0\.1)(?::(\d+))?[^\s]*/i.exec(text)
+  // **색상 코드를 먼저 걷어낸다.** Vite는 포트를 굵게 칠해서 내보낸다:
+  //     http://localhost:<ESC>[1m5173<ESC>[22m/
+  // 그대로 주우면 주소 안에 escape 문자가 섞인 채로 굳어 링크가 열리지 않는다.
+  //
+  // 다만 로그에 남은 `실행 준비됨 — daily http://localhost:`는 **이것 때문이 아니었다.**
+  // 그 줄의 바이트를 세어 보니 escape 문자가 0개이고 길이가 59자다 — 값 자체에
+  // 포트가 없었다는 뜻이다. 진짜 원인은 스트림 조각이 `http://localhost:`에서
+  // 끊긴 것이고, 그쪽은 makeLineReader가 막는다. 둘 다 실재하는 별개의 구멍이라
+  // 색상 걷어내기도 그대로 둔다.
+  const clean = String(text).replace(new RegExp(String.fromCharCode(27) + '\[[0-9;]*[A-Za-z]', 'g'), '')
+  // 포트가 붙은 쪽을 먼저 고른다 — 한 줄에 둘 다 나오면 접속되는 것은 그쪽이다.
+  const m =
+    /https?:\/\/(?:localhost|127\.0\.0\.1):\d+[^\s]*/i.exec(clean) ||
+    /https?:\/\/(?:localhost|127\.0\.0\.1)[^\s]*/i.exec(clean)
   return m ? m[0].replace(/[.,)]+$/, '') : null
 }
+
+// 개행 없이 이만큼 쌓이면 그냥 한 줄로 흘려보낸다. 진행 막대처럼 `\r`로만 덮어쓰는
+// 출력은 개행이 영영 안 올 수 있는데, 그걸 무한정 들고 있으면 메모리가 샌다.
+const LINE_BUF_MAX = 64 * 1024
+
+/**
+ * 스트림 조각을 **완성된 줄로만** 넘긴다.
+ *
+ * 자식의 stdout은 줄 단위로 오지 않는다 — 아무 데서나 잘린다. 그걸 그대로 훑다가
+ * 주소를 통째로 잃었다. 실측(renderer.log, 08-02 12:16:12 외 4회):
+ *
+ *     실행 준비됨 — daily http://localhost:
+ *
+ * 실제 주소는 `http://localhost:5173/`인데 조각이 `http://localhost:`에서 끊겼고,
+ * sniffUrl의 포트 없는 fallback이 걸린 채 `if (!r.url)` 가드 때문에 그 값이 굳었다.
+ * 링크를 눌러도 아무 데도 가지 않는다. (색상 코드는 sniffUrl이 이미 걷어낸다 —
+ * 온전한 줄이면 ANSI가 섞여 있어도 제대로 주웠다. 문제는 오직 조각 분할이었다.)
+ *
+ * 실패 원인으로 보여 줄 `r.lines`도 같은 이유로 반토막 난 줄이 쌓였다 — 한 글자씩
+ * 들어오면 한 줄이 74줄이 된다(실측).
+ *
+ * **스트림마다 따로** 하나씩 둬야 한다. stdout과 stderr가 버퍼를 나눠 쓰면 서로의
+ * 반쪽이 이어 붙어 없던 줄이 생긴다.
+ */
+function makeLineReader(onLine) {
+  let buf = ''
+  const cut = (upTo, next) => {
+    onLine(buf.slice(0, upTo).replace(/\r$/, ''))
+    buf = buf.slice(next)
+  }
+  return {
+    push(chunk) {
+      buf += String(chunk)
+      for (let nl = buf.indexOf('\n'); nl >= 0; nl = buf.indexOf('\n')) cut(nl, nl + 1)
+      if (buf.length > LINE_BUF_MAX) cut(buf.length, buf.length)
+    },
+    /** 프로세스가 끝나면 개행 없이 남은 꼬리도 흘려보낸다 — 마지막 줄을 버리지 않는다. */
+    flush() {
+      if (buf.length) cut(buf.length, buf.length)
+    },
+  }
+}
+
+/**
+ * 이 줄이 "서버가 죽었다"는 신호인가.
+ *
+ * **주소가 보이는 것과 서버가 살아 있는 것은 다르다.** 실측(08-02 12:52:47):
+ * vite가 `http://localhost:5173/`을 찍은 **직후** 죽었는데, 그 뒤로도 같은 워크스페이스의
+ * dev:server가 살아 있어서 `npm run dev` 자체는 4분 25초를 더 버텼다. 앱은 주소를 본
+ * 순간 "실행 준비됨"이라고 단정했고, 사용자에게는 열리지 않는 링크만 남았다.
+ *
+ * 종료코드만 보면 그 4분을 "정상"으로 보낸다. 그래서 출력에서 직접 읽는다.
+ * 흔한 `Failed`·`error` 같은 말은 넣지 않는다 — 컴파일 경고에도 나와서 멀쩡한 서버를
+ * 죽었다고 하게 된다. 여기 걸리면 "준비됨"을 **말하지 않을** 뿐이므로, 틀리는 쪽은
+ * 언제나 조용한 쪽이다.
+ */
+const RUN_DEAD_RE = /ELIFECYCLE|ERR_PNPM_\w*FAIL|Exit status [1-9]|Command failed with exit code [1-9]/i
+
+// 주소를 주운 뒤 이만큼 지켜본다. 이 사이에 죽으면 "준비됨"이라고 하지 않는다.
+// 위 실측에서 vite는 주소를 찍고 1초 안에 죽었다.
+const RUN_SETTLE_MS = 4000
 
 function startRun(dir) {
   if (runners.get(dir)) return { ok: true, already: true, ...runState(dir) }
@@ -1777,27 +2579,63 @@ function startRun(dir) {
     return { ok: false, error: `실행 실패: ${err.message}` }
   }
 
-  const r = { child, script, url: null, port: null, startedAt: Date.now(), lines: [] }
+  // `ready`는 `url`과 다르다 — 주소를 주웠는가(url)와 그러고도 살아 있는가(ready).
+  // `dead`는 프로세스는 남았는데 서버만 죽은 경우다(아래 RUN_DEAD_RE 참고).
+  const r = { child, script, url: null, port: null, startedAt: Date.now(), lines: [], ready: false, dead: false, settleTimer: null }
   runners.set(dir, r)
+  // **누가 켰는지 남긴다.** 기록에 시작이 없어서, 준비↔중지가 몇 초 만에 되풀이될 때
+  // 사람이 껐다 켠 것인지 앱이 스스로 그런 것인지 로그만으로는 가릴 수 없었다.
+  logActivity(`실행 시작 — ${path.basename(dir)} (npm run ${script}, pid ${child.pid})`)
 
-  const take = (buf) => {
-    const s = String(buf)
+  // 주소를 봤다고 바로 "준비됨"이라 하지 않는다 — 짧게 지켜본 뒤에만 참이 된다.
+  const settle = () => {
+    r.settleTimer = null
+    if (runners.get(dir) !== r || r.dead || r.ready || !r.url) return
+    r.ready = true
+    logActivity(`실행 준비됨 — ${path.basename(dir)} ${r.url}`)
+    pumpStatusAll({ force: true })
+  }
+
+  const onLine = (line) => {
     // 마지막 200줄만 들고 있는다. 실패했을 때 무엇 때문인지 보여 주려는 것이지
     // 로그 뷰어를 만들려는 게 아니다.
-    r.lines.push(...s.split(/\r?\n/).filter(Boolean))
+    if (line.trim()) r.lines.push(line)
     if (r.lines.length > 200) r.lines.splice(0, r.lines.length - 200)
-    if (!r.url) {
-      const u = sniffUrl(s)
-      if (u) {
-        r.url = u
-        logRenderer(`실행 준비됨 — ${path.basename(dir)} ${u}`)
-        pumpStatusAll({ force: true })
-      }
+
+    // **죽었다는 신호가 오면 준비됨을 거둬들인다.** 이미 말했더라도 정정한다 —
+    // 열리지 않는 링크를 계속 들고 있는 것이 사용자에게는 더 나쁘다.
+    if (!r.dead && RUN_DEAD_RE.test(line)) {
+      r.dead = true
+      if (r.ready) logRenderer(`실행이 주소를 내놓고 죽었습니다 — ${path.basename(dir)} ${r.url}`, '실행')
+      r.ready = false
+      pumpStatusAll({ force: true })
+      return
     }
+    if (r.url || r.dead) return
+    const u = sniffUrl(line)
+    if (!u) return
+    r.url = u
+    // 주소를 잡았다는 것까지는 화면에 알린다(버튼이 "준비 중…"에 멈춰 있지 않게).
+    // 다만 누를 수 있는 링크로는 아직 내주지 않는다.
+    pumpStatusAll({ force: true })
+    r.settleTimer = setTimeout(settle, RUN_SETTLE_MS)
+    // 앱을 끄는 것을 이 타이머가 붙잡지 않게 한다.
+    if (r.settleTimer.unref) r.settleTimer.unref()
   }
-  child.stdout.on('data', take)
-  child.stderr.on('data', take)
+
+  // **스트림마다 버퍼를 따로 둔다.** 섞으면 stdout의 반쪽에 stderr의 반쪽이 이어 붙는다.
+  const outReader = makeLineReader(onLine)
+  const errReader = makeLineReader(onLine)
+  child.stdout.on('data', (b) => outReader.push(b))
+  child.stderr.on('data', (b) => errReader.push(b))
+  child.stdout.on('end', () => outReader.flush())
+  child.stderr.on('end', () => errReader.flush())
   child.on('exit', (code) => {
+    // 개행 없이 끝난 마지막 줄까지 넣고 나서 tail을 뜬다 — 죽은 이유가 대개 거기 있다.
+    outReader.flush()
+    errReader.flush()
+    if (r.settleTimer) clearTimeout(r.settleTimer)
+    r.ready = false
     const me = runners.get(dir)
     runners.delete(dir)
     saveRunners()
@@ -1809,13 +2647,18 @@ function startRun(dir) {
     // 사용자가 정상적으로 누른 '실행 중지'가 로그에 `실행이 코드 1로 끝남`으로
     // 남아, 실패한 것처럼 보였다.
     if (stopping.delete(dir)) {
-      logRenderer(`실행 중지됨 — ${name}`)
-    } else if (code) {
+      logActivity(`실행 중지됨 — ${name} (사용자가 눌렀거나 앱이 닫혔습니다)`)
+    } else if (!code) {
+      // **조용히 끝나는 것도 남긴다.** 코드 0으로 죽으면 아무 줄도 안 적혔다 —
+      // 실측(08-01 08:02:23 → 08:31:16)에서 `실행 준비됨`이 중지 없이 두 번 연달아
+      // 찍혔는데, 그 사이에 서버가 스스로 끝난 사실이 기록 어디에도 없었다.
+      logActivity(`실행이 스스로 끝났습니다 — ${name} (코드 0)`)
+    } else {
       // **왜 죽었는지 같이 남긴다.** 예전에는 코드만 적고 그동안 모아 둔 출력을
       // 통째로 버렸다. 로그에도 화면에도 이유가 없어서 사용자가 알 방법이 없었다.
       const tail = (me?.lines ?? []).slice(-15)
-      logRenderer(`실행이 코드 ${code}로 끝남 (${name})`)
-      for (const line of tail) logRenderer(`    ${line}`)
+      logRenderer(`실행이 코드 ${code}로 끝남 (${name})`, '실행')
+      for (const line of tail) logRenderer(`    ${line}`, '실행')
       // 화면에도 띄운다 — logRenderer는 파일과 콘솔에만 쓴다.
       send('run:failed', { dir, code, lines: tail })
     }
@@ -1823,7 +2666,7 @@ function startRun(dir) {
   })
   child.on('error', (err) => {
     runners.delete(dir)
-    logRenderer(`실행 실패(${path.basename(dir)}): ${err.message}`)
+    logRenderer(`실행 실패(${path.basename(dir)}): ${err.message}`, '실행')
     pumpStatusAll({ force: true })
   })
 
@@ -1880,7 +2723,11 @@ app.on('before-quit', () => {
 ipcMain.handle('log:open', () => {
   const p = rendererLogPath()
   try {
-    if (!fs.existsSync(p)) fs.writeFileSync(p, '', 'utf8') // 아직 아무 일도 없었으면 빈 파일로
+    // 오류 파일을 고른 채로 연다. 평상시 기록(activity.log)은 같은 폴더에 나란히
+    // 있으므로 필요하면 바로 보이지만, **먼저 눈에 들어와야 하는 것은 오류다.**
+    for (const f of [activityLogPath(), p]) {
+      if (!fs.existsSync(f)) fs.writeFileSync(f, '', 'utf8') // 아직 아무 일도 없었으면 빈 파일로
+    }
     shell.showItemInFolder(p)
     return { ok: true }
   } catch (err) {
@@ -1903,7 +2750,7 @@ ipcMain.handle('file:reveal', (_e, target) => {
 // ---------------------------------------------------------------------------
 // 회사
 //
-// 팀뷰는 **하나의 기업체**다. 앱이 켜져 있으면 회사가 문을 연 것이고, 앱에서 보낸
+// 윤사무실은 **하나의 기업체**다. 앱이 켜져 있으면 회사가 문을 연 것이고, 앱에서 보낸
 // 지시는 언제나 회사가 받는다. 사람이 다른 창에서 클로드와 대화하고 있어도 그
 // 세션으로 지시가 새어 들어가지 않는다. 예전에는 "새 세션으로 즉시 실행" 체크박스로
 // 그걸 사람이 매번 골라야 했는데, 끄고 보내면 지시가 **그때 마침 턴을 끝내는 아무
@@ -2100,7 +2947,7 @@ const DELIVERABLE =
   ` **무엇이 왜 남았는지 답변에 적어라.** **검수를 통과하지 못한 것을 "완료"라고 하지 마라.**` +
   `\n\n[오래 사는 프로세스] dev 서버·watch·데몬은 **네가 띄우지 마라.**` +
   ` 지시가 끝나면 세션과 함께 죽어서 "실행 중"이라는 보고만 남고 실제로는 접속이 안 된다.` +
-  ` 실행이 필요하면 Team View 상단의 \`▶ 실행\` 버튼을 쓰라고 안내해라 — 앱이 들고 있어서 지시가 끝나도 살아 있다.` +
+  ` 실행이 필요하면 윤사무실 상단의 \`▶ 실행\` 버튼을 쓰라고 안내해라 — 앱이 들고 있어서 지시가 끝나도 살아 있다.` +
   ` 잠깐 확인이 필요하면 확인 즉시 내리고, 띄워 둔 채로 보고하지 마라.` +
   // **큰 도구 결과 하나가 그 뒤 모든 호출에 곱해진다.** 한 번 컨텍스트에 들어온 것은
   // 그 세션이 끝날 때까지 매 호출마다 다시 실린다. 실측(daily 지시 하나):
@@ -2132,7 +2979,34 @@ const DELIVERABLE =
   ` 일을 맡긴 채 답하지 마라 — 네가 답하는 순간 그 일도 함께 죽는다.` +
   ` 결과가 필요한 일은 **기다려서 받은 뒤에** 답해라.`
 
-function promptFor(cmd) {
+/**
+ * 리드에게 **지금 이 회사에 실제로 있는 사람**을 알려주는 한 줄.
+ *
+ * CLAUDE.md의 배분표는 세팅할 때 복사된 것이라 해고를 모른다. 문서만 믿은 리드가
+ * 없는 팀원을 부르면 그 자리에서 실패한다. 명단의 진실은 디스크이므로 매번 읽어 붙인다.
+ * (CLAUDE.md는 사람 것이라 앱이 고치지 않는다.)
+ */
+function rosterLine(dir) {
+  let ids = []
+  try {
+    ids = readTeam(dir).map((m) => m.id).filter((id) => id !== 'lead')
+  } catch {
+    return '' // 명단을 못 읽었다고 지시를 못 보낼 이유는 없다
+  }
+  if (!ids.length) {
+    return (
+      `\n\n[이 회사의 팀원] **부를 수 있는 서브에이전트가 하나도 없다.** 문서에 이름이 있어도 없는 사람이다.` +
+      ` 위임하지 말고 네가 직접 처리하고, 팀원이 필요하면 그 사실을 답변에 한 줄로 밝혀라.`
+    )
+  }
+  return (
+    `\n\n[이 회사의 팀원] 지금 부를 수 있는 팀원은 ${ids.join(', ')}뿐이다.` +
+    ` **문서(CLAUDE.md)에 있어도 이 목록에 없으면 없는 사람이다** — 부르면 실패한다.` +
+    ` 목록에 없는 역할이 필요하면 가장 가까운 팀원에게 맡기거나 네가 처리하고, 무엇이 없어서 그랬는지 한 줄로 밝혀라.`
+  )
+}
+
+function promptFor(cmd, dir) {
   const who = cmd.agent
   const body = String(cmd.text ?? '')
   const task =
@@ -2146,7 +3020,7 @@ function promptFor(cmd) {
         ` 이미 아는 것이면 바로 답하고, 확인이 필요하면 조사역(scout) 한 명에게만 맡겨라.` +
         ` 지시: ${body}`
   // 결과를 남기라는 조건은 **맨 뒤**에 둔다. 마지막에 읽은 것이 가장 강하게 남는다.
-  return BOUNDARY + task + DELIVERABLE
+  return BOUNDARY + task + rosterLine(dir) + DELIVERABLE
 }
 
 /**
@@ -2318,13 +3192,18 @@ function usageSummary(dir) {
 }
 
 // 자주 겪는 실패를 사람 말로 옮긴다. 원문은 영어로 오고, 무엇을 해야 하는지도 안 적혀 있다.
+//
+// `wait`는 **사용자가 손댈 것이 없는** 실패다. 기다리면 저절로 풀린다. 이걸 표시하지
+// 않았더니 화면에는 고쳐야 할 실패와 똑같이 `코드 1`로만 떴다 — 무엇이 망가졌는지
+// 찾아 나서게 되는데 망가진 것은 없다.
 const FAILURE_KINDS = [
   {
     re: /session limit|usage limit|rate limit|quota|too many requests|\b429\b/i,
     label: '토큰 사용량 한도',
+    wait: true,
     hint: '한도가 풀린 뒤 같은 지시를 다시 보내면 됩니다.',
   },
-  { re: /overloaded|\b529\b|service unavailable|\b503\b/i, label: '서버 혼잡', hint: '잠시 뒤 다시 보내 보세요.' },
+  { re: /overloaded|\b529\b|service unavailable|\b503\b/i, label: '서버 혼잡', wait: true, hint: '잠시 뒤 다시 보내 보세요.' },
   { re: /credit|billing|payment/i, label: '결제·크레딧 문제', hint: 'Claude 계정의 결제 상태를 확인하세요.' },
   { re: /authentication|unauthorized|\b401\b|logged out/i, label: '로그인 만료', hint: '상단 Claude 점을 눌러 다시 로그인하세요.' },
 ]
@@ -2339,6 +3218,25 @@ const FAILURE_KINDS = [
  */
 // 기록의 시각과 앱의 시계가 몇 초 어긋나도 이번 실행의 오류를 놓치지 않게 둔 여유.
 const CLOCK_SLACK_SEC = 10
+
+/**
+ * 한도가 언제 풀리는지. **문구에 이미 들어 있다 — 버리지 말고 보여 준다.**
+ *
+ * 실측으로 받은 문구들(renderer.log):
+ *   "You've hit your session limit · resets 6:50pm (Asia/Seoul)"
+ *   "Agent terminated early due to an API error: You've hit your session limit · resets 5:40pm (Asia/Seoul)"
+ *
+ * 지금까지는 이 시각이 로그 한 줄에만 묻혀 있었다. 사용자가 정말 알고 싶은 것은
+ * "언제 다시 시켜도 되나"인데 화면에는 `코드 1`만 떴다.
+ *
+ * 못 찾으면 null. **없는 시각을 지어내지 않는다** — 그냥 기다리라고만 하는 편이 낫다.
+ */
+function resetTimeFrom(message) {
+  const m = /resets?\s+(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\s*(?:\(([^)]{1,40})\))?/i.exec(String(message ?? ''))
+  if (!m) return null
+  const at = m[1].replace(/\s+/g, '').toLowerCase()
+  return m[2] ? `${at} (${m[2]})` : at
+}
 
 /**
  * 이번 실행이 실패했는가, 실패했다면 왜인가. 성공이면 `null`.
@@ -2390,6 +3288,8 @@ function failureFor(dir, sessionId, since, code) {
       message: `${left.join('·')}의 작업이 끝나기 전에 리드가 답을 내놓았습니다.`,
       label: '팀원 작업이 끊김',
       hint: '`계속진행해줘`로 이어서 시키면 중단된 지점부터 다시 합니다.',
+      wait: false, // 이어서 시켜야 한다 — 기다린다고 풀리지 않는다
+      resetAt: null,
     }
   }
   return (
@@ -2397,6 +3297,9 @@ function failureFor(dir, sessionId, since, code) {
       message: `실행이 코드 ${code}로 끝났습니다. 이유가 기록에 남지 않았습니다.`,
       label: null,
       hint: '같은 지시를 다시 보내 보시고, 되풀이되면 상단 `기록`에서 로그를 확인하세요.',
+      // **모르는 것을 "기다리면 된다"고 하지 않는다.** 사유를 못 찾았을 뿐이다.
+      wait: false,
+      resetAt: null,
     }
   )
 }
@@ -2454,7 +3357,14 @@ function readSessionError(dir, sessionId, since) {
   found.sort((a, b) => a[0] - b[0])
   const message = found[found.length - 1][1].slice(0, 400)
   const kind = FAILURE_KINDS.find((k) => k.re.test(message))
-  return { message, label: kind?.label ?? null, hint: kind?.hint ?? null }
+  return {
+    message,
+    label: kind?.label ?? null,
+    hint: kind?.hint ?? null,
+    // 기다리면 되는 실패인가, 손봐야 하는 실패인가. 화면이 이 둘을 다르게 보여 준다.
+    wait: !!kind?.wait,
+    resetAt: kind?.wait ? resetTimeFrom(message) : null,
+  }
 }
 
 // 권한을 묻지 않는다.
@@ -2473,7 +3383,7 @@ function readSessionError(dir, sessionId, since) {
 // Figma 호출이 통째로 막혔다(그 작업에서 Figma 도구 호출은 0건이었다). 도구를 못 쓰는
 // 팀원은 결국 **말로만 답하고 끝낸다.**
 //
-// 팀뷰에 보내는 지시는 애초에 "알아서 해줘"가 전제다. 반쯤 열어 두면 안전해지는 게
+// 윤사무실에 보내는 지시는 애초에 "알아서 해줘"가 전제다. 반쯤 열어 두면 안전해지는 게
 // 아니라 그냥 일이 안 된다. 대신 README에 **버전 관리가 되는 폴더에만 붙이라**고
 // 못 박았다 — 되돌릴 수단은 권한이 아니라 git이 준다.
 const PERMISSION_MODE = 'bypassPermissions'
@@ -2523,9 +3433,9 @@ function runCommand(c, cmd) {
       env: { ...process.env, TEAMVIEW_POLLER: String(process.pid) },
     })
     child.stdin.on('error', () => {}) // 자식이 먼저 죽으면 EPIPE가 난다 — 무시
-    child.stdin.end(promptFor(cmd), 'utf8')
+    child.stdin.end(promptFor(cmd, dir), 'utf8')
   } catch (err) {
-    logRenderer(`회사 실행 실패(${dir}): ${err.message}`)
+    logRenderer(`회사 실행 실패(${dir}): ${err.message}`, '지시')
     return
   }
 
@@ -2556,20 +3466,33 @@ function runCommand(c, cmd) {
     if (errLines.length > 60) errLines.splice(0, errLines.length - 60)
   })
 
-  child.on('error', (err) => logRenderer(`claude 실행 실패(${dir}): ${err.message}`))
+  child.on('error', (err) => logRenderer(`claude 실행 실패(${dir}): ${err.message}`, '지시'))
   child.on('exit', (code) => {
     if (c.child === child) c.child = null
     if (code !== 0 && child.teamviewCanceled) {
       // 사람이 멈춘 것이다. 실패로 적으면 무엇이 잘못된 줄 알고 원인을 찾게 된다.
-      logRenderer(`중지로 끝남 (${path.basename(dir)})`)
+      logActivity(`중지로 끝남 (${path.basename(dir)})`)
     } else if (code !== 0) {
       const tail = errLines.slice(-12)
       // stderr는 대개 비어 있다 — claude는 실패 사유를 세션 기록에만 남긴다.
       const why = failureFor(dir, sid, startedAt, code)
-      logRenderer(`회사 실행이 코드 ${code}로 끝남 (${path.basename(dir)})`)
-      if (why?.label) logRenderer(`    ${why.label}: ${why.message}`)
-      else if (why) logRenderer(`    ${why.message}`)
-      for (const l of tail) logRenderer(`    ${l}`)
+      // **기다리면 되는 것은 실패라고 적지 않는다.** 실측(08-02 08:13:58):
+      //     회사 실행이 코드 1로 끝남 (daily)
+      //         토큰 사용량 한도: You've hit your session limit · resets 6:50pm (Asia/Seoul)
+      // 사유는 바로 아랫줄에 있는데 결과는 `코드 1` — 고쳐야 할 실패와 똑같이 보인다.
+      // 한도는 손댈 것이 없고 풀릴 때까지 기다리면 되는 일이다. 줄부터 다르게 적는다.
+      if (why?.wait) {
+        logRenderer(
+          `회사 실행이 한도에 걸려 멈춤 (${path.basename(dir)}) — ${why.label}` +
+            (why.resetAt ? ` · ${why.resetAt} 풀림` : ''),
+          '지시',
+        )
+      } else {
+        logRenderer(`회사 실행이 코드 ${code}로 끝남 (${path.basename(dir)})`, '지시')
+      }
+      if (why?.label) logRenderer(`    ${why.label}: ${why.message}`, '지시')
+      else if (why) logRenderer(`    ${why.message}`, '지시')
+      for (const l of tail) logRenderer(`    ${l}`, '지시')
       // **화면에도 띄운다.** logRenderer는 파일과 콘솔에만 쓴다 — 지시를 보냈는데
       // 아무 일도 안 일어난 것처럼 보이고, 왜인지 알 방법이 없었다.
       send('command:failed', { dir, code, lines: tail, why })
@@ -2601,10 +3524,14 @@ function runCommand(c, cmd) {
 function notifyDone(dir, failure) {
   const name = path.basename(dir)
   const done = !failure
-  const what = done ? '작업 종료' : '지시 실패'
+  // 기다리면 풀리는 일(한도·혼잡)은 **고쳐야 할 실패와 구분해서** 부른다.
+  const wait = !done && !!failure.wait
+  const what = done ? '작업 종료' : wait ? '한도로 멈춤' : '지시 실패'
+  // 정상 종료는 평상시 기록으로. 실패만 오류 파일에 남아야 묻히지 않는다.
+  const note = done ? logActivity : (line) => logRenderer(line, '지시')
   if (!win || win.isDestroyed()) return
   // 창이 눈앞에 있으면 화면으로 이미 보인다 — 그때 깜빡이면 성가시기만 하다.
-  if (winFocused) return logRenderer(`${what} — ${name} (창이 앞에 있어 알리지 않음)`)
+  if (winFocused) return note(`${what} — ${name} (창이 앞에 있어 알리지 않음)`)
 
   // 작업표시줄 깜빡임. 알림 배너를 꺼 둔 사람에게도 남는 신호다.
   try {
@@ -2613,11 +3540,19 @@ function notifyDone(dir, failure) {
     /* 플랫폼이 지원하지 않으면 그만 */
   }
   try {
-    if (!Notification.isSupported()) return logRenderer(`${what} — ${name} (깜빡임만)`)
+    if (!Notification.isSupported()) return note(`${what} — ${name} (깜빡임만)`)
     const n = new Notification({
       // **실패를 완료라고 하지 않는다.** 사용량 한도에 걸려 아무것도 못 했는데
       // "작업이 끝났습니다"가 뜨면 사용자는 다 된 줄 안다.
-      title: done ? `${name} — 작업이 끝났습니다` : `${name} — 지시를 처리하지 못했습니다`,
+      //
+      // **기다릴 일과 손볼 일도 가른다.** 한도는 사용자가 할 수 있는 게 없다 —
+      // "처리하지 못했습니다"로 부르면 무엇이 망가졌는지 찾아 나서게 된다.
+      // 풀리는 시각은 이미 문구 안에 있으니(`resets 6:50pm (Asia/Seoul)`) 그대로 보여 준다.
+      title: done
+        ? `${name} — 작업이 끝났습니다`
+        : wait
+          ? `${name} — ${failure.resetAt ? `${failure.resetAt}까지 기다려야 합니다` : '한도가 풀릴 때까지 기다려야 합니다'}`
+          : `${name} — 지시를 처리하지 못했습니다`,
       body: done
         ? '눌러서 결과를 확인하세요'
         : (failure.label ? `${failure.label} — 눌러서 확인하세요` : '눌러서 이유를 확인하세요'),
@@ -2631,7 +3566,7 @@ function notifyDone(dir, failure) {
       win.focus()
     })
     n.show()
-    logRenderer(`${what} — ${name} (알림·깜빡임)`)
+    note(`${what} — ${name} (알림·깜빡임)`)
   } catch (err) {
     // 알림이 막혀 있어도 깜빡임은 이미 줬다. 다만 **조용히 넘기지는 않는다** —
     // 알림이 안 뜨는데 이유를 알 수 없으면 고칠 방법이 없다.

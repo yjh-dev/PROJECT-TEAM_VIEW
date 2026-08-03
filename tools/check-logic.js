@@ -33,7 +33,9 @@ function loadFrom(file, names, prelude = '') {
   const src = fs.readFileSync(path.join(ROOT, file), 'utf8').replace(/\r\n/g, '\n')
   let code = prelude
   for (const n of names) {
-    const start = src.indexOf('\nfunction ' + n + '(')
+    // async 함수도 그대로 떼어 온다(검사에서 await로 부르면 된다).
+    let start = src.indexOf('\nfunction ' + n + '(')
+    if (start < 0) start = src.indexOf('\nasync function ' + n + '(')
     if (start < 0) throw new Error(`${file}에서 ${n}을 찾지 못했습니다`)
     const end = src.indexOf('\n}\n', start)
     code += src.slice(start, end + 3) + '\n'
@@ -131,6 +133,105 @@ for (let i = 0; i < 35; i++) M.takeSnapshot(LAB, 'bulk ' + i)
 const kept = sh(['for-each-ref', '--format=%(refname)', 'refs/teamview/snap']).trim().split('\n').filter(Boolean).length
 kept <= 30 ? ok(`스냅샷을 30개까지만 둔다 (지금 ${kept})`) : bad('스냅샷 보관 한도', `${kept}개`)
 
+// ── 6-1. 조각난 출력에서 주소가 온전히 살아남는가 ──────────────────────────
+// 실측(renderer.log, 08-02 12:16:12 외 4회):
+//     실행 준비됨 — daily http://localhost:
+// 진짜 주소는 `http://localhost:5173/`인데 포트가 없다. 링크를 눌러도 안 열린다.
+// 자식의 stdout은 줄 단위로 오지 않는다 — `http://localhost:`에서 조각이 끊기면
+// sniffUrl의 포트 없는 fallback이 걸리고, `if (!r.url)` 가드 때문에 그 값이 굳는다.
+// **색상 코드가 아니라 조각 분할이 원인이다** — 온전한 줄이면 ANSI가 섞여 있어도
+// 제대로 주웠다.
+{
+  const L = loadFrom('main.js', ['makeLineReader', 'sniffUrl'], 'const LINE_BUF_MAX = 64 * 1024\n')
+  const ESC = String.fromCharCode(27)
+  // 실측 로그 그대로 — vite는 포트를 굵게 칠해서 내보낸다
+  const VITE = `  ${ESC}[32m>${ESC}[39m  ${ESC}[1mLocal${ESC}[22m:   ${ESC}[36mhttp://localhost:${ESC}[1m5173${ESC}[22m/${ESC}[39m\n`
+  const WANT = 'http://localhost:5173/'
+
+  /** 진짜 파이프처럼 조각을 흘려 넣고, 주운 주소와 쌓인 줄 수를 돌려준다. */
+  const feed = (chunks) => {
+    let url = null
+    const lines = []
+    const rd = L.makeLineReader((line) => {
+      if (line.trim()) lines.push(line)
+      if (!url) url = L.sniffUrl(line)
+    })
+    for (const c of chunks) rd.push(c)
+    rd.flush()
+    return { url, lines }
+  }
+
+  eq('온전한 줄에서 주소를 줍는다', feed(['http://localhost:5173/\n']).url, WANT)
+  eq('색상 코드가 섞여도 줍는다', feed([VITE]).url, WANT)
+  // 이것이 실제로 났던 실패다
+  eq('포트 앞에서 조각이 끊겨도 포트가 살아남는다', feed(['  Local:   http://localhost:', '5173/\n']).url, WANT)
+  eq('색상 코드까지 섞여 끊겨도 살아남는다',
+    feed([VITE.slice(0, VITE.indexOf('5173')), VITE.slice(VITE.indexOf('5173'))]).url, WANT)
+  eq('한 글자씩 들어와도 살아남는다', feed([...VITE]).url, WANT)
+  // 한 글자씩 74번 들어온 줄이 74줄이 되면, 실패 원인으로 보여 줄 마지막 200줄이
+  // 반토막 난 조각으로 가득 찬다.
+  eq('반토막 난 줄이 쌓이지 않는다', feed([...VITE]).lines.length, 1)
+  eq('개행 없이 끝난 꼬리도 흘려보낸다', feed(['http://localhost:5173/']).url, WANT)
+  eq('CRLF의 \\r가 주소에 붙지 않는다', feed(['http://localhost:5173/\r\n']).url, WANT)
+  // **스트림마다 버퍼가 따로여야 한다** — 섞이면 없던 줄이 생긴다.
+  {
+    const seen = []
+    const out = L.makeLineReader((l) => seen.push(l))
+    const err = L.makeLineReader((l) => seen.push(l))
+    out.push('http://local')
+    err.push('경고: 무언가\n')
+    out.push('host:5173/\n')
+    seen.includes(WANT)
+      ? ok('stdout·stderr가 버퍼를 나눠 쓰지 않는다')
+      : bad('스트림 분리', `반쪽끼리 이어 붙었다 — ${JSON.stringify(seen)}`)
+  }
+  // 개행 없이 한없이 들어와도(진행 막대) 메모리를 내주지 않는다
+  {
+    let got = 0
+    const rd = L.makeLineReader(() => got++)
+    rd.push('x'.repeat(70 * 1024))
+    got > 0 ? ok('개행이 안 와도 무한정 쌓지 않는다') : bad('버퍼 상한', '개행 없는 출력에 메모리가 샌다')
+  }
+}
+
+// ── 6-1-1. 주소를 봤다고 "준비됨"이라 하지 않는가 ──────────────────────────
+// 실측(08-02 12:52:47 준비됨 → 12:57:12 코드 1): vite가 주소를 찍은 **직후** 죽었는데
+// 같은 워크스페이스의 dev:server가 살아 있어 `npm run dev`는 4분 25초를 더 버텼다.
+// 앱은 그동안 열리지 않는 링크를 "실행 준비됨"으로 들고 있었다.
+{
+  const src4 = fs.readFileSync(path.join(ROOT, 'main.js'), 'utf8').replace(/\r\n/g, '\n')
+  const m = /const RUN_DEAD_RE = \/(.*)\/([a-z]*)\n/.exec(src4)
+  if (!m) bad('죽음 신호 규칙', 'RUN_DEAD_RE를 찾지 못했다')
+  else {
+    const re = new RegExp(m[1], m[2]) // 원본 정규식을 그대로 쓴다(복사본을 검사하면 검사가 거짓말을 한다)
+    // 실측 로그 12:57:12에 실제로 찍힌 줄들
+    const dead = [
+      'dev:web: [ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL] @daily/web@0.1.0 dev: `vite`',
+      'dev:web: Exit status 1',
+      '[ELIFECYCLE] Command failed with exit code 1.',
+    ]
+    for (const l of dead) re.test(l) ? ok(`죽음을 알아본다: ${l.slice(0, 40)}…`) : bad('죽음 신호', l)
+    // **멀쩡한 줄을 죽음으로 보면 안 된다** — 그러면 되는 실행도 "준비됨"이 안 뜬다.
+    const alive = [
+      'dev:web:   ➜  Local:   http://localhost:5173/',
+      'VITE v6.4.3  ready in 546 ms',
+      'dev:server: [daily] server listening on http://localhost:3001/api',
+      '2 warnings and 0 errors',
+      'Compiled successfully in 1.2s',
+    ]
+    for (const l of alive) !re.test(l) ? ok(`멀쩡한 줄을 죽음으로 보지 않는다: ${l.slice(0, 32)}…`) : bad('오탐', l)
+  }
+  const hasReady = /ready: !!r\?\.ready/.test(src4)
+  hasReady
+    ? ok('주소와 살아 있음을 다른 값으로 내보낸다')
+    : bad('준비 판정', 'url만 보면 죽은 서버의 링크가 계속 눌린다')
+  const ui = fs.readFileSync(path.join(ROOT, 'renderer', 'app.js'), 'utf8')
+  const linkGated = /r\.running && r\.url && r\.ready/.test(ui)
+  linkGated
+    ? ok('화면이 확인된 주소만 링크로 내준다')
+    : bad('링크 표시', '주소를 본 것만으로 링크를 준다 — 눌러도 열리지 않는다')
+}
+
 // ── 6-2. 실패 사유를 사람 말로 옮기는가 ────────────────────────────────────
 // claude는 stderr로 아무것도 쓰지 않는다. 실패 사유는 세션 기록에만 남고, 그걸
 // 못 읽으면 화면에는 "코드 1로 끝남"만 뜬다 — 실제로 사용량 한도에 걸렸는데
@@ -154,6 +255,95 @@ kept <= 30 ? ok(`스냅샷을 30개까지만 둔다 (지금 ${kept})`) : bad('�
   for (const [msg, want] of cases) {
     const hit = FAILURE_KINDS.find((k) => k.re.test(msg))
     eq('실패 분류: ' + (want ?? '분류 없음'), hit ? hit.label : null, want)
+  }
+}
+
+// ── 6-2-1. 한도가 언제 풀리는지 문구에서 읽어 내는가 ───────────────────────
+// 실측(renderer.log 08-02 08:13:58)에서 사유는 남았는데 결과는 "코드 1"이었다.
+// 풀리는 시각은 그 문구 안에 이미 들어 있다 — 사용자가 정말 알고 싶은 값이다.
+{
+  const K = loadFrom('main.js', ['resetTimeFrom'])
+  const cases = [
+    ["You've hit your session limit · resets 6:50pm (Asia/Seoul)", '6:50pm (Asia/Seoul)'],
+    ['Agent terminated early due to an API error: You\'ve hit your session limit · resets 5:40pm (Asia/Seoul)', '5:40pm (Asia/Seoul)'],
+    ["You've hit your session limit · resets 3:50am (Asia/Seoul)", '3:50am (Asia/Seoul)'],
+    ['rate limited, resets at 11pm', '11pm'],
+    // **없는 시각을 지어내면 안 된다.**
+    ['API Error: 429 Too Many Requests', 'null'],
+  ]
+  for (const [msg, want] of cases) eq(`풀리는 시각: ${want}`, K.resetTimeFrom(msg), want)
+}
+
+// ── 6-2-2. 기다릴 실패와 손볼 실패를 가르는가 ──────────────────────────────
+// 둘을 똑같이 "코드 1"로 보여 주면, 망가진 것이 없는데도 원인을 찾아 나서게 된다.
+{
+  const src3 = fs.readFileSync(path.join(ROOT, 'main.js'), 'utf8').replace(/\r\n/g, '\n')
+  const i = src3.indexOf('const FAILURE_KINDS')
+  const f3 = path.join(os.tmpdir(), 'tv-check-kinds2.js')
+  fs.writeFileSync(f3, src3.slice(i, src3.indexOf('\n]\n', i) + 3) + '\nmodule.exports = { FAILURE_KINDS }\n', 'utf8')
+  delete require.cache[require.resolve(f3)]
+  const { FAILURE_KINDS } = require(f3)
+  const waitOf = (msg) => !!FAILURE_KINDS.find((k) => k.re.test(msg))?.wait
+  eq('한도는 기다리면 되는 실패다', waitOf("You've hit your session limit · resets 6:50pm (Asia/Seoul)"), 'true')
+  eq('서버 혼잡도 기다리면 되는 실패다', waitOf('Error: Overloaded (529)'), 'true')
+  eq('로그인 만료는 손봐야 한다', waitOf('401 unauthorized'), 'false')
+  eq('결제 문제는 손봐야 한다', waitOf('insufficient credit balance'), 'false')
+  // 화면이 그 신호를 실제로 쓰는지. 표시까지 이어지지 않으면 고친 게 아니다.
+  const ui = fs.readFileSync(path.join(ROOT, 'renderer', 'app.js'), 'utf8')
+  const showsWait = /why\?\.wait/.test(ui)
+  showsWait
+    ? ok('화면이 기다릴 실패를 따로 표시한다')
+    : bad('한도 표시', '신호가 화면까지 오지 않는다 — 결과는 여전히 "코드 1"이다')
+  const showsReset = /why\.resetAt/.test(ui)
+  showsReset
+    ? ok('화면이 풀리는 시각을 보여 준다')
+    : bad('풀림 시각 표시', '문구에 있는 값을 버리고 있다')
+}
+
+// ── 6-2-3. 오류 로그에 평상시 기록이 섞이지 않는가 ─────────────────────────
+// `renderer.log`는 화면이 까맣게 죽었는데 로그가 텅 비어 있던 일을 겪고 만든 **오류
+// 파일**이다. 그런데 `실행 준비됨`·`작업 종료` 같은 정상 상태가 같이 들어오면서
+// 실측 89줄 중 34줄이 평상시 기록이 됐고, 정작 화면 크래시 4줄이 그 사이에 묻혔다.
+{
+  const s = fs.readFileSync(path.join(ROOT, 'main.js'), 'utf8').replace(/\r\n/g, '\n')
+  const calls = s.match(/logRenderer\((?:`[^`]*`|'[^']*')/g) || []
+  // 정상 상태를 나타내는 말들. 이 중 하나라도 오류 파일로 가면 다시 묻히기 시작한다.
+  const normal = ['실행 준비됨', '실행 중지됨', '실행 시작', '작업 종료', '중지로 끝남', '앱을 켰습니다']
+  const leaked = calls.filter((c) => normal.some((n) => c.includes(n)))
+  leaked.length === 0
+    ? ok('평상시 기록이 오류 파일로 새지 않는다')
+    : bad('로그 분리', `오류 파일로 가는 정상 기록: ${leaked.join(', ')}`)
+  const hasActivity = /function logActivity\(/.test(s)
+  hasActivity
+    ? ok('평상시 기록을 담을 곳이 따로 있다')
+    : bad('로그 분리', 'logActivity가 없다 — 한 파일에 다시 섞인다')
+  const hasActivityPath = /function activityLogPath\(/.test(s)
+  hasActivityPath
+    ? ok('평상시 기록 파일 경로가 정해져 있다')
+    : bad('로그 분리', 'activityLogPath가 없다')
+  // 오류 파일 안에서도 어디서 난 오류인지 갈라야 한다 — 자식 프로세스가 뱉은
+  // 스택 트레이스 30줄에 화면 크래시 4줄이 묻혔다(실측).
+  const tagged = /function logRenderer\(line, where = /.test(s)
+  tagged
+    ? ok('오류에 출처를 붙인다 (화면·실행·지시)')
+    : bad('오류 출처', '화면 크래시가 자식 프로세스 출력에 묻힌다')
+}
+
+// ── 6-2-4. 실행을 누가 껐다 켰는지 기록에 남는가 ───────────────────────────
+// 실측: 준비↔중지가 몇 초 만에 되풀이됐는데(12:51:13 준비 → 12:52:44 중지 →
+// 12:52:47 준비), 기록에 **실행 시작도 앱 켜짐도 없어서** 사람이 껐다 켠 것인지
+// 앱이 스스로 그런 것인지 로그만으로는 가릴 수 없었다. 원인 규명이 로그 때문에
+// 막히는 일이 다시 없도록 못 박는다.
+{
+  const s = fs.readFileSync(path.join(ROOT, 'main.js'), 'utf8').replace(/\r\n/g, '\n')
+  const marks = [
+    [/logActivity\(`앱을 켰습니다/, '앱을 켠 시각'],
+    [/logActivity\(`실행 시작 —/, '실행을 시작한 시각'],
+    [/logActivity\(`실행 중지됨 —/, '실행을 멈춘 시각'],
+    [/logActivity\(`실행이 스스로 끝났습니다/, '서버가 조용히 끝난 시각'],
+  ]
+  for (const [re, what] of marks) {
+    re.test(s) ? ok(`기록에 ${what}이 남는다`) : bad('실행 기록', `${what}이 없다 — 되풀이의 원인을 가릴 수 없다`)
   }
 }
 
@@ -399,10 +589,803 @@ guide.includes('qa-tester') && guide.includes('마지막 관문')
   fs.rmSync(lab2, { recursive: true, force: true })
 }
 
-// ── 정리 ───────────────────────────────────────────────────────────────────
-fs.rmSync(LAB, { recursive: true, force: true })
-if (failed) {
-  console.error(`\n로직 검사 실패 — ${failed}건`)
-  process.exit(1)
+// ── 11. 팀원 고용·해고 ─────────────────────────────────────────────────────
+//
+// 여기서 보는 것은 전부 "이게 어긋나면 기능이 통째로 무효가 되는" 자리다:
+//   좌석    id가 아니라 순서에 묶으면 한 명 해고에 사무실이 통째로 재배치된다
+//   해고    지우면 사람이 고쳐 둔 정의를 되살릴 수단이 없다
+//   세팅    갱신이 해고자를 되살리면 해고 기능 자체가 없는 것과 같다
+//   대기열  해고한 사람 앞으로 온 지시가 남으면 리드가 없는 사람을 부르다 실패한다
+{
+  const src = fs.readFileSync(path.join(ROOT, 'main.js'), 'utf8').replace(/\r\n/g, '\n')
+  // 상수는 **원본을 그대로 떼어 온다.** 복사본을 검사하면 검사가 거짓말을 한다.
+  const constLine = (name) => {
+    const i = src.indexOf('const ' + name + ' =')
+    if (i < 0) throw new Error(`main.js에서 ${name}을 찾지 못했습니다`)
+    return src.slice(i, src.indexOf('\n', i))
+  }
+  const presetSrc = (() => {
+    const i = src.indexOf('const PRESET_SEATS = [')
+    return src.slice(i, src.indexOf('\n]\n', i) + 3)
+  })()
+
+  const T = loadFrom(
+    'main.js',
+    [
+      'configPath', 'loadConfig', 'saveConfig', 'loadProjects', 'appendJsonl',
+      'agentsDirOf', 'firedDirOf', 'userAgentsDir', 'parseAgentFile', 'firedIds',
+      'assignSeats', 'invalidateTeam', 'readTeam', 'freeSeats', 'companyBusy',
+      'teamCatalog', 'listTeam', 'teamWriteBlock', 'afterTeamChange',
+      'hireAgent', 'yamlValue', 'renderAgentFile', 'createAgent',
+      'requeueToLead', 'fireAgent', 'setupProject', 'staleAgents',
+      'rosterLine', 'promptFor',
+    ],
+    [
+      "const fs = require('fs')",
+      "const path = require('path')",
+      // Electron 대신 임시 폴더를 가리킨다(호출할 때마다 읽으므로 뒤에서 바꿔도 된다).
+      "const app = { getPath: (k) => process.env['TV_PATH_' + k] }",
+      "const CONFIG_NAME = 'config.json'",
+      "const COMMANDS_NAME = 'team-commands.jsonl'",
+      'const MAX_PROJECTS = 3',
+      constLine('FIRED_DIRNAME'),
+      constLine('SEAT_CAPACITY'),
+      presetSrc,
+      constLine('SAFE_AGENT_ID'),
+      constLine('SAFE_TOOL'),
+      constLine('TEAM_TTL_MS'),
+      // 검사에서 손댈 수 있게 밖으로 꺼내 둔다
+      'const teamCache = global.__teamCache = new Map()',
+      'const companies = global.__companies = new Map()',
+      'const healthCache = new Map()',
+      'const templateDir = () => ' + JSON.stringify(path.join(ROOT, 'templates')),
+      "const eventsFileFor = (d) => path.join(d, '.claude', 'team-events.jsonl')",
+      'const pumpStatusAll = () => {}',
+      'const logRenderer = () => {}',
+      'const mergeHooks = () => 0',
+      'const refreshTeamRules = () => null',
+      // 프롬프트 본문은 여기서 볼 것이 아니다(위 8번에서 따로 본다)
+      "const HANDOFF = ''",
+      "const BOUNDARY = ''",
+      "const DELIVERABLE = ''",
+      '',
+    ].join('\n'),
+  )
+
+  const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'tv-home-'))
+  const DATA = fs.mkdtempSync(path.join(os.tmpdir(), 'tv-data-'))
+  const A = fs.mkdtempSync(path.join(os.tmpdir(), 'tv-prjA-'))
+  const B = fs.mkdtempSync(path.join(os.tmpdir(), 'tv-prjB-'))
+  const C = fs.mkdtempSync(path.join(os.tmpdir(), 'tv-prjC-'))
+  process.env.TV_PATH_userData = DATA
+  process.env.TV_PATH_home = HOME
+  for (const d of [A, B, C]) fs.mkdirSync(path.join(d, '.claude'), { recursive: true })
+  fs.writeFileSync(path.join(DATA, 'config.json'), JSON.stringify({ projects: [A, B, C] }), 'utf8')
+
+  const TPL = path.join(ROOT, 'templates', 'agents')
+  const agentsOf = (d) => path.join(d, '.claude', 'agents')
+  const fresh = () => global.__teamCache.clear() // 파일을 손으로 바꿨으면 캐시를 버린다
+  const mkAgent = (folder, id, desc, tools) => {
+    fs.mkdirSync(folder, { recursive: true })
+    fs.writeFileSync(
+      path.join(folder, id + '.md'),
+      `---\nname: ${id}\ndescription: ${desc}\ntools: ${tools}\n---\n\n너는 ${id}다.\n`,
+      'utf8',
+    )
+  }
+  const seatOf = (dir, id) => readOf(dir).find((m) => m.id === id)?.seat
+  const readOf = (dir) => T.readTeam(dir)
+
+  // (1) 세 명을 읽어 오는가
+  mkAgent(agentsOf(A), 'planner', '기획을 맡는다', 'Read, Write')
+  mkAgent(agentsOf(A), 'backend-dev', '서버를 만든다', 'Read, Write, Bash')
+  mkAgent(agentsOf(A), 'data-analyst', '지표를 본다', 'Read, Bash')
+  fresh()
+  {
+    const team = readOf(A)
+    eq('명단에 리드가 항상 있다', team[0].id, 'lead')
+    eq('리드는 해고할 수 없다', team[0].fireable, 'false')
+    const ids = team.map((m) => m.id)
+    eq('디스크에 있는 세 명을 읽는다', ids.filter((i) => i !== 'lead').length, 3)
+    const be = team.find((m) => m.id === 'backend-dev')
+    eq('설명을 읽는다', be.desc, '서버를 만든다')
+    eq('도구를 읽는다', be.tools.join('|'), 'Read|Write|Bash')
+    eq('프로젝트 팀원은 해고할 수 있다', be.fireable, 'true')
+  }
+
+  // (2) frontmatter가 깨져도 파일명으로 살아나는가 — 한 장 때문에 사무실이 비면 안 된다
+  fs.writeFileSync(path.join(agentsOf(A), 'ghost.md'), '아무 형식도 없는 메모\n', 'utf8')
+  fresh()
+  {
+    const team = readOf(A)
+    const g = team.find((m) => m.id === 'ghost')
+    g ? ok('frontmatter가 없어도 파일명으로 살아난다') : bad('frontmatter 없음', 'ghost가 명단에서 사라졌다')
+    eq('설명이 없으면 빈 문자열(던지지 않는다)', g ? g.desc : null, '')
+    eq('깨진 파일 하나가 나머지를 죽이지 않는다', team.length, 5) // 리드 + 4
+  }
+
+  // (2-1) 같은 id가 전역에도 있으면 프로젝트가 이긴다 (Claude Code와 같은 규칙)
+  mkAgent(path.join(HOME, '.claude', 'agents'), 'backend-dev', '전역 백엔드', 'Read')
+  mkAgent(path.join(HOME, '.claude', 'agents'), 'global-only', '이 컴퓨터 전체의 팀원', 'Read')
+  fresh()
+  {
+    const team = readOf(A)
+    eq('같은 id면 프로젝트가 이긴다', team.find((m) => m.id === 'backend-dev').desc, '서버를 만든다')
+    const go = team.find((m) => m.id === 'global-only')
+    eq('전역 팀원도 명단에 든다', go ? go.scope : null, 'user')
+    eq('전역 팀원은 여기서 해고할 수 없다', go ? go.fireable : null, 'false')
+    const res = T.fireAgent(A, 'global-only')
+    eq('전역 팀원 해고는 거절된다', res.ok, 'false')
+    eq('전역 팀원 파일은 그대로다', fs.existsSync(path.join(HOME, '.claude', 'agents', 'global-only.md')), 'true')
+  }
+
+  // (3) **프리셋 10명의 자리가 오늘 값과 정확히 같은가** ← 회귀의 핵심
+  // 이 값이 바뀌면 이미 돌아가는 회사의 사무실이 통째로 재배치된다.
+  const WANT_SEATS = {
+    planner: 0, 'ux-designer': 1, 'frontend-dev': 2, 'backend-dev': 3, 'mobile-dev': 4,
+    'code-reviewer': 5, 'qa-tester': 6, debugger: 7, 'release-manager': 8, scout: 9,
+  }
+  fs.mkdirSync(agentsOf(B), { recursive: true })
+  for (const f of fs.readdirSync(TPL)) fs.copyFileSync(path.join(TPL, f), path.join(agentsOf(B), f))
+  fresh()
+  {
+    let wrong = []
+    for (const [id, want] of Object.entries(WANT_SEATS)) {
+      const got = seatOf(B, id)
+      if (got !== want) wrong.push(`${id}: ${got} ≠ ${want}`)
+    }
+    wrong.length === 0
+      ? ok('프리셋 10명의 자리가 오늘 값 그대로다')
+      : bad('좌석 프리셋', wrong.join(', '))
+    // 전역 팀원(global-only)도 이 프로젝트에서 부를 수 있으니 자리를 차지한다: 14 - 10 - 1
+    eq('전역 팀원까지 세어 남은 자리를 낸다', T.listTeam(B).free, 3)
+    eq('전역 팀원도 자리를 받는다', seatOf(B, 'global-only'), 10)
+  }
+
+  // (3-1) 프리셋에 없는 사람은 가장 낮은 빈 번호를 받고 그 자리에 굳는다
+  mkAgent(agentsOf(B), 'data-analyst', '지표를 본다', 'Read, Bash')
+  fresh()
+  {
+    eq('새 팀원은 가장 낮은 빈 번호를 받는다', seatOf(B, 'data-analyst'), 11)
+    const saved = (T.loadConfig().seats ?? {})[B] ?? {}
+    eq('그 자리를 앱 설정에 적어 둔다', saved['data-analyst'], 11)
+    eq('프리셋은 설정에 적지 않는다(코드가 진실)', saved.planner, 'undefined')
+    eq('프로젝트 폴더에는 쓰지 않는다', fs.existsSync(path.join(B, '.claude', 'seats.json')), 'false')
+  }
+
+  // (3-2) 장부 번호가 프리셋과 부딪히면 프리셋이 이기고 장부를 다시 적는다
+  {
+    const cfg = T.loadConfig()
+    cfg.seats[B]['data-analyst'] = 3 // backend-dev 자리
+    T.saveConfig(cfg)
+    fresh()
+    eq('프리셋 자리는 뺏기지 않는다', seatOf(B, 'backend-dev'), 3)
+    const moved = seatOf(B, 'data-analyst')
+    moved !== 3 && moved !== null ? ok(`부딪힌 쪽이 빈 자리로 비켜난다 (${moved}번)`) : bad('좌석 충돌', String(moved))
+    eq('비켜난 자리를 장부에 다시 적는다', (T.loadConfig().seats[B] ?? {})['data-analyst'], moved)
+  }
+
+  // (7) 해고 전에 대기열을 만들어 둔다 — 그 사람 앞으로 온 지시가 리드로 가야 한다
+  const queueFile = path.join(B, '.claude', 'team-commands.jsonl')
+  fs.writeFileSync(
+    queueFile,
+    [
+      JSON.stringify({ ts: 1, agent: 'mobile-dev', text: '앱 화면 고쳐줘', status: 'pending' }),
+      JSON.stringify({ ts: 2, agent: 'planner', text: '기획 정리해줘', status: 'pending' }),
+      JSON.stringify({ ts: 3, agent: 'mobile-dev', text: '빌드 확인해줘', status: 'pending' }),
+      '{ 깨진 줄 }',
+    ].join('\n') + '\n',
+    'utf8',
+  )
+
+  // (4)(5)(7) 해고
+  const before = Object.fromEntries(Object.keys(WANT_SEATS).map((id) => [id, seatOf(B, id)]))
+  const fired = T.fireAgent(B, 'mobile-dev')
+  eq('해고가 성공한다', fired.ok, 'true')
+  {
+    fresh()
+    const moved = Object.entries(before).filter(([id, s]) => id !== 'mobile-dev' && seatOf(B, id) !== s)
+    moved.length === 0
+      ? ok('한 명을 해고해도 나머지 자리는 그대로다')
+      : bad('좌석 고정', moved.map(([id]) => id).join(', ') + '가 밀렸다')
+    eq('해고한 사람은 명단에서 빠진다', readOf(B).some((m) => m.id === 'mobile-dev'), 'false')
+    // 프리셋 10 + 전역 1 + data-analyst 1 = 12명이었고, 한 명이 나가 11명이 남는다
+    eq('해고는 그 번호 하나만 비운다', T.listTeam(B).free, 3)
+  }
+  eq('정의 파일을 지우지 않는다(원래 자리에서만 사라진다)', fs.existsSync(path.join(agentsOf(B), 'mobile-dev.md')), 'false')
+  eq('team-fired/로 옮겨졌다', fs.existsSync(path.join(B, '.claude', 'team-fired', 'mobile-dev.md')), 'true')
+  eq('옮긴 경로를 응답에 담는다', fired.movedTo, path.join(B, '.claude', 'team-fired', 'mobile-dev.md'))
+  eq('대기열에서 그 사람 앞 지시를 리드로 돌린다', fired.requeued, 2)
+  {
+    const lines = fs.readFileSync(queueFile, 'utf8').split(/\r?\n/).filter((l) => l.trim())
+    const agents = lines.map((l) => { try { return JSON.parse(l).agent } catch { return '깨짐' } })
+    eq('해고한 사람 앞으로 온 지시가 남지 않는다', agents.includes('mobile-dev'), 'false')
+    eq('다른 사람 지시는 건드리지 않는다', agents.filter((a) => a === 'planner').length, 1)
+    eq('지시 내용은 그대로 남는다', lines.length, 4)
+    eq('깨진 줄도 버리지 않는다', agents.includes('깨짐'), 'true')
+  }
+  {
+    const ev = fs.readFileSync(path.join(B, '.claude', 'team-events.jsonl'), 'utf8').trim().split('\n').map(JSON.parse)
+    const last = ev[ev.length - 1]
+    eq('해고를 이벤트 한 줄로 남긴다', `${last.type}:${last.agent}`, 'fire:mobile-dev')
+    eq('작업 배지가 붙을 detail을 넣지 않는다', last.detail, 'undefined')
+  }
+
+  // (6) 세팅(갱신)이 해고자를 되살리지 않는가 — 이게 빠지면 기능 자체가 무효다
+  {
+    const res = T.setupProject(B, { agents: true, update: true })
+    eq('갱신이 끝까지 간다', res.ok, 'true')
+    eq('갱신이 해고자를 되살리지 않는다', fs.existsSync(path.join(agentsOf(B), 'mobile-dev.md')), 'false')
+    eq('해고자는 "낡음"으로 세지 않는다', T.staleAgents(B), 0)
+  }
+
+  // (1-1) 해고자를 다시 부르면 **그 파일이 그대로 돌아온다**(사람이 고쳐 둔 내용이 산다)
+  {
+    const firedFile = path.join(B, '.claude', 'team-fired', 'mobile-dev.md')
+    fs.appendFileSync(firedFile, '\n## 사람이 덧붙인 규칙\n손으로 고친 내용이다.\n', 'utf8')
+    const res = T.hireAgent(B, 'mobile-dev')
+    eq('다시 고용이 성공한다', res.ok, 'true')
+    eq('해고자 파일을 우선 복원한다', res.from, 'fired')
+    const back = fs.readFileSync(path.join(agentsOf(B), 'mobile-dev.md'), 'utf8')
+    eq('사람이 고쳐 둔 내용이 살아 돌아온다', back.includes('사람이 덧붙인 규칙'), 'true')
+    eq('해고자 폴더에서는 사라진다', fs.existsSync(firedFile), 'false')
+    fresh()
+    eq('돌아온 사람은 원래 자리로 앉는다', seatOf(B, 'mobile-dev'), 4)
+  }
+
+  // (8) promptFor에 실제 팀원 목록이 들어가는가 — 문서에만 있는 사람을 부르면 실패한다
+  {
+    fresh()
+    const p = T.promptFor({ agent: 'lead', text: '무언가 해줘' }, B)
+    eq('프롬프트에 실제 팀원 목록이 들어간다', /이 회사의 팀원/.test(p), 'true')
+    eq('명단에 있는 사람이 프롬프트에 적힌다', p.includes('qa-tester'), 'true')
+    eq('없는 사람은 없는 사람이라고 못 박는다', /없으면 없는 사람/.test(p), 'true')
+    // 해고한 사람이 프롬프트에 남으면 리드가 그 사람을 부른다
+    T.fireAgent(B, 'debugger')
+    fresh()
+    eq('해고한 사람은 프롬프트에서도 빠진다', T.promptFor({ agent: 'lead', text: 'x' }, B).includes('debugger'), 'false')
+  }
+
+  // (9) 자리가 꽉 차면
+  {
+    for (let i = 1; i <= 14; i++) mkAgent(agentsOf(C), 'x' + String(i).padStart(2, '0'), `${i}번`, 'Read')
+    fresh()
+    const list = T.listTeam(C)
+    eq('열네 명까지는 모두 자리가 있다', list.members.filter((m) => m.seat !== null).length, 14)
+    eq('남은 자리가 0이다', list.free, 0)
+    eq('상한을 응답에 담는다', list.capacity, 14)
+    const res = T.hireAgent(C, 'planner')
+    eq('자리가 없으면 고용을 거절한다', res.ok, 'false')
+    eq('자리가 없다고 알린다', res.full, 'true')
+    eq('거절했으면 파일도 만들지 않는다', fs.existsSync(path.join(agentsOf(C), 'planner.md')), 'false')
+    const cr = T.createAgent(C, { id: 'one-more', description: '한 명 더', tools: ['Read'] })
+    eq('직접 만들기도 자리가 없으면 거절한다', cr.full, 'true')
+    // 사람이 파일을 손으로 넣으면 열다섯 번째가 생길 수 있다. 없는 칸에 그리지 않게 비워 보낸다.
+    mkAgent(agentsOf(C), 'x15', '열다섯 번째', 'Read')
+    fresh()
+    eq('열다섯 번째는 자리가 없다(seat: null)', T.readTeam(C).find((m) => m.id === 'x15').seat, 'null')
+  }
+
+  // (10) 직접 만들기 — id 검증과 뼈대
+  {
+    const V = (label, spec) => {
+      const r = T.createAgent(A, spec)
+      r.ok === false && r.code === 'VALIDATION' ? ok(`직접 만들기 거절: ${label}`) : bad('id 검증', `${label} — ${JSON.stringify(r)}`)
+    }
+    V('빈 id', { id: '   ', description: '무언가' })
+    V('대문자·공백이 섞인 id', { id: 'Data Analyst', description: '무언가' })
+    V('경로가 섞인 id', { id: '../evil', description: '무언가' })
+    V('이미 있는 팀원', { id: 'planner', description: '무언가' })
+    V('카탈로그에 있는 팀원', { id: 'qa-tester', description: '무언가' })
+    V('설명이 비었음', { id: 'ops-runner', description: '  ' })
+    V('이상한 도구 이름', { id: 'ops-runner', description: '운영', tools: ['rm -rf /'] })
+    V('lead라는 이름', { id: 'lead', description: '리드' })
+    {
+      // 해고자와 같은 id도 막는다 — 새로 만들면 고쳐 둔 정의가 묻힌다
+      const r = T.createAgent(B, { id: 'debugger', description: '새 디버거' })
+      eq('해고자와 같은 id는 거절한다', r.code, 'VALIDATION')
+    }
+
+    const made = T.createAgent(A, {
+      id: 'ops-runner',
+      label: '운영',
+      description: '배포 후 운영 지표를 본다',
+      tools: ['Read', 'Grep', 'Glob', 'Bash'],
+    })
+    eq('직접 만들기가 성공한다', made.ok, 'true')
+    eq('label을 응답으로 돌려준다', made.label, '운영')
+    made.basedOn ? ok(`무엇을 본으로 삼았는지 밝힌다 (${made.basedOn})`) : bad('본 파일', 'basedOn이 없다')
+    const text = fs.readFileSync(made.path, 'utf8')
+    eq('빈 파일을 만들지 않는다', text.length > 400, 'true')
+    eq('frontmatter로 시작한다', text.startsWith('---\n'), 'true')
+    eq('name이 들어간다', /\nname: ops-runner\n/.test(text), 'true')
+    eq('description이 들어간다', text.includes('배포 후 운영 지표를 본다'), 'true')
+    eq('tools가 들어간다', /\ntools: Read, Grep, Glob, Bash\n/.test(text), 'true')
+    eq('label을 파일에 새 키로 넣지 않는다', /\nlabel\s*:/.test(text), 'false')
+    // **같은 뼈대인가.** 본 정의의 문단이 통째로 빠지면 품질 기준이 같이 빠진다.
+    const baseText = fs.readFileSync(path.join(TPL, made.basedOn), 'utf8').replace(/\r\n/g, '\n')
+    const heads = (s) => (s.match(/^## .*$/gm) || []).map((h) => h.trim())
+    const missing = heads(baseText).filter((h) => !heads(text).includes(h))
+    missing.length === 0
+      ? ok(`본 정의의 규칙 문단을 모두 물려받는다 (${heads(baseText).length}개)`)
+      : bad('뼈대', `빠진 문단: ${missing.join(', ')}`)
+    eq('본 정의의 역할 선언은 갈아 끼운다', text.includes('너는 운영 담당이다'), 'true')
+    // 만든 파일을 다시 읽어 명단에 서는지 — 못 읽으면 화면에 안 뜬다
+    fresh()
+    const m = T.readTeam(A).find((x) => x.id === 'ops-runner')
+    eq('만든 팀원이 명단에 선다', m ? m.desc : null, '배포 후 운영 지표를 본다')
+    eq('만든 팀원도 도구가 읽힌다', m ? m.tools.length : 0, 4)
+  }
+
+  // (11) 처리 중이면 전부 막는다
+  {
+    global.__companies.set(A, { dir: A, child: { pid: 1 } })
+    for (const [label, res] of [
+      ['고용', T.hireAgent(A, 'scout')],
+      ['직접 만들기', T.createAgent(A, { id: 'busy-one', description: '무언가' })],
+      ['해고', T.fireAgent(A, 'planner')],
+    ]) {
+      res.ok === false && res.busy === true ? ok(`처리 중 거절: ${label}`) : bad('처리 중 차단', `${label} — ${JSON.stringify(res)}`)
+    }
+    eq('거절했으면 파일도 만들지 않는다', fs.existsSync(path.join(agentsOf(A), 'scout.md')), 'false')
+    eq('거절했으면 해고도 일어나지 않는다', fs.existsSync(path.join(agentsOf(A), 'planner.md')), 'true')
+    eq('목록은 처리 중임을 알려 준다', T.listTeam(A).busy, 'true')
+    global.__companies.delete(A)
+  }
+
+  // (12) 카탈로그
+  {
+    fresh()
+    const cat = T.teamCatalog(B)
+    const state = (id) => cat.find((c) => c.id === id)?.state
+    eq('있는 사람은 employed', state('planner'), 'employed')
+    eq('해고한 사람은 fired', state('debugger'), 'fired')
+    eq('카탈로그 순서는 자리 순', cat[0].id, 'planner')
+    const catA = T.teamCatalog(A)
+    eq('아직 안 부른 사람은 available', catA.find((c) => c.id === 'release-manager')?.state, 'available')
+  }
+
+  // (13) 앱이 팀원 정의를 지우는 경로를 만들지 않았는가
+  {
+    const at = src.indexOf('function fireAgent(')
+    const fireSrc = src.slice(at, src.indexOf('\n}\n', at))
+    const movesOnly = /renameSync/.test(fireSrc) && !/unlink|rmSync/.test(fireSrc)
+    movesOnly
+      ? ok('해고는 옮기기만 한다(지우는 코드가 없다)')
+      : bad('해고 방식', '정의 파일을 지우는 경로가 생겼다 — 사람이 고쳐 둔 내용을 되살릴 수단이 없다')
+  }
+
+  // (14) 화면과 메인이 **같은 좌석표**를 보고 있는가.
+  //
+  // 자리를 고르는 쪽은 메인이고 그리는 쪽은 화면이다. 표가 어긋나면 아무 오류 없이
+  // 엉뚱한 자리에 앉는다 — 그건 화면을 봐야만 알 수 있는 종류의 고장이다.
+  {
+    const ui = fs.readFileSync(path.join(ROOT, 'renderer', 'agents.js'), 'utf8').replace(/\r\n/g, '\n')
+    const i = ui.indexOf('PRESET_SEATS = [')
+    const uiPreset = i < 0 ? null : (ui.slice(i, ui.indexOf('\n]', i)).match(/'([a-z0-9-]+)'/g) || []).map((s) => s.slice(1, -1))
+    if (!uiPreset) {
+      console.log('  · (알림) renderer/agents.js에서 PRESET_SEATS를 찾지 못했다 — 좌석표 대조를 건너뛴다')
+    } else {
+      const mine = (presetSrc.match(/'([a-z0-9-]+)'/g) || []).map((s) => s.slice(1, -1))
+      eq('화면과 메인의 좌석표가 같다', uiPreset.join(','), mine.join(','))
+    }
+    const cells = (ui.slice(ui.indexOf('const DESK_CELLS = ['), ui.indexOf('\n]', ui.indexOf('const DESK_CELLS = ['))).match(/\{ gx:/g) || []).length
+    if (!cells) console.log('  · (알림) renderer/agents.js의 DESK_CELLS를 세지 못했다 — 정원 대조를 건너뛴다')
+    else eq('화면의 책상 수와 메인의 정원이 같다', cells, 14)
+    // 인사 이벤트를 화면이 따로 받지 않으면 default 가지에 걸려 **가짜 활동**으로 뜬다.
+    const app = fs.readFileSync(path.join(ROOT, 'renderer', 'app.js'), 'utf8')
+    if (!/'hire'/.test(app)) {
+      console.log("  · (알림) renderer가 아직 'hire'·'fire' 이벤트를 다루지 않는다 — 그대로 두면 작업 배지가 붙는다")
+    }
+  }
+
+  for (const d of [HOME, DATA, A, B, C]) fs.rmSync(d, { recursive: true, force: true })
 }
-console.log('로직 검사 통과')
+
+// ── 15. 로그인 계정 표시·전환 ──────────────────────────────────────────────
+//
+// 여기서 보는 것도 전부 실제로 어긋났던(또는 어긋나면 조용히 위험한) 자리다:
+//
+//   계정 표시   `claude auth status`가 JSON을 안 줄 수 있다(설치 안 됨·버전 변경·안내
+//               문구). 그때 던지면 환경 확인이 앱을 통째로 막는다
+//   개인정보    email·orgName은 화면과 IPC 응답에만 쓴다. orgId는 아예 읽지 않는다
+//   전환        로그아웃하면 **돌고 있는 claude가 인증을 잃어 지시가 전부 실패한다** —
+//               처리 중이면 메인에서 거절해야 한다(화면만 믿으면 늦는다)
+//   반쯤 나간 상태  logout이 실패했는데 로그인 창을 띄우면 무엇이 참인지 알 수 없다.
+//               figma는 remove가 실패했는데 add하면 같은 이름이 두 번 등록된다
+async function accountChecks() {
+  console.log('\n로그인 계정 표시·전환')
+  const src = fs.readFileSync(path.join(ROOT, 'main.js'), 'utf8').replace(/\r\n/g, '\n')
+  const constLine = (name) => {
+    const i = src.indexOf('const ' + name + ' =')
+    if (i < 0) throw new Error(`main.js에서 ${name}을 찾지 못했습니다`)
+    return src.slice(i, src.indexOf('\n', i))
+  }
+
+  const E = loadFrom(
+    'main.js',
+    ['parseAuthStatus', 'checkEnv', 'openAndWatch', 'runningCompanies', 'firstLine', 'switchAccount'],
+    [
+      "const path = require('path')",
+      'let envCache = null',
+      'const ENV_TTL_MS = 300000',
+      constLine('NOT_FOUND'),
+      // 감시는 실제로 30초씩 기다린다. 검사에서는 흐름만 보면 되므로 짧게 줄인다.
+      'const WATCH_EVERY_MS = 1',
+      'const WATCH_TRIES = 2',
+      'const companies = global.__envCompanies = new Map()',
+      'const calls = global.__calls = []',
+      'const replies = global.__replies = new Map()',
+      "const runClaude = async (args) => { const k = args.join(' '); calls.push(k); return replies.get(k) ?? { err: null, out: '', errOut: '' } }",
+      "const openInTerminal = (args) => { calls.push('창: ' + args.join(' ')); return global.__terminalOk !== false }",
+      'const send = () => {}',
+      '',
+    ].join('\n'),
+  )
+
+  const LIVE = {
+    loggedIn: true,
+    authMethod: 'claude.ai',
+    apiProvider: 'firstParty',
+    email: 'someone@example.com',
+    // 값은 가짜여야 한다(nil UUID). 이 픽스처는 저장소에 남고, 남으면 공개된다 —
+    // 검사의 뜻은 "이 문자열이 응답 어디에도 없다"이지 실제 조직을 쓰는 게 아니다.
+    orgId: '00000000-0000-0000-0000-000000000000',
+    orgName: "someone@example.com's Organization",
+    subscriptionType: 'max',
+  }
+  const reset = (replies = {}) => {
+    global.__calls.length = 0
+    global.__replies.clear()
+    global.__envCompanies.clear()
+    global.__terminalOk = true
+    for (const [k, v] of Object.entries(replies)) {
+      global.__replies.set(k, { err: null, out: '', errOut: '', ...v })
+    }
+  }
+  const said = (needle) => global.__calls.some((c) => c.includes(needle))
+
+  // (1) 계정 정보를 읽어 오는가
+  {
+    const p = E.parseAuthStatus(JSON.stringify(LIVE))
+    eq('로그인 여부를 읽는다', p.loggedIn, 'true')
+    eq('이메일을 읽는다', p.email, LIVE.email)
+    eq('조직명을 읽는다', p.orgName, LIVE.orgName)
+    eq('요금제를 읽는다', p.subscriptionType, 'max')
+    eq('인증 방식을 읽는다', p.authMethod, 'claude.ai')
+    // CLI가 JSON 앞뒤로 안내 문구를 붙여도 읽어야 한다.
+    const noisy = E.parseAuthStatus(`알림: 새 버전이 있습니다\n${JSON.stringify(LIVE)}\n끝.`)
+    eq('앞뒤 잡소리가 섞여도 읽는다', noisy.email, LIVE.email)
+  }
+
+  // (2) 깨진 입력에서 던지지 않는가 — 환경 확인은 무슨 일이 있어도 앱을 막으면 안 된다
+  {
+    const junk = ['', '   ', null, undefined, '{', '}', '{"loggedIn":', 'Error: connect ECONNREFUSED', '{"a":1}', '[]', 'null', '{ }']
+    let threw = null
+    let leaked = false
+    for (const t of junk) {
+      try {
+        const r = E.parseAuthStatus(t)
+        if (r.loggedIn !== false || r.email !== null) leaked = true
+      } catch (e) {
+        threw = `${JSON.stringify(t)} → ${e.message}`
+      }
+    }
+    threw ? bad('깨진 출력에서 던지지 않는다', threw) : ok(`깨진 출력 ${junk.length}가지에서 던지지 않는다`)
+    eq('깨진 출력은 "로그인 안 됨"으로 떨어진다', !leaked, 'true')
+  }
+
+  // (3) 로그인 안 된 상태에서 계정 정보가 새지 않는가.
+  //     CLI가 로그아웃 뒤에도 지난 값을 남겨 줄 수 있다. loggedIn을 먼저 본다.
+  {
+    const p = E.parseAuthStatus(JSON.stringify({ ...LIVE, loggedIn: false }))
+    eq('로그아웃 상태는 loggedIn:false', p.loggedIn, 'false')
+    eq('로그아웃 상태에서 이메일이 없다', p.email, 'null')
+    eq('로그아웃 상태에서 조직명이 없다', p.orgName, 'null')
+    eq('로그아웃 상태에서 요금제가 없다', p.subscriptionType, 'null')
+  }
+
+  // (4) checkEnv 결과에 계정 정보가 실리는가
+  {
+    reset({ 'auth status': { out: JSON.stringify(LIVE) }, 'mcp list': { out: 'figma: https://mcp.figma.com/mcp (HTTP) - ✔ Connected\n' } })
+    const env = await E.checkEnv({ force: true })
+    eq('설치됨으로 본다', env.claude.installed, 'true')
+    eq('로그인됨으로 본다', env.claude.loggedIn, 'true')
+    eq('checkEnv가 이메일을 담는다', env.claude.email, LIVE.email)
+    eq('checkEnv가 조직명을 담는다', env.claude.orgName, LIVE.orgName)
+    eq('checkEnv가 요금제를 담는다', env.claude.subscriptionType, 'max')
+    eq('checkEnv가 인증 방식을 담는다', env.claude.authMethod, 'claude.ai')
+    // 예전부터 화면이 쓰던 이름. 이 기능을 안 쓰는 화면도 그대로 돌아야 한다.
+    eq('예전 plan 필드도 그대로 채운다', env.claude.plan, 'max')
+    eq('figma 판정은 그대로다', env.figma.connected, 'true')
+  }
+
+  // (5) 명령이 실패하거나 출력이 비어도 checkEnv가 던지지 않는가
+  {
+    for (const [label, reply] of [
+      ['출력이 비었을 때', { out: '' }],
+      ['JSON이 아닐 때', { out: 'claude: 로그인이 필요합니다' }],
+      ['오류로 끝났을 때', { err: new Error('exit 1'), errOut: '알 수 없는 오류' }],
+    ]) {
+      reset({ 'auth status': reply })
+      let env = null
+      try {
+        env = await E.checkEnv({ force: true })
+      } catch (e) {
+        bad('checkEnv가 던지지 않는다', `${label} — ${e.message}`)
+      }
+      if (env) {
+        env.claude.loggedIn === false && env.claude.email === null
+          ? ok(`${label} 안전하게 떨어진다`)
+          : bad('안전한 실패', `${label} — ${JSON.stringify(env.claude)}`)
+      }
+    }
+    // 설치 자체가 안 됐으면 installed:false. 예전 판정을 깨지 않았는지 본다.
+    reset({ 'auth status': { err: new Error('x'), errOut: "'claude' is not recognized as an internal or external command" } })
+    const env = await E.checkEnv({ force: true })
+    eq('설치 안 됨을 그대로 가려낸다', env.claude.installed, 'false')
+    eq('로그인 안 됐으면 MCP를 물어보지 않는다', said('mcp list'), 'false')
+  }
+
+  // (6) orgId는 어디에도 담기지 않는가 — 읽지 않으면 샐 수도 없다
+  {
+    reset({ 'auth status': { out: JSON.stringify(LIVE) }, 'mcp list': { out: 'figma: - ✔ Connected' } })
+    const env = await E.checkEnv({ force: true })
+    eq('checkEnv 결과에 orgId가 없다', JSON.stringify(env).includes(LIVE.orgId), 'false')
+    eq('parseAuthStatus 결과에 orgId 키가 없다', 'orgId' in E.parseAuthStatus(JSON.stringify(LIVE)), 'false')
+    eq('main.js가 orgId를 읽는 코드가 없다', /j\.orgId|orgId\s*:|\['orgId'\]/.test(src), 'false')
+    // 계정 정보를 만지는 자리는 parseAuthStatus·checkEnv 둘뿐이어야 한다. 다른 데서
+    // 손대기 시작하면 이벤트 로그(team-events.jsonl)로 흘러 들어가는 건 시간 문제다.
+    const from = src.indexOf('function parseAuthStatus(')
+    const to = src.indexOf('\n}\n', src.indexOf('async function checkEnv('))
+    const stray = []
+    for (const m of src.matchAll(/orgName|authMethod/g)) {
+      if (m.index < from || m.index > to) stray.push(src.slice(src.lastIndexOf('\n', m.index) + 1, src.indexOf('\n', m.index)).trim())
+    }
+    stray.length === 0
+      ? ok('계정 정보는 parseAuthStatus·checkEnv 안에서만 다룬다')
+      : bad('계정 정보 유출 경로', stray.join(' / '))
+  }
+
+  // (7) 처리 중이면 전환을 거절하는가.
+  //     로그아웃 = 돌고 있는 claude의 인증이 사라진다 = 그 지시가 통째로 실패한다.
+  {
+    for (const what of ['claude', 'figma']) {
+      reset()
+      global.__envCompanies.set('/tmp/윤사무실', { dir: '/tmp/윤사무실', child: { pid: 1 } })
+      const res = await E.switchAccount(what)
+      res.ok === false && res.busy === true ? ok(`처리 중 거절: ${what}`) : bad('처리 중 차단', `${what} — ${JSON.stringify(res)}`)
+      eq(`거절 이유에 회사 이름이 실린다 (${what})`, (res.running || []).join(','), '윤사무실')
+      eq(`거절했으면 명령을 하나도 안 돌린다 (${what})`, global.__calls.length, 0)
+    }
+    // 처리 중인 회사가 없으면 막지 않는다(빈 child는 처리 중이 아니다).
+    reset({ 'auth status': { out: JSON.stringify(LIVE) } })
+    global.__envCompanies.set('/tmp/쉬는회사', { dir: '/tmp/쉬는회사', child: null })
+    const res = await E.switchAccount('claude')
+    eq('노는 회사만 있으면 막지 않는다', res.busy, 'undefined')
+  }
+
+  // (8) figma — remove가 실패하면 add하지 않는다(같은 이름이 두 번 등록된다)
+  {
+    reset({ 'mcp remove figma': { err: new Error('exit 1'), errOut: 'No MCP server found with name: figma' } })
+    const res = await E.switchAccount('figma')
+    eq('remove 실패는 실패로 돌려준다', res.ok, 'false')
+    eq('remove 실패면 add를 부르지 않는다', said('mcp add'), 'false')
+    eq('remove 실패면 창도 안 띄운다', said('창:'), 'false')
+    eq('왜 실패했는지 알려 준다', res.error.includes('No MCP server found'), 'true')
+
+    reset({ 'auth status': { out: JSON.stringify(LIVE) }, 'mcp list': { out: 'figma: - ✔ Connected' } })
+    const good = await E.switchAccount('figma')
+    eq('remove가 성공하면 이어서 add한다', said('mcp add --transport http figma https://mcp.figma.com/mcp'), 'true')
+    eq('add는 새 창으로 띄운다', said('창: mcp add'), 'true')
+    eq('remove가 add보다 먼저다', global.__calls[0], 'mcp remove figma')
+    eq('연결되면 성공으로 끝난다', good.ok, 'true')
+  }
+
+  // (9) claude — logout이 실패하면 로그인 창을 띄우지 않는다(반쯤 나간 상태 금지)
+  {
+    reset({ 'auth logout': { err: new Error('exit 1'), errOut: '네트워크에 연결할 수 없습니다' } })
+    const res = await E.switchAccount('claude')
+    eq('logout 실패는 실패로 돌려준다', res.ok, 'false')
+    eq('logout 실패면 로그인 창을 안 띄운다', said('창:'), 'false')
+    eq('logout 실패면 login도 안 부른다', said('auth login'), 'false')
+    eq('왜 실패했는지 알려 준다', res.error.includes('네트워크'), 'true')
+
+    reset({ 'auth status': { out: JSON.stringify(LIVE) }, 'mcp list': { out: '' } })
+    const good = await E.switchAccount('claude')
+    eq('logout이 먼저다', global.__calls[0], 'auth logout')
+    eq('logout 뒤에 로그인 창을 띄운다', said('창: auth login'), 'true')
+    eq('로그인이 확인되면 성공', good.ok, 'true')
+    eq('바뀐 계정을 응답에 실어 준다', good.env.claude.email, LIVE.email)
+  }
+
+  // (10) 터미널을 못 여는 OS에서는 명령을 알려 준다(조용히 성공하지 않는다)
+  {
+    reset()
+    global.__terminalOk = false
+    const res = await E.switchAccount('claude')
+    eq('창을 못 띄우면 실패로 돌려준다', res.ok, 'false')
+    eq('직접 칠 명령을 알려 준다', res.manual, 'claude auth login')
+    eq('창을 못 띄우면 왜인지도 알려 준다', Boolean(res.error), 'true')
+  }
+
+  // (10-b) 끝까지 안 끝나면 timeout으로 돌려준다 — 성공으로 위장하지 않는다
+  {
+    reset({ 'auth logout': {}, 'auth status': { out: JSON.stringify({ ...LIVE, loggedIn: false }) } })
+    const res = await E.switchAccount('claude')
+    eq('안 끝나면 성공이 아니다', res.ok, 'false')
+    eq('안 끝나면 timeout을 세운다', res.timeout, 'true')
+    eq('실패 응답에는 error가 늘 있다', Boolean(res.error), 'true')
+    eq('안 끝났으면 계정 정보를 지어내지 않는다', res.env.claude.email, 'null')
+  }
+
+  // (11) 알 수 없는 대상은 아무것도 하지 않는다
+  {
+    for (const what of [undefined, null, '', 'claude ', 'auth', { what: 'claude' }]) {
+      reset()
+      const res = await E.switchAccount(what)
+      if (res.ok !== false || global.__calls.length) bad('알 수 없는 대상', `${JSON.stringify(what)} — ${JSON.stringify(res)}`)
+    }
+    ok('알 수 없는 대상은 명령을 돌리지 않는다')
+  }
+
+  // (12) 배선 — 화면이 부를 길이 실제로 뚫려 있는가
+  {
+    eq('main이 env:switch를 받는다', /ipcMain\.handle\('env:switch'/.test(src), 'true')
+    eq('첫 연결 경로(env:login)를 없애지 않았다', /ipcMain\.handle\('env:login'/.test(src), 'true')
+    eq('감시는 한 벌만 둔다', (src.match(/setTimeout\(r, WATCH_EVERY_MS\)/g) || []).length, 1)
+    const pre = fs.readFileSync(path.join(ROOT, 'preload.js'), 'utf8')
+    eq('preload가 switchAccount를 노출한다', /switchAccount:\s*\(what\)\s*=>\s*ipcRenderer\.invoke\('env:switch'/.test(pre), 'true')
+    eq('preload의 login도 그대로다', /login:\s*\(what\)\s*=>\s*ipcRenderer\.invoke\('env:login'/.test(pre), 'true')
+  }
+
+  // (13) 실물 — 이 컴퓨터의 claude가 정말 이 모양으로 답하는가.
+  //      **로그아웃은 절대 부르지 않는다.** 사용자 계정이다. 읽기만 한다.
+  {
+    let out = null
+    try {
+      out = execFileSync('claude', ['auth', 'status'], { encoding: 'utf8', shell: true, timeout: 30_000, stdio: ['ignore', 'pipe', 'pipe'] })
+    } catch (e) {
+      out = e && typeof e.stdout === 'string' ? e.stdout : null
+    }
+    if (out === null) {
+      console.log('  · (알림) 이 컴퓨터에 claude가 없다 — 실물 대조를 건너뛴다')
+    } else {
+      const p = E.parseAuthStatus(out)
+      // **값은 찍지 않는다.** 이메일·조직명은 개인정보라 검사 출력에도 남기지 않는다.
+      eq('실물 출력에서 loggedIn을 읽는다', typeof p.loggedIn, 'boolean')
+      if (p.loggedIn) {
+        eq('실물에서 이메일이 읽힌다', Boolean(p.email && p.email.includes('@')), 'true')
+        eq('실물에서 조직명이 읽힌다', typeof p.orgName === 'string' && p.orgName.length > 0, 'true')
+        eq('실물에서 요금제가 읽힌다', typeof p.subscriptionType === 'string' && p.subscriptionType.length > 0, 'true')
+        eq('실물 결과에 orgId가 없다', /orgId/.test(JSON.stringify(p)), 'false')
+        eq('원본에는 orgId가 있었다(읽고도 안 담은 것이다)', /"orgId"/.test(out), 'true')
+      } else {
+        console.log('  · (알림) 로그인돼 있지 않다 — 계정 필드 대조를 건너뛴다')
+      }
+    }
+  }
+}
+
+// ── 16. 로그인·연결 창을 띄우는 명령줄 ──────────────────────────────────────
+//
+// 실제로 터진 자리다. 사용자가 `Figma 연결`을 눌렀더니 창 대신 Windows 오류가 떴다:
+//
+//   '-'을(를) 찾을 수 없습니다. 이름을 올바르게 입력했는지 확인하고 다시 시도하십시오.
+//
+// spawn(shell:false)이 인자를 libuv 규칙으로 **한 번 더** 인용해 준다. 그래서 제목을
+// `"${title}"`로 감싸 두면 `"\"윤사무실 - Figma 연결\""`가 되는데, cmd는 `\"`를
+// 이스케이프로 읽지 않고 따옴표 토글로만 읽는다. 제목이 첫 공백에서 잘리면서 그 뒤의
+// `-`가 start의 "실행할 명령" 자리로 밀렸다.
+//
+// 그래서 여기서는 **완성된 명령줄 문자열 자체**를 본다. 인자 배열만 보면 이 고장이
+// 보이지 않는다 — 어긋나는 곳이 배열을 문자열로 합치는 그 지점이기 때문이다.
+function terminalChecks() {
+  console.log('\n로그인·연결 창 명령줄')
+  const src = fs.readFileSync(path.join(ROOT, 'main.js'), 'utf8').replace(/\r\n/g, '\n')
+  const i = src.indexOf('const CMD_UNSAFE =')
+  if (i < 0) return bad('main.js에서 CMD_UNSAFE를 찾지 못했다')
+
+  const T = loadFrom(
+    'main.js',
+    ['quoteForCmd', 'openInTerminal'],
+    [
+      'const calls = global.__spawnCalls = []',
+      'const spawn = (file, args, opts) => { calls.push({ file, args, opts }); return { on() {}, unref() {} } }',
+      src.slice(i, src.indexOf('\n', i)),
+      '',
+    ].join('\n'),
+  )
+  const spawned = () => global.__spawnCalls
+  const reset = () => (global.__spawnCalls.length = 0)
+  // openInTerminal이 cmd.exe에 실제로 건네는 한 줄. 여기가 어긋나면 창이 안 뜬다.
+  const lineOf = (args, title, exe) => {
+    reset()
+    const rv = T.openInTerminal(args, title, exe)
+    const c = spawned()[0]
+    return { rv, line: c ? c.args[1] : null, opts: c ? c.opts : null, count: spawned().length }
+  }
+
+  const FIGMA = ['mcp', 'add', '--transport', 'http', 'figma', 'https://mcp.figma.com/mcp']
+
+  // (1) 사용자가 실제로 눌렀던 그 버튼 — 인자에 `-`로 시작하는 것과 URL이 섞여 있다
+  {
+    const r = lineOf(FIGMA, '윤사무실 - Figma 연결')
+    eq('Figma 연결 창을 띄운다', r.rv, 'true')
+    eq(
+      'Figma 명령줄이 그대로다',
+      r.line,
+      'start "윤사무실 - Figma 연결" cmd /k claude mcp add --transport http figma https://mcp.figma.com/mcp',
+    )
+    // 이 셋이 이 고장의 본체다.
+    eq('제목을 두 겹으로 감싸지 않는다', /\\"/.test(r.line), 'false')
+    eq('libuv가 다시 인용하지 못하게 한다', r.opts.windowsVerbatimArguments, 'true')
+    eq('창이 남는다(cmd /k)', / cmd \/k /.test(r.line), 'true')
+  }
+
+  // (2) 나머지 호출부 — 한 함수를 넷이 같이 쓴다. 하나만 고쳐 놓고 끝내면 안 된다.
+  {
+    eq(
+      'Claude 로그인',
+      lineOf(['auth', 'login'], '윤사무실 - Claude 로그인').line,
+      'start "윤사무실 - Claude 로그인" cmd /k claude auth login',
+    )
+    eq(
+      'Figma 다시 연결(계정 전환)',
+      lineOf(FIGMA, '윤사무실 - Figma 다시 연결').line,
+      'start "윤사무실 - Figma 다시 연결" cmd /k claude mcp add --transport http figma https://mcp.figma.com/mcp',
+    )
+    eq(
+      'Claude 계정 전환',
+      lineOf(['auth', 'login'], '윤사무실 - Claude 계정 전환').line,
+      'start "윤사무실 - Claude 계정 전환" cmd /k claude auth login',
+    )
+    eq(
+      'Claude Code 설치(exe가 npm)',
+      lineOf(['i', '-g', '@anthropic-ai/claude-code'], '윤사무실 - Claude Code 설치', 'npm').line,
+      'start "윤사무실 - Claude Code 설치" cmd /k npm i -g @anthropic-ai/claude-code',
+    )
+  }
+
+  // (3) 제목은 **항상** 감싼다. start는 인용된 첫 토큰만 제목으로 보고,
+  //     안 감싸면 그것을 실행할 명령으로 삼는다 — 공백 없는 제목에서 그대로 터진다.
+  {
+    const r = lineOf(['auth', 'login'], '설치')
+    eq('공백 없는 제목도 감싼다', r.line, 'start "설치" cmd /k claude auth login')
+  }
+
+  // (4) 명령 주입. 지금은 전부 고정 문자열이지만, 나중에 사용자 입력이 섞여도
+  //     cmd가 `&`·`|`를 만나 명령을 갈라 버리는 일은 없어야 한다.
+  {
+    for (const [label, args, title] of [
+      ['인자에 &', ['auth', 'login & calc'], '윤사무실 - T'],
+      ['인자에 |', ['auth', 'login | calc'], '윤사무실 - T'],
+      ['인자에 따옴표', ['auth', 'lo"gin'], '윤사무실 - T'],
+      ['제목에 &', ['auth', 'login'], '윤사무실 - T & calc'],
+    ]) {
+      const r = lineOf(args, title)
+      eq(`${label} → 띄우지 않는다`, r.rv, 'false')
+      eq(`${label} → spawn을 부르지도 않는다`, r.count, '0')
+    }
+  }
+
+  // (5) 실패를 삼키지 않는다 — false를 돌려줘야 호출부가 `manual` 문구를 띄운다.
+  {
+    const m = src.slice(src.indexOf('async function openAndWatch('), src.indexOf('\n}\n', src.indexOf('async function openAndWatch(')))
+    eq('창을 못 띄우면 호출부가 manual을 준다', /if \(!openInTerminal\([\s\S]*?manual:/.test(m), 'true')
+  }
+}
+
+// ── 정리 ───────────────────────────────────────────────────────────────────
+// 계정 검사는 비동기(명령 실행·감시 흐름)라 끝난 뒤에 정리한다.
+terminalChecks()
+accountChecks()
+  .catch((e) => bad('계정 검사가 던졌다', e && e.message))
+  .then(() => {
+    fs.rmSync(LAB, { recursive: true, force: true })
+    if (failed) {
+      console.error(`\n로직 검사 실패 — ${failed}건`)
+      process.exit(1)
+    }
+    console.log('로직 검사 통과')
+  })
