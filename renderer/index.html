@@ -73,6 +73,11 @@
         >
           ⚠ 되돌리기 없음
         </button>
+        <!-- 마법사를 건너뛴 사람과 나중에 다시 하려는 사람의 자리.
+             한 번 닫으면 다시 못 여는 화면은 만들지 않는다. -->
+        <button id="wz-open" type="button" title="첫 실행 때 뜨는 설치 마법사를 다시 엽니다">
+          설치 마법사 다시 열기
+        </button>
         <!-- 이 프로젝트가 무엇으로 만들어져 있는지. 며칠 만에 다시 열면
              무슨 스택이었는지 기억나지 않는다. 실제 파일에서 읽어 낸다. -->
         <div id="stack" hidden></div>
@@ -193,6 +198,165 @@
         직접 쓴 팀원도 자동으로 나타납니다 — <code>.claude/agents/</code>에 .md를 두면 됩니다.
         바뀐 명단은 다음 지시부터 반영됩니다.
       </p>
+    </div>
+
+    <!-- 첫 실행 설치 마법사 — **비개발자가 setup.exe 하나로 첫 지시까지 가는 길.**
+         필요한 것들이 배너로 흩어져 있으면 첫 화면에서 "Node.js를 설치하세요"를 보고
+         멈춘다. 여기서는 한 창 안에서 순서대로 끝난다.
+
+         뜨는 조건은 **처음 쓰는 사람뿐**이다(firstRunDone이 없고, 붙은 프로젝트가
+         없거나 필수 항목이 빠진 경우). 이미 쓰던 사람은 한 번도 보지 않는다.
+         ☰의 [설치 마법사 다시 열기]로 언제든 다시 들어올 수 있다.
+
+         **여닫기는 `hidden`으로만 한다** — display를 준 요소에는 [hidden]이 안 먹어
+         "감췄는데 계속 보인다"가 이미 세 번 났다(check-ui의 '숨김 실패').
+         그리는 로직은 전부 renderer/wizard.js에 있다. app.js에는 진입점만 둔다. -->
+    <div id="wizard" hidden role="dialog" aria-modal="true" aria-labelledby="wz-title">
+      <div id="wz-box">
+        <header id="wz-head">
+          <h2 id="wz-title">윤사무실을 쓸 준비를 합니다</h2>
+          <span id="wz-sub">3~5분이면 끝납니다</span>
+          <!-- **마법사가 앱을 인질로 잡으면 안 된다.** 언제든 나갈 수 있어야 한다. -->
+          <button id="wz-close" type="button" title="나중에 하기 — ☰에서 다시 열 수 있습니다">×</button>
+        </header>
+
+        <div id="wz-body">
+          <!-- 왼쪽 단계 목록. "지금 어디까지 됐는지"가 항상 보여야 한다.
+               표시(✔ ● ○)와 한 줄 요약은 wizard.js가 채운다. -->
+          <ol id="wz-steps" aria-label="설치 단계"></ol>
+
+          <section id="wz-pane">
+            <!-- 0단계 · 환영 -->
+            <div class="wz-pane" data-pane="welcome" hidden>
+              <h3>윤사무실을 쓸 준비를 합니다 — 3~5분</h3>
+              <p>
+                이 컴퓨터에 필요한 프로그램을 앱이 대신 깔아 드립니다. 무엇을 깔지 먼저 보여 드리고,
+                동의를 누르면 그때 시작합니다.
+              </p>
+              <div class="wz-acts">
+                <button id="wz-start" type="button" class="wz-primary">시작하기</button>
+                <button id="wz-later" type="button">나중에 하기</button>
+              </div>
+            </div>
+
+            <!-- 1단계 · 준비물 확인 -->
+            <div class="wz-pane" data-pane="check" hidden>
+              <h3>이 컴퓨터에 무엇이 있는지 확인합니다</h3>
+              <p class="wz-note" id="wz-check-state">확인하는 중…</p>
+              <!-- 항목은 **앱이 알려 주는 대로** 그린다. 손으로 적어 두지 않는다. -->
+              <div id="wz-check-list" class="wz-list"></div>
+              <div class="wz-acts">
+                <button id="wz-check-next" type="button" class="wz-primary" hidden>다음</button>
+                <button id="wz-check-again" type="button" hidden>다시 확인</button>
+              </div>
+            </div>
+
+            <!-- 2단계 · 설치 동의. **남의 PC에 프로그램을 까는 일이다** —
+                 무엇을·누가 만든 것을·어디에 까는지 그대로 보여 주고 물어본다. -->
+            <div class="wz-pane" data-pane="consent" hidden>
+              <h3>이 프로그램들을 설치합니다</h3>
+              <p>무엇을 어디에 까는지 그대로 보여 드립니다. 동의를 누르면 그때 시작합니다.</p>
+              <div id="wz-consent-list" class="wz-list"></div>
+              <!-- **UAC를 숨기지 않는다.** 겁먹는 이유는 창이 떠서가 아니라 예고 없이 떠서다. -->
+              <p class="wz-warn" id="wz-uac">
+                설치 중 Windows가 “이 앱이 변경하도록 허용하시겠습니까?”를 물을 수 있습니다. [예]를 눌러 주세요.
+              </p>
+              <div class="wz-acts">
+                <button id="wz-install-go" type="button" class="wz-primary">설치 시작</button>
+                <button id="wz-install-skip" type="button">건너뛰기 — 직접 설치할게요</button>
+              </div>
+            </div>
+
+            <!-- 2단계 · 진행. winget은 2~5분 동안 아무 출력이 없다 —
+                 **진행 표시가 없으면 멈춘 것처럼 보인다.** 경과 시간을 계속 센다. -->
+            <div class="wz-pane" data-pane="install" hidden>
+              <h3>설치하는 중입니다</h3>
+              <p class="wz-note">시간이 걸립니다(보통 2~5분). 조용해 보여도 진행 중이니 앱을 끄지 마세요.</p>
+              <div id="wz-install-list" class="wz-list"></div>
+              <div id="wz-install-fail" class="wz-fail" hidden>
+                <p id="wz-fail-msg"></p>
+                <!-- [설치했어요 — 다시 확인]은 오래 걸린다(python 훅을 실제로 돌려 본다).
+                     그동안 아무 말이 없으면 사람은 다시 누르고, 그러면 큐가 밀린다. -->
+                <p id="wz-fail-busy" class="wz-busy" hidden></p>
+                <div class="wz-acts" id="wz-fail-acts"></div>
+              </div>
+              <div class="wz-acts">
+                <button id="wz-install-next" type="button" class="wz-primary" hidden>다음</button>
+              </div>
+            </div>
+
+            <!-- 3단계 · Claude 로그인. 터미널은 없앨 수 없다(브라우저 OAuth라 TTY가 필요하다).
+                 대신 **누르기 전에** 무슨 창이 뜨는지·무엇을 안 해도 되는지 미리 적는다.
+                 사후 도움말은 늦다 — 실제로 "url 뭘 입력하라는거지?"라는 질문을 받았다. -->
+            <div class="wz-pane" data-pane="login" hidden>
+              <h3>Claude에 로그인합니다</h3>
+              <div class="wz-tell"></div>
+              <p class="wz-note" id="wz-login-state" hidden></p>
+              <div class="wz-acts">
+                <button id="wz-login-go" type="button" class="wz-primary">로그인 창 열기</button>
+                <button id="wz-login-again" type="button" hidden>로그인 창이 안 보여요 — 다시 열기</button>
+                <button id="wz-login-check" type="button" hidden>이미 로그인했어요 — 지금 확인</button>
+                <button id="wz-login-next" type="button" class="wz-primary" hidden>다음</button>
+              </div>
+            </div>
+
+            <!-- 4단계 · Figma. 없어도 나머지는 전부 쓸 수 있으므로 건너뛸 수 있다. -->
+            <div class="wz-pane" data-pane="figma" hidden>
+              <h3>Figma를 연결합니다</h3>
+              <p>기획안과 화면설계서는 Figma에 그립니다. 지금 연결하지 않아도 나머지는 전부 쓸 수 있습니다.</p>
+              <div class="wz-tell"></div>
+              <p class="wz-note" id="wz-figma-state" hidden></p>
+              <div class="wz-acts">
+                <button id="wz-figma-go" type="button" class="wz-primary">Figma 연결하기</button>
+                <button id="wz-figma-skip" type="button">건너뛰기 — 나중에 할게요</button>
+                <button id="wz-figma-next" type="button" class="wz-primary" hidden>다음</button>
+              </div>
+            </div>
+
+            <!-- 5단계 · 첫 회사 만들기. 이름 하나면 끝난다.
+                 [이미 있는 폴더를 쓸게요]는 기존 경로 그대로 — 개발자 길을 막지 않는다. -->
+            <div class="wz-pane" data-pane="project" hidden>
+              <h3>어떤 일을 시키실 건가요? 이름만 적어 주세요.</h3>
+              <label class="wz-label" for="wz-name">회사 이름</label>
+              <input id="wz-name" type="text" value="첫 프로젝트" autocomplete="off" spellcheck="false" />
+              <p class="wz-note" id="wz-path"></p>
+              <p class="wz-note" id="wz-project-state" hidden></p>
+              <div id="wz-project-done" class="wz-list" hidden></div>
+              <div class="wz-acts">
+                <button id="wz-create" type="button" class="wz-primary">만들기</button>
+                <button id="wz-existing" type="button">이미 있는 폴더를 쓸게요</button>
+                <button id="wz-project-next" type="button" class="wz-primary" hidden>다음</button>
+              </div>
+            </div>
+
+            <!-- 6단계 · 완료 -->
+            <div class="wz-pane" data-pane="done" hidden>
+              <h3>준비가 끝났습니다</h3>
+              <p>오른쪽 입력창에 시키실 일을 적어 보세요.</p>
+              <p class="wz-eg">예) “이 폴더에 간단한 소개 페이지를 만들어줘”</p>
+              <!-- 건너뛴 것이 있으면 여기 적는다. 다 됐다고 말하지 않는다. -->
+              <div id="wz-done-list" class="wz-list"></div>
+              <div class="wz-acts">
+                <button id="wz-finish" type="button" class="wz-primary">시작하기</button>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <!-- 설치가 도는 중에 닫으려 할 때만 뜬다. **설치는 창을 닫아도 계속 돈다** —
+             그 사실을 말하지 않고 창만 사라지면 사람은 취소된 줄 알고 다시 깔려 하고,
+             같은 패키지에 winget이 두 개 뜬다. 그렇다고 닫기를 막지도 않는다. -->
+        <div id="wz-leave" role="alertdialog" aria-labelledby="wz-leave-msg" hidden>
+          <p id="wz-leave-msg">
+            지금 설치가 진행 중입니다. 창을 닫아도 설치는 뒤에서 계속되고, ☰의 [설치 마법사 다시 열기]로
+            돌아오면 진행 상황이 그대로 보입니다.
+          </p>
+          <div class="wz-acts">
+            <button id="wz-leave-stay" type="button" class="wz-primary">계속 지켜보기</button>
+            <button id="wz-leave-go" type="button">창만 닫기</button>
+          </div>
+        </div>
+      </div>
     </div>
 
     <main>

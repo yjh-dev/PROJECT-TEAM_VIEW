@@ -1207,9 +1207,15 @@ body.resizing * {
   position: relative;
 }
 
+/* 이름표·말풍선이 겹칠 때 서로를 덮지 않도록 app.js가 z-index를 매긴다. 그 규칙은
+   **사무실 안에서만** 통해야 한다 — 갇혀 있지 않으면 그 숫자가 문서 최상위에서
+   경쟁해, 위에 떠야 할 것(설치 마법사·☰·팀원 패널·안내)을 이름표가 뚫고 나온다.
+   실측: 마법사(z 90)를 이름표 열일곱 개가 전부 가렸다.
+   `isolation: isolate`가 여기서 쌓임 맥락을 만들어 안쪽 숫자를 가둔다. */
 #overlay {
   position: absolute;
   inset: 0;
+  isolation: isolate;
   pointer-events: none;
 }
 
@@ -1867,6 +1873,391 @@ canvas {
 
 #team-note code {
   font-size: 11px;
+}
+
+/* ---------- 첫 실행 설치 마법사 ----------
+   처음 쓰는 사람에게만 뜨는 모달. 화면 전체를 덮되 **앱을 인질로 잡지는 않는다**
+   (× 와 [나중에 하기]가 늘 있다).
+
+   **여닫기는 전부 `hidden`으로 한다.** display를 준 요소에는 [hidden]이 안 먹어
+   "감췄는데 계속 보인다"가 세 번 반복됐다 — 그래서 아래에 [hidden]을 되돌리는
+   규칙을 display 규칙보다 **뒤에** 둔다. */
+
+#wizard {
+  position: fixed;
+  inset: 0;
+  z-index: 90; /* ☰(60)·팀원 패널(61)보다 위 — 첫 실행에는 이것만 보여야 한다 */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  /* 뒤 화면을 완전히 가리지는 않는다. 이 앱이 무엇인지 보이는 편이 덜 무섭다. */
+  background: rgba(8, 10, 15, 0.78);
+}
+
+#wz-box {
+  display: flex;
+  flex-direction: column;
+  width: min(940px, 100%);
+  max-height: 100%;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+}
+
+#wz-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+#wz-head h2 {
+  margin: 0;
+  font-size: 17px;
+}
+
+#wz-sub {
+  flex: 1;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+#wz-close {
+  /* ×는 글자가 작아 그냥 두면 17x15가 된다. 손이 닿는 크기로 키운다. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  flex-shrink: 0;
+  font-size: 18px;
+  line-height: 1;
+}
+
+#wz-body {
+  display: flex;
+  min-height: 0;
+}
+
+/* 왼쪽 단계 목록 — 항상 붙어 있다. "지금 어디까지 됐는지"가 보여야 한다.
+   좁은 창(1180px)에서도 여섯 줄이 다 들어가도록 폭을 고정한다. */
+#wz-steps {
+  flex: 0 0 232px;
+  margin: 0;
+  padding: 12px 10px;
+  list-style: none;
+  border-right: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.02);
+  overflow-y: auto;
+}
+
+.wz-step {
+  display: grid;
+  grid-template-columns: 18px 16px minmax(0, 1fr);
+  gap: 2px 6px;
+  align-items: center;
+  padding: 7px 8px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+/* 지금 하고 있는 단계는 배경으로 표시한다. 색만으로 구분하지 않게 ●도 같이 쓴다. */
+.wz-step[aria-current='step'] {
+  background: rgba(122, 162, 247, 0.14);
+}
+
+/* 단계 목록의 보조 글자는 --muted를 쓰지 않는다. 지금 하는 단계는 배경이 밝아져
+   (파란 강조 + 목록 배경) 같은 색이 4.10:1까지 떨어졌다 — AA(4.5)에 못 미친다. */
+.wz-num {
+  grid-column: 1;
+  grid-row: 1;
+  color: #a3adc2;
+  font-size: 12px;
+  text-align: center;
+}
+
+.wz-mk {
+  grid-column: 2;
+  grid-row: 1;
+  text-align: center;
+  color: #a3adc2;
+}
+
+.wz-step.done > .wz-mk {
+  color: #9ece6a;
+}
+
+.wz-step.now > .wz-mk {
+  color: #a9c3ff;
+}
+
+.wz-nm {
+  grid-column: 3;
+  grid-row: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* 한 줄 요약(“Node 완료 · Python 설치 중 · Git 대기”). 항목이 늘면 줄을 넘긴다 —
+   줄여서 감추면 어디까지 됐는지 알 수 없다. */
+.wz-hint {
+  grid-column: 3;
+  grid-row: 2;
+  min-width: 0;
+  color: #a3adc2;
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+#wz-pane {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 18px 20px 20px;
+  overflow-y: auto;
+}
+
+.wz-pane h3 {
+  margin: 0 0 10px;
+  font-size: 16px;
+}
+
+.wz-pane p {
+  margin: 0 0 10px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+/* 보조 설명. 배경이 --panel이라 --muted가 AA(4.5:1)를 넘는다. */
+.wz-note {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+/* **UAC를 숨기지 않는다.** 겁먹는 이유는 창이 떠서가 아니라 예고 없이 떠서다. */
+.wz-warn {
+  padding: 10px 12px;
+  background: rgba(224, 175, 104, 0.12);
+  border-radius: 6px;
+  color: #e0af68;
+  font-size: 13px;
+}
+
+/* 실패는 붉게, 그러나 읽히게. #f7768e는 이 배경에서 대비가 모자란다. */
+.wz-fail {
+  margin: 12px 0;
+  padding: 12px;
+  background: rgba(247, 118, 142, 0.12);
+  border: 1px solid rgba(247, 118, 142, 0.3);
+  border-radius: 6px;
+}
+
+.wz-fail p {
+  margin: 0 0 10px;
+  color: #ff8fa3;
+  font-size: 13px;
+}
+
+/* 확인이 도는 동안 실패 상자에 뜨는 한 줄. 붉은 실패 문구와 섞이면 안 읽히므로
+   --muted가 아니라 본문 색을 쓴다(실패 상자 배경은 본문보다 밝다). */
+.wz-busy {
+  margin: 0 0 10px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+/* 설치 중에 닫으려 할 때 뜨는 물음. 상자 아래에 붙여 지금 화면을 가리지 않는다 —
+   무엇이 깔리는 중인지 보면서 고를 수 있어야 한다. */
+#wz-leave {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--line);
+  background: rgba(224, 175, 104, 0.12);
+}
+
+#wz-leave p {
+  flex: 1 1 320px;
+  min-width: 0;
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+#wz-leave .wz-acts {
+  margin: 0;
+}
+
+/* 항목 한 줄 — 표시 · 이름 · 상태 · 설명. 이름이 길어도 줄을 넘겨 이어 쓴다. */
+.wz-list {
+  margin: 0 0 14px;
+}
+
+.wz-row {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  gap: 2px 8px;
+  align-items: start;
+  padding: 9px 0;
+  border-top: 1px solid var(--line);
+}
+
+.wz-row:first-child {
+  border-top: 0;
+}
+
+.wz-row-mk {
+  grid-column: 1;
+  grid-row: 1;
+  color: var(--muted);
+  text-align: center;
+}
+
+.wz-row.ok > .wz-row-mk {
+  color: #9ece6a;
+}
+
+.wz-row.run > .wz-row-mk {
+  color: #a9c3ff;
+}
+
+.wz-row.bad > .wz-row-mk {
+  color: #ff8fa3;
+}
+
+.wz-row-nm {
+  grid-column: 2;
+  grid-row: 1;
+  min-width: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.wz-row-st {
+  grid-column: 3;
+  grid-row: 1;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.wz-row.ok > .wz-row-st {
+  color: #9ece6a;
+}
+
+.wz-row.bad > .wz-row-st {
+  color: #ff8fa3;
+}
+
+/* 왜 필요한지·무엇을 어디에 까는지. **읽어야 하는 글이다** — 흐리게 두면 안 읽는다. */
+.wz-row-why {
+  grid-column: 2 / span 2;
+  grid-row: 2;
+  margin: 0;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.wz-row-act {
+  grid-column: 3;
+  grid-row: 3;
+  justify-self: end;
+  margin-top: 6px;
+  padding: 5px 12px;
+  font-size: 12px;
+}
+
+/* 사전 고지 — 무슨 창이 뜨는지, 무엇을 안 해도 되는지. 3·4단계가 같은 글을 쓴다. */
+.wz-tell {
+  margin-bottom: 12px;
+  padding: 12px 14px;
+  background: rgba(122, 162, 247, 0.1);
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.wz-tell p {
+  margin: 0 0 8px;
+}
+
+.wz-tell ol {
+  margin: 0 0 8px;
+  padding-left: 20px;
+}
+
+.wz-tell li {
+  margin-bottom: 4px;
+}
+
+.wz-tell p:last-child {
+  margin-bottom: 0;
+}
+
+.wz-label {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+#wz-name {
+  width: min(360px, 100%);
+  padding: 9px 11px;
+  background: #11141c;
+  color: var(--text);
+  border: 1px solid #39435a;
+  border-radius: 6px;
+  font: inherit;
+}
+
+.wz-eg {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.wz-acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+/* 지금 눌러야 할 것 하나. 나머지는 옆에 조용히 둔다. */
+.wz-primary {
+  background: #4a90d9;
+  border-color: #4a90d9;
+  color: #0d1420;
+  font-weight: 600;
+}
+
+.wz-primary:hover {
+  background: #63a3e4;
+}
+
+#wizard button:disabled {
+  /* 지금 못 하는 것은 감추지 않고 죽인다. 너무 흐리면 무슨 버튼이었는지도 못 읽는다. */
+  opacity: 0.62;
+  cursor: default;
+}
+
+/* **[hidden]은 무엇에도 지지 않아야 한다.** 위의 display 규칙들보다 뒤에 둔다. */
+#wizard[hidden],
+#wizard [hidden] {
+  display: none;
 }
 
 /* 화면에는 안 보이지만 읽어 주는 글자 — ☰만 있으면 무슨 버튼인지 알 수 없다. */

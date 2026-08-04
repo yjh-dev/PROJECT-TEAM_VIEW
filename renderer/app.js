@@ -31,6 +31,9 @@ import {
   DOOR_LOUNGE_GX,
   WALL_LOUNGE_Y,
 } from './layout.js'
+// 첫 실행 설치 마법사. **로직은 전부 wizard.js에 있다** — 이 파일은 이미 4천 줄이고,
+// 여기서 하는 일은 여닫는 진입점과 "떠 있는 동안 배너가 자리를 비우는 것"뿐이다.
+import { initWizard, wizardIsOpen, openWizard } from './wizard.js'
 
 const canvas = document.getElementById('stage')
 const ctx = canvas.getContext('2d')
@@ -1775,7 +1778,10 @@ function layoutOverlay(items) {
 
     it.tag.style.left = `${x}px`
     it.tag.style.top = `${bottom}px`
-    it.tag.style.zIndex = String(target === it.a.id ? 9999 : 100 + (order.length - i))
+    // 앞(아래)에 선 사람일수록 위로. 선택한 팀원은 무조건 맨 위.
+    // **작은 수로 충분하다** — `#overlay`가 쌓임 맥락을 만들어(styles.css) 이 숫자는
+    // 사무실 안에서만 겨룬다. 예전의 100~9999는 밖으로 새어 나가 마법사를 뚫었다.
+    it.tag.style.zIndex = String(target === it.a.id ? order.length + 1 : order.length - i)
     if (!it.bubble.hidden) {
       it.bubble.style.left = `${x}px`
       it.bubble.style.top = `${bottom - it.th - GAP}px`
@@ -2819,19 +2825,30 @@ function renderTabs(projects, active, max) {
     ? `동시에 붙일 수 있는 프로젝트는 ${max}개까지입니다`
     : `프로젝트를 하나 더 붙입니다 (최대 ${max}개)`
 
-  // 붙인 것이 하나도 없으면 사무실 대신 안내를 보여 준다. 상단 구석의 작은 배지와
-  // 버튼만으로는 처음 여는 사람이 다음 걸음을 찾지 못했다.
-  welcomeEl.hidden = projects.length > 0
-  // 이름표까지 같이 떠 있으면 안내문 위로 흰 딱지 열한 개가 겹친다. 보낼 곳도 없는
-  // 이름들이라 지금은 알려 줄 것이 없다.
-  stageWrapEl.classList.toggle('empty', projects.length === 0)
+  refreshWelcome()
 }
 
+/**
+ * 붙인 것이 하나도 없으면 사무실 대신 안내를 보여 준다. 상단 구석의 작은 배지와
+ * 버튼만으로는 처음 여는 사람이 다음 걸음을 찾지 못했다.
+ *
+ * **설치 마법사가 떠 있는 동안만 자리를 비운다** — 지우지는 않는다. 마법사를
+ * 건너뛴 사람과 이미 쓰던 사람에게는 이 길이 그대로 남아 있어야 한다.
+ */
+function refreshWelcome() {
+  const none = lastProjects.length === 0
+  welcomeEl.hidden = !none || wizardIsOpen()
+  // 이름표까지 같이 떠 있으면 안내문 위로 흰 딱지 열한 개가 겹친다. 보낼 곳도 없는
+  // 이름들이라 지금은 알려 줄 것이 없다.
+  stageWrapEl.classList.toggle('empty', none)
+}
+
+/** 폴더를 골라 붙인다. **붙였는지 여부를 돌려준다** — 마법사가 그걸 보고 다음으로 넘어간다. */
 async function attachProject() {
   const res = await window.teamView.addProject()
   if (!res?.ok) {
     if (!res?.canceled && res?.error) hintEl.textContent = res.error
-    return
+    return false
   }
   // **붙이는 자리에서 바로 갖추게 한다.** 예전에는 여기서 "빠졌습니다"라고 알리기만
   // 했고, 그러면 사람이 손으로 훅을 깔고 팀원을 넣어야 했다. 빈 폴더를 붙였다가
@@ -2841,6 +2858,7 @@ async function attachProject() {
   // **되돌릴 수단은 붙이는 자리에서 묻는다.** 나중에 상단 버튼으로도 만들 수 있지만,
   // 첫 지시를 보내기 전이 아니면 이미 파일이 바뀐 뒤다.
   if (res.health?.git === false) await makeGit(res.dir, { fromAttach: true })
+  return true
 }
 
 addBtn.addEventListener('click', attachProject)
@@ -3784,9 +3802,11 @@ function renderEnv(env) {
   // claude가 없으면 설치 안내(무엇을 깔아야 하는지)와 이 배너(로그인하라)가 같은 말을
   // 두 번 하게 된다. 상태 점까지 세면 세 번이다. 실측하니 그 상태에서 화면 위쪽
   // 311px가 경고로만 채워졌다. 설치가 먼저이므로 그쪽에 자리를 내준다.
+  // 설치 마법사가 떠 있는 동안에도 겹치지 않는다 — 같은 말을 두 곳에서 하게 된다.
   const needShown = !needEl.hidden
-  envEl.hidden = !block || needShown
-  if (!block || needShown) return
+  const covered = needShown || wizardIsOpen()
+  envEl.hidden = !block || covered
+  if (!block || covered) return
   envMsgEl.textContent = block.hint ? `${block.msg}  (${block.hint})` : block.msg
   envActEl.hidden = !block.action
   if (block.action) {
@@ -3855,15 +3875,24 @@ envAgainEl.addEventListener('click', recheckEnv)
 
 const needEl = document.getElementById('need')
 const needListEl = document.getElementById('need-list')
+// 지금 빠진 것이 있는가. 마법사가 닫힐 때 배너를 원래대로 되돌리려면 화면 밖에
+// 들고 있어야 한다(마법사가 떠 있는 동안에는 hidden이라 요소만으로는 알 수 없다).
+let needMissing = false
+
+/** 배너를 띄울지. **마법사가 떠 있는 동안만 자리를 비운다** — 지우지는 않는다. */
+function refreshNeedBanner() {
+  needEl.hidden = !needMissing || wizardIsOpen()
+}
 
 function renderNeeds(reqs) {
   const missing = reqs.filter((r) => !r.installed)
+  needMissing = missing.length > 0
   // 없는 게 없으면 아예 띄우지 않는다. 잘 돌 때 잔소리를 하지 않는다.
   if (!missing.length) {
-    needEl.hidden = true
+    refreshNeedBanner()
     return
   }
-  needEl.hidden = false
+  refreshNeedBanner()
   needListEl.replaceChildren()
   for (const r of reqs) {
     const row = document.createElement('div')
@@ -3927,6 +3956,31 @@ async function recheckNeeds() {
 on('onEnv', renderEnv)
 window.teamView.checkEnv().then(renderEnv)
 recheckNeeds()
+
+// ---------- 첫 실행 설치 마법사 (진입점) ----------
+//
+// 여는 조건·단계·설치 진행은 전부 wizard.js가 판단한다. 여기서 주는 것은
+// **떠 있는 동안 기존 배너가 자리를 비우는 것**과 기존 폴더 붙이기 경로뿐이다.
+initWizard({
+  onToggle: () => {
+    refreshNeedBanner()
+    refreshWelcome()
+    renderEnv(lastEnv)
+  },
+  onClosed: (finished) => {
+    // 마쳤으면 곧바로 시킬 수 있게 입력창으로 보낸다. 여기까지 온 사람이 다음에
+    // 할 일은 지시를 적는 것 하나뿐이다.
+    recheckNeeds()
+    if (finished) inputEl.focus()
+  },
+  addExistingProject: attachProject,
+})
+
+document.getElementById('wz-open').addEventListener('click', (e) => {
+  e.stopPropagation() // 바깥 클릭으로 ☰가 닫히기 전에 우리가 먼저 닫는다
+  toggleMenu(false)
+  openWizard()
+})
 // 로그인이 풀리거나 Figma 연결이 끊기는 일은 앱 밖에서도 일어난다. 계속 지켜본다.
 setInterval(() => window.teamView.checkEnv().then(renderEnv), ENV_POLL_MS)
 

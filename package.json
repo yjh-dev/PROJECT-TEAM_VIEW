@@ -33,6 +33,7 @@
     },
     "files": [
       "main.js",
+      "install.js",
       "preload.js",
       "renderer/**",
       "hooks/**",

@@ -47,10 +47,51 @@ const CASES = [
   { scenario: 'acctfigma', w: 1180, h: 760 },
   { scenario: 'acctbusy', w: 1820, h: 1120 },
   { scenario: 'acctbusy', w: 1180, h: 760 },
+  // 첫 실행 설치 마법사. 화면이 여섯 단계로 갈리고 **좁은 창에서 왼쪽 단계 목록과
+  // 오른쪽 내용이 같이 들어가야** 하므로 두 크기를 다 본다.
+  //
+  // 여기서 재는 것 중 하나는 **뜨지 않아야 할 때 안 뜨는가**다. 위의 갈래들은 전부
+  // 이미 쓰던 사람(firstRunDone)이라, 프로그램이 없는 `missing`이나 프로젝트가 없는
+  // `empty`에서도 마법사가 뜨면 실패로 잡힌다 — 가장 나쁜 회귀가 그것이다.
+  //
+  // 마법사 갈래는 한 장을 재는 것으로 끝나지 않는다. **누른 뒤 시간이 지나야 드러나는
+  // 것들**을 ui-audit.js의 흐름 검사가 이어서 본다(어떤 결함을 보는지는 그쪽 주석에):
+  //   wizard          동의 화면에 적힌 게시자·패키지 id·주소가 앱이 준 값과 같은가
+  //   wizard-nowinget 자동 설치가 항목별로 갈리는가 · 못 까는 항목에 받으러 갈 길이 있는가
+  //   wizard-fail     실패가 뒤늦은 진행 이벤트에 덮이지 않는가 · [다시 확인]이 잠기는가
+  //   wizard-installing 설치 중 닫기가 묻는가 · 닫았다 열면 진행 화면이 그대로인가
+  { scenario: 'wizard', w: 1820, h: 1120 },
+  { scenario: 'wizard', w: 1180, h: 760 },
+  { scenario: 'wizard-installing', w: 1820, h: 1120 },
+  { scenario: 'wizard-installing', w: 1180, h: 760 },
+  { scenario: 'wizard-fail', w: 1820, h: 1120 },
+  { scenario: 'wizard-fail', w: 1180, h: 760 },
+  { scenario: 'wizard-nowinget', w: 1820, h: 1120 },
+  { scenario: 'wizard-nowinget', w: 1180, h: 760 },
+  { scenario: 'wizard-login', w: 1820, h: 1120 },
+  { scenario: 'wizard-login', w: 1180, h: 760 },
+  { scenario: 'wizard-project', w: 1820, h: 1120 },
+  { scenario: 'wizard-project', w: 1180, h: 760 },
+  // **위에 떠야 할 것을 이름표가 뚫지 않는가.** 위의 마법사 갈래는 전부 붙은 회사가
+  // 0개라 사무실이 비어 있고, 그래서 이름표가 마법사를 통째로 가리는 결함이 한 번도
+  // 안 잡혔다(실측: 이름표·말풍선 17개 전부가 마법사 위에 그려졌다). 이 갈래는
+  // **사무실에 사람이 있는 채로** 마법사를 띄운다. 재는 것은 ui-audit.js의 `가림` —
+  // 한 장의 모양이 아니라 **칠하는 순서**를 본다.
+  { scenario: 'wizard-office', w: 1820, h: 1120 },
+  { scenario: 'wizard-office', w: 1180, h: 760 },
 ]
 
 // 잘려도 되는 것 — 마우스를 올리면 전문이 보이도록 title을 달아 둔 자리.
 const ALLOW_CUT = new Set(['#now'])
+
+// 갈래마다 **어떤 흐름 검사가 돌아야 하는가.** ui-audit.js가 실제로 눌러 본 것을
+// 그대로 돌려주고, 여기서 그것이 빠지지 않았는지 대조한다.
+const WIZ_FLOW = {
+  wizard: '동의 화면 값 대조',
+  'wizard-nowinget': '동의 화면 값 대조',
+  'wizard-fail': '실패 뒤 진행 이벤트 · 다시 확인 잠금',
+  'wizard-installing': '설치 중 닫기·Esc · 닫았다 다시 열기',
+}
 
 function runOne({ scenario, w, h }) {
   return new Promise((resolve) => {
@@ -87,6 +128,13 @@ function runOne({ scenario, w, h }) {
       continue
     }
     const found = []
+    // 흐름 검사가 **실제로 돌았는지**까지 본다. 결과가 없는 것과 검사가 아예 안 돈 것은
+    // 다르다 — 후자는 조용한 통과가 되어, 눌러 보는 검사가 통째로 죽어도 초록으로 지나간다.
+    if (WIZ_FLOW[r.scenario] && r.흐름 !== WIZ_FLOW[r.scenario]) {
+      console.error(`  ✗ ${label} — 흐름 검사가 돌지 않았다 (돈 것: ${r.흐름 || '없음'} / 돌아야 할 것: ${WIZ_FLOW[r.scenario]})`)
+      bad++
+      continue
+    }
     for (const [kind, items] of Object.entries(r)) {
       if (!Array.isArray(items) || !items.length) continue
       if (kind === '시나리오' || kind === '창') continue
@@ -95,6 +143,9 @@ function runOne({ scenario, w, h }) {
         found.push([kind, it])
       }
     }
+    // 이 갈래에서 **확인하지 못한 것**. 막지는 않되 조용히 넘어가지도 않는다 —
+    // 통과 표시만 보고 "다 봤다"고 믿는 것이 제일 위험하다.
+    if (r.알림) console.log(`  · (알림) ${label} — ${r.알림}`)
     if (!found.length) {
       console.log(`  ✓ ${label}`)
       continue

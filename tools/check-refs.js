@@ -101,6 +101,37 @@ for (const f of new Set(floors)) {
   }
 }
 
+// 4) 메인 쪽이 require 하는 파일이 **설치본에도 들어가는가**.
+//    package.json의 build.files는 허용 목록이라, 여기 안 적힌 root 파일은 asar에서
+//    통째로 빠진다. 개발 중에는 멀쩡히 돌고 설치본만 "Cannot find module"로 죽어서
+//    앱을 실제로 깔아 보기 전에는 안 보인다. install.js를 새로 만들었을 때 실제로
+//    빠져 있었다.
+const ROOT = path.join(__dirname, '..')
+const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'))
+const patterns = (pkg.build?.files ?? []).map(
+  (g) => new RegExp('^' + g.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*\*/g, '.*').replace(/(?<!\.)\*/g, '[^/]*') + '$'),
+)
+const packed = (rel) => patterns.some((re) => re.test(rel.replace(/\\/g, '/')))
+
+const seen = new Set()
+const queue = [pkg.main ?? 'main.js', 'preload.js']
+while (queue.length) {
+  const rel = queue.shift()
+  if (seen.has(rel)) continue
+  seen.add(rel)
+  const abs = path.join(ROOT, rel)
+  if (!fs.existsSync(abs)) continue
+  if (!packed(rel)) {
+    problems.push(`package.json: build.files에 '${rel}'가 없다 — 설치본에서 빠진다`)
+  }
+  const src = fs.readFileSync(abs, 'utf8')
+  for (const m of src.matchAll(/require\(\s*'(\.[^']+)'\s*\)/g)) {
+    let dep = path.posix.join(path.posix.dirname(rel.replace(/\\/g, '/')), m[1])
+    if (!dep.endsWith('.js') && !dep.endsWith('.json')) dep += '.js'
+    queue.push(dep)
+  }
+}
+
 if (problems.length) {
   console.error(`끊긴 참조 ${problems.length}건:`)
   for (const p of problems) console.error('  - ' + p)

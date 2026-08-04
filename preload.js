@@ -23,6 +23,19 @@ contextBridge.exposeInMainWorld('teamView', {
   // 이 컴퓨터에 필요한 프로그램이 깔려 있는지 / 설치를 돕기
   checkRequirements: () => ipcRenderer.invoke('env:requirements'),
   install: (key) => ipcRenderer.invoke('env:install', key),
+  // ── 처음 켠 사람을 위한 설치 자동화 ────────────────────────────────────
+  // autoInstall이 돌려주는 `verified`가 **유일한 성공 근거**다. `ok`도 같은 값이지만,
+  // 화면이 "완료"를 그릴 때는 verified를 보게 두는 편이 읽는 사람에게 분명하다.
+  // 설치 프로그램이 0을 돌려줬다는 사실만으로 완료를 그리면 안 된다.
+  canAutoInstall: () => ipcRenderer.invoke('env:can-auto-install'),
+  autoInstall: (key) => ipcRenderer.invoke('env:install-auto', key),
+  onInstallProgress: (cb) => ipcRenderer.on('env:install-progress', (_e, p) => cb(p)),
+  // 사용자가 앱 밖에서 직접 깔았을 때. 껐다 켜라고 하기 전에 이걸 먼저 해 본다.
+  refreshPath: () => ipcRenderer.invoke('env:path-refresh'),
+  relaunch: () => ipcRenderer.invoke('app:relaunch'),
+  // 이름만 받아 폴더·구성·git을 한 번에. 비개발자에게 폴더를 고르라고 묻지 않는다.
+  createProject: (name) => ipcRenderer.invoke('project:create', { name }),
+  wizardDone: () => ipcRenderer.invoke('wizard:done'),
   login: (what) => ipcRenderer.invoke('env:login', what),
   // 계정 전환. 로그인은 "아직 안 붙은" 길, 전환은 "붙어 있는 걸 바꾸는" 길이라 따로 둔다
   // (이미 로그인돼 있으면 `claude auth login`이 그냥 끝나서 계정을 못 바꿨다).

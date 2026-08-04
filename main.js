@@ -18,6 +18,9 @@ const { spawn, execFile, execFileSync } = require('child_process')
 const crypto = require('crypto')
 const fs = require('fs')
 const path = require('path')
+// 설치·검증은 따로 산다. 이 파일이 이미 180KB인 것도 이유지만, 진짜 이유는
+// **검사가 원본 그대로를 돌려 볼 수 있어야** 해서다(install.js는 electron을 안 부른다).
+const installer = require('./install.js')
 
 const POLL_MS = 300
 const CONFIG_NAME = 'config.json'
@@ -278,8 +281,13 @@ function runCmd(cmd, args, timeoutMs = 25_000) {
 
 const runClaude = (args, t) => runCmd('claude', args, t)
 
-/** 명령을 찾을 수 없다는 응답인가. 메시지는 셸·언어마다 달라 넓게 본다. */
-const NOT_FOUND = /not recognized|command not found|ENOENT|없는 명령|찾을 수 없습니다|is not recognized/i
+/**
+ * 명령을 찾을 수 없다는 응답인가. 메시지는 셸·언어마다 달라 넓게 본다.
+ *
+ * install.js의 것을 그대로 쓴다. 두 벌로 두면 한쪽만 고쳐져 **같은 상황을 두 곳이
+ * 다르게 판정한다** — "설치됐다"와 "안 됐다"가 동시에 참이 되는 종류의 고장이다.
+ */
+const NOT_FOUND = installer.NOT_FOUND
 
 /**
  * 윤사무실이 돌려면 이 컴퓨터에 있어야 하는 것들.
@@ -288,63 +296,105 @@ const NOT_FOUND = /not recognized|command not found|ENOENT|없는 명령|찾을 
  * 훅이 기록한다. 다른 PC에 exe만 옮기면 화면은 뜨지만 아무 일도 일어나지 않는데,
  * 무엇이 없어서인지 알 방법이 없다. 그래서 이름을 붙여 하나씩 확인한다.
  *
- * `install`이 있는 것만 앱이 대신 실행해 줄 수 있다(그것도 **동의를 받은 뒤**).
- * 나머지는 설치 프로그램을 받아야 하므로 공식 페이지를 열어 주는 데서 멈춘다 —
- * 남의 컴퓨터에 설치 파일을 내려받아 실행하는 일까지 앱이 하지는 않는다.
+ * `auto`가 있는 것은 앱이 **동의를 받은 뒤** 대신 깔아 줄 수 있다. 그래도 어떤
+ * 이유로든 자동 설치가 안 되면 `url`로 물러선다 — 막다른 길을 만들지 않는다.
+ *
+ * ── Node.js가 여기 없는 이유 (실측으로 뺐다) ──────────────────────────────
+ * 예전에는 Node가 첫 항목이었다. Claude Code를 `npm i -g`로 깔았기 때문이다.
+ * 그런데 공식 Windows 설치 스크립트(`https://claude.ai/install.ps1`)를 실제로 받아
+ * 읽어 보니 **PowerShell만 쓴다** — claude.exe를 내려받아 SHA256을 맞춰 보고
+ * `claude.exe install`로 런처를 앉힌다. npm도 node도 나오지 않는다.
+ * 그래서 비개발자가 넘어야 할 관문이 두 개(Node 설치 → npm 전역 설치) 사라졌다.
+ * 앱 자신도 Node가 필요 없다(Electron이 품고 있다). 프로젝트에서 `npm run`을 쓰는
+ * 사람에게는 여전히 Node가 필요하지만, 그건 **그 프로젝트의 사정**이지
+ * 윤사무실이 돌기 위한 조건이 아니다.
  */
 const REQUIREMENTS = [
-  {
-    key: 'node',
-    label: 'Node.js',
-    probe: ['node', ['--version']],
-    why: 'Claude Code를 설치·실행하는 데 필요합니다',
-    url: 'https://nodejs.org/ko/download',
-  },
   {
     key: 'python',
     label: 'Python',
     probe: ['python', ['--version']],
+    versionRe: /Python\s+(\d+\.\d+\.\d+)/,
+    // 버전이 찍히는 것만으로는 모자라다 — 진짜 훅을 돌려 봐야 한다. install.js의
+    // verifyHookRuns 주석에 왜인지 적어 뒀다(요약: 스토어 스텁은 조용히 통과한다).
+    deepVerify: 'hook',
     why: '팀 활동을 화면에 기록하는 훅이 python으로 돕니다. 없으면 사무실이 조용합니다',
     url: 'https://www.python.org/downloads/',
+    auto: installer.PACKAGES.python,
   },
   {
     key: 'claude',
     label: 'Claude Code',
     probe: ['claude', ['--version']],
+    versionRe: /(\d+\.\d+\.\d+)/,
     why: '팀원이 실제로 일하는 실행기입니다',
-    install: ['npm', ['i', '-g', '@anthropic-ai/claude-code']],
-    needs: 'node',
+    url: 'https://docs.claude.com/en/docs/claude-code/setup',
+    auto: installer.PACKAGES.claude,
   },
   {
     key: 'git',
     label: 'Git',
     probe: ['git', ['--version']],
+    versionRe: /git version\s+(\S+)/,
     why: '회사는 권한을 묻지 않고 파일을 고칩니다. 되돌릴 수단은 git뿐입니다',
     url: 'https://git-scm.com/downloads',
     optional: true,
+    auto: installer.PACKAGES.git,
   },
 ]
 
-/** 설치된 것과 빠진 것을 가른다. */
+/**
+ * 훅 원본의 자리. python 검증이 이 파일을 실제로 한 번 돌려 본다.
+ *
+ * 설치본에서 이 경로는 `...\resources\app.asar\hooks\team_events.py`다 — **asar 안**이라
+ * Electron이 fs를 패치해 준 우리만 읽을 수 있고, 밖에서 spawn된 python은 못 연다(실측).
+ * 그래서 install.js의 verifyHookRuns는 이 경로를 python에 넘기지 않고, 읽어서 사본을
+ * 만들어 돌린다. 여기를 바꿀 때 그쪽 전제를 같이 봐야 한다.
+ */
+function hookSourcePath() {
+  return path.join(__dirname, 'hooks', 'team_events.py')
+}
+
+/**
+ * 설치된 것과 빠진 것을 가른다.
+ *
+ * 판정은 **install.js의 검증 하나만** 쓴다. 예전에는 여기서 따로 판정했는데, 그러면
+ * "설치하기"가 쓰는 기준과 "설치됐는가"가 쓰는 기준이 달라진다 — 설치가 끝난 직후
+ * 화면이 여전히 "없습니다"를 띄우는 종류의 어긋남이 거기서 나온다.
+ *
+ * PATH는 앞에서 **한 번만** 다시 읽는다(레지스트리 조회가 항목 수만큼 돌면 느리다).
+ * 그래서 항목별 검증에는 `refreshPath: false`를 준다 — 안 주면 verifyInstalled가
+ * 자기 몫으로 또 읽어 PowerShell이 항목 수 + 1번 뜬다(실측 4번).
+ */
 async function checkRequirements() {
+  await installer.refreshPath()
   const out = []
   for (const r of REQUIREMENTS) {
-    const res = await runCmd(r.probe[0], r.probe[1], 10_000)
-    const combined = res.out + res.errOut
-    const ok = !NOT_FOUND.test(combined) && !(res.err && !res.out.trim())
+    const res = await installer.verifyInstalled(r, { hookPath: hookSourcePath(), refreshPath: false })
     out.push({
       key: r.key,
       label: r.label,
       why: r.why,
       url: r.url ?? null,
       optional: Boolean(r.optional),
-      canInstall: Boolean(r.install),
-      installed: ok,
-      version: ok ? combined.trim().split(/\r?\n/)[0].slice(0, 40) : null,
+      // 자동 설치가 가능한가. 화면은 이 값으로 "설치하기"와 "받으러 가기"를 가른다.
+      canInstall: Boolean(r.auto),
+      installed: res.verified,
+      version: res.verified ? res.version : null,
+      // 왜 안 됐는지. 버전은 찍히는데 훅이 못 도는 경우가 있어서(스토어 스텁)
+      // "없습니다" 한마디로는 사람이 다음 행동을 정할 수 없다.
+      detail: res.verified ? null : (res.why ?? null),
     })
   }
   return out
 }
+
+// 마법사를 띄울지 말지는 **렌더러가 정한다**(renderer/wizard.js의 `shouldOpen`).
+// 여기에도 같은 판단(`firstRunState`)이 있었는데 아무도 부르지 않는 채로 검사만
+// 통과하고 있었다 — 게이트가 두 벌이면 언젠가 서로 어긋난다. 메인이 할 일은
+// 판단이 아니라 재료를 주는 것뿐이다: 상태 payload의 `firstRunDone`과
+// `checkRequirements()`. 하위 호환("이미 쓰던 사람을 가두지 않는다")의 근거는
+// wizard.js의 `alreadyDone`/`shouldOpen` 위에 적어 두었다.
 
 let envCache = null
 // 로그인 상태는 자주 바뀌지 않는다. 반면 `claude mcp list`는 서버마다 헬스 체크를 해
@@ -556,9 +606,28 @@ function closeTerminal(win) {
   })
 }
 
-// 최대 3분 동안 30초 간격으로 확인한다. 브라우저 로그인은 보통 1분 안에 끝난다.
+// 최대 3분 동안 확인한다. 브라우저 로그인은 보통 1분 안에 끝난다.
+//
+// **처음에는 촘촘하게, 나중에는 느슨하게.** 예전에는 30초 고정이었는데, 그러면
+// 15초 만에 로그인을 마친 사람이 남은 15초를 아무 반응 없는 화면 앞에서 기다린다.
+// 끝났는데 앱만 모르는 그 15초가 "안 되나 보다"로 이어진다.
+// 뒤로 갈수록 늘리는 이유는 반대다 — 3분째까지 안 끝났으면 사람이 자리를 비웠거나
+// 헤매는 중이라 자주 물어봐야 소용이 없다. 확인 한 번에 `claude mcp list`가 서버마다
+// 헬스 체크를 하느라 몇 초씩 쓰므로 공짜가 아니다.
 const WATCH_EVERY_MS = 30_000
-const WATCH_TRIES = 6
+const WATCH_BACKOFF_MS = [3_000, 5_000, 8_000, 13_000, 21_000]
+const WATCH_TOTAL_MS = 180_000
+
+/** 몇 초 뒤에 다시 볼지의 목록. 합이 3분을 넘을 때까지 30초를 채운다. */
+const WATCH_DELAYS_MS = (() => {
+  const out = WATCH_BACKOFF_MS.slice()
+  let total = out.reduce((a, b) => a + b, 0)
+  while (total < WATCH_TOTAL_MS) {
+    out.push(WATCH_EVERY_MS)
+    total += WATCH_EVERY_MS
+  }
+  return out
+})()
 
 /**
  * 무엇이 끝났다고 볼 것인가. **모르는 항목은 성공으로 치지 않는다.**
@@ -589,8 +658,8 @@ async function openAndWatch(what, args, title) {
   if (!win) {
     return { ok: false, manual: `claude ${args.join(' ')}`, error: '이 OS에서는 터미널을 자동으로 열 수 없습니다' }
   }
-  for (let i = 0; i < WATCH_TRIES; i++) {
-    await new Promise((r) => setTimeout(r, WATCH_EVERY_MS))
+  for (const waitMs of WATCH_DELAYS_MS) {
+    await new Promise((r) => setTimeout(r, waitMs))
     const env = await checkEnv({ force: true })
     send('env:status', env)
     if (done(env)) {
@@ -1874,11 +1943,17 @@ function pumpStatusAll({ force = false } = {}) {
     run: runState(dir),
   }))
   // 기억해 둔 채팅 폭을 같이 보낸다. 화면이 처음 뜰 때 지난번 폭으로 맞춘다.
+  const cfg = loadConfig()
   const payload = {
     projects,
     activeDir,
     max: MAX_PROJECTS,
-    chatWidth: loadConfig().chatWidth || null,
+    chatWidth: cfg.chatWidth || null,
+    // 첫 실행 마법사를 띄울지 말지의 **유일한 진실**이다. 이 값이 안 실리면 화면은
+    // 렌더러가 남긴 표시(localStorage)에만 기대게 되는데, 그건 앱을 다시 깔거나
+    // 저장소를 비우면 사라진다 — 이미 잘 쓰던 사람이 마법사에 갇힌다.
+    // 상태에 실어야 화면이 따로 묻지 않고도 매번 같은 답을 본다.
+    firstRunDone: Boolean(cfg.firstRunDone),
     // 보고 있는 프로젝트 것만 보낸다. 셋 다 담으면 300ms마다 오가는 양이 세 배가 된다.
     usage: activeDir ? usageSummary(activeDir) : null,
     // 화면이 캐릭터를 세울 실제 명단. **새 채널을 만들지 않는다** — 상태와 명단이
@@ -2454,29 +2529,27 @@ ipcMain.handle('chat:append', (_e, { dir, msg }) => {
 ipcMain.handle('env:requirements', () => checkRequirements())
 
 /**
- * 빠진 프로그램을 설치하도록 돕는다. **반드시 동의를 먼저 받는다.**
+ * 예전 길: 다이얼로그로 동의를 받고 진행한다.
  *
- * 남의 컴퓨터에 프로그램을 넣는 일이라 앱이 조용히 처리하면 안 된다. 무엇을 왜 넣는지,
- * 어떤 명령이 실행되는지 그대로 보여주고 사람이 누른 뒤에만 진행한다.
- *
- * 그리고 **앱이 직접 설치하지 않는다.**
- *   · npm으로 되는 것(claude) → 명령을 새 터미널에 띄운다. 무엇이 도는지 보인다.
- *   · 설치 프로그램이 필요한 것(Node·Python·Git) → 공식 다운로드 페이지를 연다.
- * 설치 파일을 대신 내려받아 실행하는 데까지 가지 않는 이유는, 그 순간 앱이 무엇을
- * 실행하는지 사람이 확인할 방법이 사라지기 때문이다.
+ * 마법사(새 화면)는 `env:install-auto`를 쓴다. 이건 **이미 이 앱을 쓰던 사람**이
+ * 누르던 버튼이라 살려 둔다 — 업데이트했더니 되던 버튼이 사라지면 안 된다.
+ * 안쪽은 새 기계를 쓰므로 판정 기준이 두 벌로 갈라지지 않는다.
  */
 ipcMain.handle('env:install', async (_e, key) => {
   const req = REQUIREMENTS.find((r) => r.key === key)
   if (!req) return { ok: false, error: '알 수 없는 항목입니다' }
 
-  const cmdText = req.install ? `${req.install[0]} ${req.install[1].join(' ')}` : null
-  const detail = req.install
-    ? `아래 명령을 새 터미널 창에서 실행합니다.\n\n    ${cmdText}\n\n${req.why}`
+  const cmdText = req.auto ? installer.commandText(req.auto) : null
+  const detail = req.auto
+    ? `아래 명령을 앱이 대신 실행합니다.\n\n    ${cmdText}\n\n` +
+      `패키지: ${req.auto.pkg ?? req.auto.source}\n게시자: ${req.auto.publisher}\n설치 범위: ${req.auto.scope}\n` +
+      (req.auto.needsAdmin ? '\n※ 설치 중 관리자 확인 창이 뜰 수 있습니다.\n' : '') +
+      `\n${req.why}`
     : `설치 프로그램이 필요합니다. 공식 다운로드 페이지를 브라우저로 엽니다.\n\n    ${req.url}\n\n${req.why}\n\n내려받아 설치한 뒤 "다시 확인"을 눌러 주세요.`
 
   const { response } = await dialog.showMessageBox(win, {
     type: 'question',
-    buttons: ['취소', req.install ? '설치 실행' : '다운로드 페이지 열기'],
+    buttons: ['취소', req.auto ? '설치 실행' : '다운로드 페이지 열기'],
     defaultId: 1,
     cancelId: 0,
     title: `${req.label} 설치`,
@@ -2485,22 +2558,198 @@ ipcMain.handle('env:install', async (_e, key) => {
   })
   if (response !== 1) return { ok: false, canceled: true }
 
-  if (req.install) {
-    // 선행 조건이 없으면 명령 자체가 실패한다(예: npm 없이 claude 설치).
-    if (req.needs) {
-      const dep = await runCmd(REQUIREMENTS.find((r) => r.key === req.needs).probe[0], ['--version'], 10_000)
-      if (NOT_FOUND.test(dep.out + dep.errOut)) {
-        return { ok: false, error: `${req.needs}가 먼저 필요합니다` }
-      }
-    }
-    if (!openInTerminal(req.install[1], `윤사무실 - ${req.label} 설치`, req.install[0])) {
-      return { ok: false, manual: cmdText }
-    }
-    return { ok: true, started: true, cmd: cmdText }
-  }
+  if (req.auto) return autoInstall(key)
 
   await shell.openExternal(req.url)
   return { ok: true, opened: req.url }
+})
+
+// ---------- 설치 자동화 IPC ----------
+//
+// 계약은 얼어 있다. 화면(마법사)이 이것만 믿고 따로 만들어지므로 모양을 바꾸면
+// 양쪽이 조용히 어긋난다.
+//
+//   env:can-auto-install   → { winget, version }
+//   env:install-auto (key) → { ok, verified, version, error?, needsRestart? }
+//   env:install-progress   ← { key, phase, elapsedMs }   (밀어 주는 쪽)
+//   env:path-refresh       → { ok, changed }
+//   app:relaunch           → (없음)
+//   project:create ({name})→ { ok, dir, done, error? }
+//   wizard:done            → { ok }
+
+/**
+ * 이 PC가 자동 설치를 할 수 있는가.
+ *
+ * **winget이 없는 것은 고장이 아니다.** 회사 PC는 그룹 정책으로 막아 두는 일이 흔하다.
+ * 그런 PC도 정상 경로다 — 화면은 다운로드 안내로 바꿔 그리면 된다. 억지로 뚫지 않는다.
+ *
+ * `packages`를 함께 준다. 남의 컴퓨터에 무언가를 넣기 전에 **id·게시자·범위를 그대로**
+ * 보여 줘야 하고, 그 값을 화면이 지어내면 안 되기 때문이다.
+ */
+ipcMain.handle('env:can-auto-install', async () => {
+  const found = await installer.detectWinget()
+  return {
+    winget: found.winget,
+    version: found.version,
+    packages: REQUIREMENTS.filter((r) => r.auto).map((r) => ({
+      key: r.key,
+      label: r.label,
+      why: r.why,
+      optional: Boolean(r.optional),
+      method: r.auto.method,
+      pkg: r.auto.pkg ?? null,
+      source: r.auto.source ?? null,
+      publisher: r.auto.publisher,
+      scope: r.auto.scope,
+      needsAdmin: Boolean(r.auto.needsAdmin),
+      command: installer.commandText(r.auto),
+      // winget이 필요한 항목인데 winget이 없으면 자동 설치가 안 된다. 화면이
+      // 버튼을 내리고 다운로드 안내로 바꿀 수 있도록 미리 알려 준다.
+      available: r.auto.method !== 'winget' || found.winget,
+      url: r.url ?? null,
+    })),
+  }
+})
+
+/**
+ * 하나를 깔고 **깔렸는지 확인까지** 한다.
+ *
+ * 돌려주는 `ok`는 `verified`와 같다. 설치 프로그램이 0을 주든 말든, 실제로 실행해
+ * 답이 온 것만 성공이다 — 깔리지 않았는데 "완료"라고 말하는 것이 이 앱에서 제일
+ * 나쁜 고장이다(직전에 Figma로 한 번 겪었다).
+ */
+async function autoInstall(key) {
+  const req = REQUIREMENTS.find((r) => r.key === key)
+  if (!req) return { ok: false, verified: false, version: null, error: '알 수 없는 항목입니다' }
+  if (!req.auto) {
+    return { ok: false, verified: false, version: null, error: '자동 설치를 지원하지 않는 항목입니다' }
+  }
+  const res = await installer.installOne(req, {
+    hookPath: hookSourcePath(),
+    onProgress: (p) => send('env:install-progress', p),
+  })
+  // 방금 무언가 생겼을 수 있다. 상태 점이 옛 값을 붙들고 있지 않게 한다.
+  if (res.verified) envCache = null
+  return res
+}
+
+ipcMain.handle('env:install-auto', (_e, key) => autoInstall(key))
+
+/**
+ * PATH를 레지스트리에서 다시 읽는다.
+ *
+ * 사용자가 앱 밖에서 직접 설치를 마쳤을 때 쓴다. 앱을 껐다 켜라고 하지 않으려면
+ * 이 길이 있어야 한다 — 깔고도 "없습니다"가 뜨는 것이 사람들이 가장 잘 포기하는 자리다.
+ */
+ipcMain.handle('env:path-refresh', async () => {
+  const res = await installer.refreshPath()
+  return { ok: res.ok, changed: Boolean(res.changed), error: res.error ?? undefined }
+})
+
+/**
+ * 껐다 켜야만 보이는 경우가 남아 있다. 사람이 직접 찾아 끄게 하지 않는다.
+ *
+ * **`app.exit(0)`이 아니라 `app.quit()`이다.** exit는 `before-quit`/`will-quit`을
+ * 건너뛴다 — 그 자리에서 돌고 있는 claude 세션을 닫고(클레임을 남기면 그 프로젝트가
+ * 10분 동안 "다른 회사가 맡고 있음"이 된다) 띄워 둔 개발 서버를 내리는데, 그걸
+ * 통째로 건너뛰면 다시 켠 앱이 남의 포트와 남의 클레임을 마주한다.
+ */
+ipcMain.handle('app:relaunch', () => {
+  app.relaunch()
+  app.quit()
+})
+
+/**
+ * 프로젝트를 **만들어서** 붙인다. 폴더 생성 + 구성 + git까지 한 번에.
+ *
+ * 비개발자에게 "프로젝트 폴더를 고르세요"라고 물으면 거기서 멈춘다 — 무엇을 골라야
+ * 하는지가 이미 개발자의 질문이다. 그래서 이름만 받고 자리는 앱이 정한다
+ * (`문서\윤사무실\<이름>`). 나중에 옮기고 싶으면 폴더를 옮기면 그만이다.
+ *
+ * git은 **있을 때만** 한다. 없다고 프로젝트 만들기가 실패하면 안 된다 — git은
+ * 있으면 좋은 것이지 없으면 못 쓰는 것이 아니다(REQUIREMENTS에서도 optional이다).
+ */
+ipcMain.handle('project:create', async (_e, { name } = {}) => {
+  const clean = String(name ?? '').trim()
+  if (!clean) return { ok: false, error: '이름을 입력해 주세요' }
+  // 폴더 이름으로 못 쓰는 글자와 경로 이동(`..`, `\`, `/`)을 막는다. 이름은 사람이
+  // 자유롭게 치는 값이라 그대로 경로에 붙이면 엉뚱한 곳에 폴더가 생긴다.
+  if (/[<>:"/\\|?*\x00-\x1f]/.test(clean)) return { ok: false, error: '이름에 쓸 수 없는 글자가 있습니다' }
+  if (clean === '.' || clean === '..' || clean.length > 60) return { ok: false, error: '이름이 올바르지 않습니다' }
+
+  if (loadProjects().length >= MAX_PROJECTS) {
+    return { ok: false, error: `프로젝트는 ${MAX_PROJECTS}개까지 붙일 수 있습니다` }
+  }
+
+  const base = path.join(app.getPath('documents'), '윤사무실')
+  const dir = path.join(base, clean)
+  const done = []
+  // **우리가 만든 것인지**를 기억해 둔다. 구성이 실패했을 때 되돌려도 되는지가
+  // 여기서 갈린다 — 사람이 미리 만들어 둔 빈 폴더를 우리가 지우면 안 된다.
+  let created = false
+  try {
+    const existed = fs.existsSync(dir)
+    if (existed && fs.readdirSync(dir).length > 0) {
+      // 남의 폴더를 말없이 쓰지 않는다. 이미 뭔가 들어 있으면 사람이 정해야 한다.
+      return { ok: false, dir, error: '같은 이름의 폴더가 이미 있습니다' }
+    }
+    fs.mkdirSync(dir, { recursive: true })
+    created = !existed
+    done.push('폴더 생성')
+  } catch (e) {
+    return { ok: false, error: '폴더를 만들지 못했습니다: ' + e.message }
+  }
+
+  const setup = setupProject(dir, { hooks: true, agents: true, guide: true })
+  if (!setup.ok) {
+    // 빈 폴더를 남기면 재시도가 "같은 이름의 폴더가 이미 있습니다"에 막힌다 —
+    // 그 이름을 영영 못 쓰게 되고, 사용자는 왜 막히는지 알 수 없다.
+    // 방금 우리가 만든 것일 때만 되돌린다. 못 지웠으면 어디를 치우면 되는지 말해 준다.
+    let rolledBack = false
+    if (created) {
+      try {
+        fs.rmSync(dir, { recursive: true, force: true })
+        rolledBack = true
+      } catch (e) {
+        console.error('만들던 프로젝트 폴더를 되돌리지 못했습니다:', e.message)
+      }
+    }
+    const why = setup.error ?? '구성에 실패했습니다'
+    return {
+      ok: false,
+      dir,
+      done,
+      rolledBack,
+      error: rolledBack
+        ? `${why} — 만들던 폴더는 지웠습니다. 같은 이름으로 다시 시도할 수 있습니다.`
+        : `${why} — 폴더가 남아 있습니다: ${dir} (지운 뒤 다시 시도하거나 다른 이름을 써 주세요)`,
+    }
+  }
+  done.push(...(setup.done ?? []))
+
+  // git이 실제로 도는지 확인한 뒤에만 부른다. 없으면 조용히 건너뛴다(실패가 아니다).
+  const gitReq = REQUIREMENTS.find((r) => r.key === 'git')
+  const hasGit = await installer.probeVersion(gitReq)
+  if (hasGit.ok) {
+    const res = gitInit(dir)
+    if (res.ok) done.push(...(res.done ?? ['되돌릴 지점 생성']))
+    // git init이 실패해도 프로젝트는 살아 있다. 이유만 남기고 넘어간다.
+    else console.error('git 준비 실패:', res.error)
+  }
+
+  const next = loadProjects().concat([dir]).slice(0, MAX_PROJECTS)
+  saveProjects(next)
+  activate(dir)
+  openCompany(dir)
+  if (!watches.has(dir)) startWatching(dir, { replay: true })
+  pumpStatusAll({ force: true })
+  return { ok: true, dir, done }
+})
+
+/** 마법사를 끝냈다는 표시. 다음부터는 뜨지 않는다. */
+ipcMain.handle('wizard:done', () => {
+  saveConfig({ ...loadConfig(), firstRunDone: true })
+  return { ok: true }
 })
 
 /**

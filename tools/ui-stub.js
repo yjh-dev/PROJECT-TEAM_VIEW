@@ -21,10 +21,30 @@
 //   acctfigma 로그인은 됐는데 Figma 인증만 풀린 상태(등록은 돼 있어 [다시 연결]이다)
 //   acctbusy 지시가 도는 중 — 계정 바꾸기가 **비활성으로 죽고** 이유가 보이는지
 //            (`acct`로 시작하는 갈래는 tools/ui-audit.js가 ☰를 열어 준다)
+//
+//   첫 실행 설치 마법사. `wizard`로 시작하는 갈래는 ui-audit.js가 단계까지 눌러 준다.
+//   **다른 갈래에서는 마법사가 뜨면 안 된다** — 그것을 지키는 것이 `firstRunDone`이다.
+//   wizard           아무것도 없는 새 PC (0단계 환영)
+//   wizard-installing 설치가 도는 중 — 항목별 단계와 경과 시간이 보이는지
+//   wizard-fail      winget은 성공이라는데 실행이 안 되는 경우
+//                    (**ok:true / verified:false는 실패다** — 가짜 완료를 막는 갈래)
+//   wizard-nowinget  자동 설치를 쓸 수 없는 컴퓨터 — 직접 받는 길이 있는지
+//   wizard-login     터미널 창을 띄우고 브라우저를 기다리는 중
+//   wizard-project   첫 회사 만들기 (설치·로그인은 이미 끝난 상태)
+//   wizard-office    **마법사가 떠 있는데 사무실에 사람이 있는 상태.** 위의 여섯 갈래는
+//                    전부 붙은 회사가 0개라 사무실이 비어 있고(`#stage-wrap.empty`가
+//                    이름표를 통째로 내린다), 그래서 **이름표가 마법사를 뚫는 결함이
+//                    한 번도 안 잡혔다.** 실제로는 두 가지 길로 이 상태가 된다 —
+//                    마법사 안에서 첫 회사를 만든 직후, 그리고 이미 쓰던 사람이
+//                    ☰에서 마법사를 다시 열 때. 여기서는 회사는 붙었는데 준비물이
+//                    빠진 PC로 그 상태를 만든다(그 조건이면 마법사가 저절로 뜬다).
 const { contextBridge } = require('electron')
 
 const S = process.env.SCENARIO || 'normal'
 const now = Date.now() / 1000
+// 마법사 갈래인가. 나머지 갈래는 **이미 쓰던 사람**이라 마법사를 보면 안 된다.
+const WIZ = S.startsWith('wizard')
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 // 옛 메인이 주던 모양 그대로. 이메일은 있고 조직·구독 필드는 이름이 다르다(plan) —
 // **이 갈래가 하위 호환을 지키는 검사다.** 새 필드가 없어도 화면이 깨지면 안 된다.
@@ -73,6 +93,14 @@ const ENV = {
   },
   missing: { claude: { installed: false, loggedIn: false }, figma: { connected: false, present: false } },
 }
+// 마법사 갈래. 설치가 끝나기 전에는 claude 자체가 없고, 로그인 단계에서는 깔려는
+// 있지만 로그인이 안 돼 있고, 회사 만들기 단계에서는 전부 갖춰져 있다.
+ENV.wizard = { claude: { installed: false, loggedIn: false }, figma: { connected: false, present: false } }
+ENV['wizard-installing'] = ENV['wizard-fail'] = ENV['wizard-nowinget'] = ENV.wizard
+ENV['wizard-login'] = { claude: { installed: true, loggedIn: false }, figma: { connected: false, present: false } }
+ENV['wizard-project'] = { claude: acctClaude, figma: { connected: true, present: true } }
+// 회사는 붙었는데 준비물이 빠진 PC — 마법사가 뜬 채로 사무실에 사람이 앉아 있다.
+ENV['wizard-office'] = ENV.wizard
 /** ☰의 연결을 보는 갈래들. 표·명단·프로젝트는 같게 두고 **계정만** 달리한다. */
 const ACCT = ['acct', 'acctlong', 'acctout', 'acctfigma', 'acctbusy']
 
@@ -107,26 +135,129 @@ const USAGE = {
 USAGE.acct = realUsage
 USAGE.acctlong = USAGE.acctout = USAGE.acctfigma = USAGE.acctbusy = null
 
-const req = (key, label, why, installed, version, url) => ({
-  key, label, why, installed, version, canInstall: key === 'claude', optional: key === 'git', url,
+// 준비물 목록. **필드도 값도 main.js의 checkRequirements가 주는 그대로다** —
+// 여기서 지어내면 화면 검사는 통과하고 실물만 어긋난다(check-logic의 "IPC 응답 계약"이
+// 이 목록을 main.js의 REQUIREMENTS와 한 줄씩 맞대 본다).
+//
+// **Node가 없는 것을 눈여겨볼 것.** 예전에는 첫 항목이었지만, 공식 설치 스크립트가
+// PowerShell만 쓴다는 것이 실측으로 확인되며 REQUIREMENTS에서 빠졌다. 스텁에 남겨 두면
+// 앱이 절대 주지 않는 줄을 화면 검사가 계속 그려 보게 된다.
+const req = (key, label, why, installed, version, url, detail = null) => ({
+  key, label, why, url,
+  // 셋 다 앱이 대신 깔 수 있다(REQUIREMENTS의 세 항목 모두 auto가 있다).
+  canInstall: true,
+  optional: key === 'git',
+  installed,
+  version: installed ? version : null,
+  // 왜 안 됐는지. 버전은 찍히는데 훅이 못 도는 경우가 있어서(스토어 스텁)
+  // "없습니다" 한마디로는 사람이 다음 행동을 정할 수 없다.
+  detail: installed ? null : detail,
 })
+const PY_WHY = '팀 활동을 화면에 기록하는 훅이 python으로 돕니다. 없으면 사무실이 조용합니다'
+const CLAUDE_WHY = '팀원이 실제로 일하는 실행기입니다'
+const GIT_WHY = '회사는 권한을 묻지 않고 파일을 고칩니다. 되돌릴 수단은 git뿐입니다'
+const PY_URL = 'https://www.python.org/downloads/'
+const CLAUDE_URL = 'https://docs.claude.com/en/docs/claude-code/setup'
+const GIT_URL = 'https://git-scm.com/downloads'
 const REQS = {
   normal: [
-    req('node', 'Node.js', 'Claude Code를 설치·실행하는 데 필요합니다', true, 'v22.14.0', null),
-    req('python', 'Python', '팀 활동을 화면에 기록하는 훅이 python으로 돕니다', true, 'Python 3.13.14', null),
-    req('claude', 'Claude Code', '팀원이 실제로 일하는 실행기입니다', true, '2.1.220', null),
-    req('git', 'Git', '회사는 권한을 묻지 않고 파일을 고칩니다. 되돌릴 수단은 git뿐입니다', true, 'git 2.49.0', null),
+    req('python', 'Python', PY_WHY, true, 'Python 3.13.14', PY_URL),
+    req('claude', 'Claude Code', CLAUDE_WHY, true, '2.1.220', CLAUDE_URL),
+    req('git', 'Git', GIT_WHY, true, 'git 2.49.0', GIT_URL),
   ],
   missing: [
-    req('node', 'Node.js', 'Claude Code를 설치·실행하는 데 필요합니다', false, null, 'https://nodejs.org'),
-    req('python', 'Python', '팀 활동을 화면에 기록하는 훅이 python으로 돕니다. 없으면 사무실이 조용합니다', false, null, 'https://python.org'),
-    req('claude', 'Claude Code', '팀원이 실제로 일하는 실행기입니다', false, null, null),
-    req('git', 'Git', '회사는 권한을 묻지 않고 파일을 고칩니다. 되돌릴 수단은 git뿐입니다', false, null, 'https://git-scm.com'),
+    // detail은 **실제로 나오는 문구**를 쓴다. 짧게 지어낸 것으로는 자리가 모자라는지 알 수 없다.
+    req('python', 'Python', PY_WHY, false, null, PY_URL, '훅이 아무것도 기록하지 못했습니다'),
+    req('claude', 'Claude Code', CLAUDE_WHY, false, null, CLAUDE_URL, '명령을 찾지 못했습니다'),
+    req('git', 'Git', GIT_WHY, false, null, GIT_URL, '명령을 찾지 못했습니다'),
   ],
 }
 REQS.empty = REQS.nologin = REQS.stress = REQS.rundead = REQS.normal
 REQS.team = REQS.teamfull = REQS.normal
 for (const s of ACCT) REQS[s] = REQS.normal
+
+// 마법사가 보는 준비물. **화면은 이 목록을 그대로 그린다.**
+//
+// 패키지 id·게시자·설치 범위는 **여기 없다.** 그 값들의 유일한 출처는
+// `canAutoInstall().packages`다(아래 WIZ_PACKAGES). 예전에는 이 목록에도 실어 뒀는데,
+// 그러다 게시자가 실제와 갈렸다(git을 'Git for Windows'로 적어 뒀는데 앱이 주는 값은
+// 'The Git Development Community'다). 출처가 둘이면 반드시 갈린다.
+REQS.wizard = [
+  req('python', 'Python', PY_WHY, false, null, PY_URL, '명령을 찾지 못했습니다'),
+  req('claude', 'Claude Code', CLAUDE_WHY, false, null, CLAUDE_URL, '명령을 찾지 못했습니다'),
+  req('git', 'Git', GIT_WHY, false, null, GIT_URL, '명령을 찾지 못했습니다'),
+]
+REQS['wizard-installing'] = REQS['wizard-fail'] = REQS['wizard-nowinget'] = REQS.wizard
+REQS['wizard-office'] = REQS.wizard
+// 설치는 끝난 갈래 — 여기서 볼 것은 로그인과 회사 만들기다.
+REQS['wizard-login'] = REQS['wizard-project'] = REQS.wizard.map((r) => ({
+  ...r,
+  installed: true,
+  detail: null,
+  version: { claude: '2.1.220', python: 'Python 3.13.14', git: 'git 2.49.0' }[r.key] ?? '설치됨',
+}))
+
+/**
+ * 자동 설치 목록 — `env:can-auto-install`이 돌려주는 `packages` 그대로다.
+ *
+ * **값을 지어내면 안 된다.** 남의 컴퓨터에 무언가를 넣기 전에 화면이 보여 줄
+ * id·게시자·설치 범위·받아 올 주소가 여기서 나온다. 화면은 이제 하드코딩 사전 없이
+ * 이 값만 그린다 — 그래서 check-logic의 "IPC 응답 계약"이 main.js가 실제로 만들어 내는
+ * packages와 이 배열을 통째로 맞대 본다(하나라도 다르면 검사가 실패한다).
+ *
+ * `available`은 갈래에 따라 canAutoInstall이 다시 채운다(winget이 없는 PC 갈래).
+ */
+const WIZ_PACKAGES = [
+  {
+    key: 'python',
+    label: 'Python',
+    why: PY_WHY,
+    optional: false,
+    method: 'winget',
+    pkg: 'Python.Python.3.13',
+    source: null,
+    publisher: 'Python Software Foundation',
+    scope: 'user',
+    // burn 번들이라 사용자 범위로 걸어도 관리자 확인 창이 뜰 수 있다.
+    needsAdmin: true,
+    command:
+      'winget install --id Python.Python.3.13 --exact --source winget --scope user --silent --accept-source-agreements --accept-package-agreements --disable-interactivity',
+    available: true,
+    url: PY_URL,
+  },
+  {
+    key: 'claude',
+    label: 'Claude Code',
+    why: CLAUDE_WHY,
+    optional: false,
+    // 공식 설치 스크립트라 winget이 없어도 깔 수 있다 — available이 winget에 안 묶인다.
+    method: 'script',
+    pkg: null,
+    source: 'https://claude.ai/install.ps1',
+    publisher: 'Anthropic PBC',
+    scope: 'user',
+    needsAdmin: false,
+    command: 'powershell -NoProfile -Command "& ([scriptblock]::Create((irm https://claude.ai/install.ps1))) stable"',
+    available: true,
+    url: CLAUDE_URL,
+  },
+  {
+    key: 'git',
+    label: 'Git',
+    why: GIT_WHY,
+    optional: true,
+    method: 'winget',
+    pkg: 'Git.MinGit',
+    source: null,
+    publisher: 'The Git Development Community',
+    scope: 'user',
+    needsAdmin: false,
+    command:
+      'winget install --id Git.MinGit --exact --source winget --scope user --silent --accept-source-agreements --accept-package-agreements --disable-interactivity',
+    available: true,
+    url: GIT_URL,
+  },
+]
 
 const health = (o = {}) => ({ hooks: true, agents: 9, guide: true, git: true, hookStale: false, stale: 0, ...o })
 const LONG = 'C:\\dev\\2026\\아주-긴-프로젝트-이름을-가진-폴더-이름이-이렇게까지-길-수도-있다'
@@ -172,6 +303,20 @@ const PROJECTS = {
   empty: [],
   missing: [],
 }
+// 마법사는 붙은 프로젝트가 없을 때 뜬다 — 여섯 갈래 모두 빈 상태에서 본다.
+const WIZ_CASES = ['wizard', 'wizard-installing', 'wizard-fail', 'wizard-nowinget', 'wizard-login', 'wizard-project']
+for (const s of WIZ_CASES) {
+  PROJECTS[s] = []
+  USAGE[s] = null
+}
+// **여기만 다르다** — 마법사가 떠 있는데 사무실이 비어 있지 않다. 붙은 회사가 있으면
+// `#stage-wrap.empty`가 풀려 이름표·말풍선이 다시 그려지고, 그때 이름표가 마법사를
+// 뚫는지 볼 수 있다. 다른 마법사 갈래는 회사가 0개라 그 자리를 영영 못 본다.
+PROJECTS['wizard-office'] = [
+  { dir: 'C:\\dev\\2026\\shop', exists: true, company: 'busy', queued: 2,
+    health: health({ git: false }), run: { script: null, running: false, url: null } },
+]
+USAGE['wizard-office'] = null
 
 // ☰의 연결을 보는 갈래. 프로젝트는 하나로 두고 **처리 중인지만** 달리한다.
 const ACCT_PROJECT = {
@@ -318,9 +463,16 @@ const EVENTS = {
 }
 // 연결 갈래에서 보는 것은 ☰ 안이다. 대화는 한 줄이면 충분하다.
 for (const s of ACCT) EVENTS[s] = [{ ts: now - 60, type: 'command', agent: 'lead', detail: '상품 목록 페이지 만들어줘' }]
+// 마법사 갈래는 아직 아무 일도 없던 컴퓨터다.
+for (const s of WIZ_CASES) EVENTS[s] = []
+// 다만 `wizard-office`는 사무실이 돌아가는 중이어야 한다 — 이름표뿐 아니라
+// **말풍선까지** 떠야 마법사를 뚫는지 제대로 볼 수 있다.
+EVENTS['wizard-office'] = EVENTS.normal
 
 const noop = () => {}
-contextBridge.exposeInMainWorld('teamView', {
+let installCb = null // 설치 진행 소식을 받는 쪽(마법사)
+const wizInstalled = new Set() // 이 실행에서 실제로 깔린 것(확인까지 끝난 것만)
+const api = {
   addProject: async () => ({ ok: false, canceled: true }),
   removeProject: async () => ({ ok: true }),
   activateProject: async () => ({ ok: true }),
@@ -344,7 +496,10 @@ contextBridge.exposeInMainWorld('teamView', {
   runStop: async () => ({ ok: true }),
   runLog: async () => ({ ok: true, lines: [] }),
   checkEnv: async () => ENV[S],
-  checkRequirements: async () => REQS[S],
+  // 설치가 끝나면 **다음에 물어볼 때 답이 달라져야 한다.** 늘 같은 답을 주면
+  // 화면이 "깔았다는데 아직 없다"를 계속 그리게 되어 성공 경로를 볼 수 없다.
+  checkRequirements: async () =>
+    REQS[S].map((r) => (wizInstalled.has(r.key) ? { ...r, installed: true, version: '설치됨', detail: null } : r)),
   // 팀원 관리. 검사에서는 **읽기만** 한다 — 쓰기 통로는 눌렀을 때 화면이 어떻게
   // 되는지 보려고 붙여 두지만, 실제로 파일을 만들지는 않는다.
   listTeam: async () => TEAM[S] ?? { ok: false, error: '이 갈래에는 명단이 없습니다' },
@@ -352,7 +507,12 @@ contextBridge.exposeInMainWorld('teamView', {
   createAgent: async (_dir, spec) => ({ ok: false, code: 'VALIDATION', error: `${spec?.id}은(는) 이미 팀에 있습니다` }),
   fireAgent: async (_dir, id) => ({ ok: true, id, movedTo: `C:\\dev\\2026\\shop\\.claude\\team-fired\\${id}.md`, requeued: 1 }),
   install: async () => ({ ok: false, canceled: true }),
-  login: async () => ({ ok: false, timeout: true, env: ENV[S] }),
+  // 로그인은 브라우저에서 사람이 마쳐야 끝난다. **끝나지 않는 갈래**가 있어야
+  // "기다리는 중…"이 화면에서 어떻게 보이는지 잴 수 있다.
+  login: async () => {
+    if (S === 'wizard-login') await sleep(30_000)
+    return { ok: false, timeout: true, env: ENV[S] }
+  },
   // 계정 전환. **갈래마다 다른 답을 준다** — 확인 창·비활성·오류 문구가 각각
   // 화면에서 어떻게 보이는지 눌러서 확인하려면 응답이 갈라져야 한다.
   switchAccount: async (what) => {
@@ -383,11 +543,62 @@ contextBridge.exposeInMainWorld('teamView', {
       },
     }
   },
+  // ── 첫 실행 설치 마법사 ──────────────────────────────────────────────
+  // 백엔드가 만드는 통로. 화면 검사에서는 **각 갈래가 보려는 상태**만 만들어 준다.
+  canAutoInstall: async () => {
+    const winget = S !== 'wizard-nowinget'
+    return {
+      winget,
+      version: winget ? '1.11.400' : null,
+      // winget이 필요한 항목만 winget에 묶인다. claude는 공식 스크립트라 winget이
+      // 막힌 회사 PC에서도 앱이 깔아 줄 수 있다 — 화면이 그 둘을 가르는지 보는 값이다.
+      packages: WIZ_PACKAGES.map((p) => ({ ...p, available: p.method !== 'winget' || winget })),
+    }
+  },
+  autoInstall: async (key) => {
+    const at = Date.now()
+    const emit = (phase) => installCb?.({ key, phase, elapsedMs: Date.now() - at })
+    emit('download')
+    await sleep(120)
+    emit('install')
+    // 설치가 도는 화면을 보려면 **끝나지 않아야 한다.** winget은 실제로 2~5분 동안
+    // 아무 말이 없다 — 그 시간을 화면이 어떻게 버티는지가 이 갈래에서 볼 것이다.
+    if (S === 'wizard-installing') {
+      await sleep(30_000)
+      return { ok: false, verified: false, error: '시간이 너무 오래 걸립니다' }
+    }
+    // **ok는 true인데 verified는 false.** winget이 0으로 끝났지만 실제로는 실행되지
+    // 않는 경우다. 화면이 이걸 완료로 그리면 가짜 완료가 된다.
+    if (S === 'wizard-fail') {
+      return { ok: true, verified: false, version: null, error: 'winget은 0으로 끝났지만 실제로 실행되지 않았습니다' }
+    }
+    await sleep(80)
+    emit('verify')
+    // **확인까지 끝난 것만** 깔린 것으로 친다(verified가 곧 근거다).
+    wizInstalled.add(key)
+    return { ok: true, verified: true, version: '설치됨' }
+  },
+  onInstallProgress: (cb) => {
+    installCb = cb
+  },
+  refreshPath: async () => ({ ok: true, changed: false }),
+  relaunch: () => {},
+  createProject: async (name) => ({
+    ok: true,
+    dir: `C:\\Users\\사용자\\Documents\\윤사무실\\${name}`,
+    done: ['직원 9명이 출근했습니다', '활동 기록기를 달았습니다', '되돌릴 지점을 만들었습니다'],
+  }),
+  wizardDone: async () => ({ ok: true }),
   onEnv: noop,
   onRunFailed: noop,
   onCommandFailed: noop,
   onReset: noop,
   onEvents: (cb) => setTimeout(() => cb({ dir: PROJECTS[S][0]?.dir ?? null, events: EVENTS[S] }), 300),
+  // ⚠ 여기 실리는 **필드 집합은 지어낼 수 없다.** `tools/check-logic.js`의
+  // "상태 payload 계약"이 main.js `pumpStatusAll`의 payload와 하나씩 맞대 본다.
+  // 한때 이 스텁만 `firstRunDone`을 실어서, 화면 검사는 통과하는데 실물에서는
+  // 그 값이 렌더러에 영원히 도달하지 않았다(마법사가 죽은 배선 위에 서 있었다).
+  // 새 필드를 여기 넣고 싶으면 **프로덕션에 먼저 넣어라.**
   onStatus: (cb) =>
     setTimeout(() => cb({
       projects: PROJECTS[S],
@@ -397,5 +608,20 @@ contextBridge.exposeInMainWorld('teamView', {
       usage: USAGE[S],
       // 명단은 활성 프로젝트 것만 실린다. 화면은 이걸로 자리를 잡는다.
       team: teamOf(S),
+      // **하위 호환의 핵심.** 마법사 갈래가 아니면 이미 첫 실행을 마친 사람이다 —
+      // 프로그램이 없든 프로젝트가 없든 마법사가 떠서는 안 된다.
+      firstRunDone: !WIZ,
     }), 150),
-})
+}
+
+// **통로가 없는 앱**을 흉내 낸다(`OLD_BRIDGE=1`). 설치 통로는 백엔드가 지금 만들고
+// 있어서, 설치본을 덮어쓰다 만 경우처럼 preload가 화면보다 낡을 수 있다. 그때
+// 화면이 죽지 않고 "직접 받아 설치하는 길"로 빠지는지 눌러서 확인하려면 없는
+// 상태를 만들 수 있어야 한다.
+if (process.env.OLD_BRIDGE) {
+  for (const k of ['canAutoInstall', 'autoInstall', 'onInstallProgress', 'refreshPath', 'relaunch', 'createProject', 'wizardDone']) {
+    delete api[k]
+  }
+}
+
+contextBridge.exposeInMainWorld('teamView', api)

@@ -1012,6 +1012,10 @@ async function accountChecks() {
       "const path = require('path')",
       'let envCache = null',
       'const ENV_TTL_MS = 300000',
+      // 떼어 낸 코드는 임시 폴더에서 돌아 상대 require가 안 통한다. 뿌리를 박아 준다.
+      'const ROOT_DIR = ' + JSON.stringify(ROOT),
+      // NOT_FOUND는 install.js 것을 그대로 쓴다(main.js가 그렇게 가져다 쓴다).
+      "const installer = require(path.join(ROOT_DIR, 'install.js'))",
       constLine('NOT_FOUND'),
       // 명령줄 자체가 검사 대상이다 — 여기서 다시 적으면 main.js와 어긋나도 모른다.
       constLine('FIGMA_URL'),
@@ -1019,9 +1023,9 @@ async function accountChecks() {
       constLine('FIGMA_LOGIN'),
       // **성공 판정표도 main.js 것을 그대로 쓴다.** 여기서 다시 적으면 판정이 바뀌어도 모른다.
       constLine('WATCH_DONE'),
-      // 감시는 실제로 30초씩 기다린다. 검사에서는 흐름만 보면 되므로 짧게 줄인다.
-      'const WATCH_EVERY_MS = 1',
-      'const WATCH_TRIES = 2',
+      // 감시는 실제로 몇 초씩 기다린다. 검사에서는 흐름만 보면 되므로 짧게 줄인다.
+      // (진짜 간격이 맞는지는 아래 watchBackoffChecks가 main.js 원본으로 따로 본다.)
+      'const WATCH_DELAYS_MS = [1, 1]',
       'const companies = global.__envCompanies = new Map()',
       'const calls = global.__calls = []',
       'const replies = global.__replies = new Map()',
@@ -1404,7 +1408,7 @@ async function accountChecks() {
   {
     eq('main이 env:switch를 받는다', /ipcMain\.handle\('env:switch'/.test(src), 'true')
     eq('첫 연결 경로(env:login)를 없애지 않았다', /ipcMain\.handle\('env:login'/.test(src), 'true')
-    eq('감시는 한 벌만 둔다', (src.match(/setTimeout\(r, WATCH_EVERY_MS\)/g) || []).length, 1)
+    eq('감시는 한 벌만 둔다', (src.match(/setTimeout\(r, waitMs\)/g) || []).length, 1)
     const pre = fs.readFileSync(path.join(ROOT, 'preload.js'), 'utf8')
     eq('preload가 switchAccount를 노출한다', /switchAccount:\s*\(what\)\s*=>\s*ipcRenderer\.invoke\('env:switch'/.test(pre), 'true')
     eq('preload의 login도 그대로다', /login:\s*\(what\)\s*=>\s*ipcRenderer\.invoke\('env:login'/.test(pre), 'true')
@@ -1576,11 +1580,858 @@ function terminalChecks() {
   }
 }
 
+// ── 17. 설치 자동화 ─────────────────────────────────────────────────────────
+//
+// 비개발자 PC에 필요한 것을 대신 깔아 주는 길. 여기서 지켜야 할 것은 하나다:
+// **깔리지 않았는데 "완료"라고 말하지 않는다.**
+//
+// 직전에 같은 계열로 한 번 데였다 — 연결이 안 됐는데 "Figma가 연결됐습니다"를 띄웠다.
+// 설치는 더 나쁘다. 사무실이 조용해지는데 아무도 고장이라고 말해 주지 않고,
+// 사용자는 앱이 "완료"라고 했으니 자기가 뭘 잘못했다고 생각한다.
+//
+// install.js는 electron을 안 부르므로 **원본 그대로 require해서** 돌린다.
+// 떼어 낸 복사본이 아니라 진짜 코드가 답하는 것을 본다.
+async function installChecks() {
+  console.log('\n설치 자동화')
+  const I = require(path.join(ROOT, 'install.js'))
+  const installSrc = fs.readFileSync(path.join(ROOT, 'install.js'), 'utf8').replace(/\r\n/g, '\n')
+  const mainSrc = fs.readFileSync(path.join(ROOT, 'main.js'), 'utf8').replace(/\r\n/g, '\n')
+  const preSrc = fs.readFileSync(path.join(ROOT, 'preload.js'), 'utf8')
+  const savedPath = process.env.PATH
+
+  /** 검사용 가짜 실행 파일을 만든다. 셸이 찾아 주는 `.cmd`라 진짜처럼 불린다. */
+  const fakeBin = (name, body) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tv-bin-'))
+    fs.writeFileSync(path.join(dir, name + '.cmd'), '@echo off\r\n' + body + '\r\n', 'utf8')
+    return dir
+  }
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+  /**
+   * installOne이 **돌려준 뒤에도** 진행 소식이 계속 오는지 본다.
+   *
+   * 진행 타이머(setInterval)를 안 끄고 빠져나가는 길이 하나라도 있으면, 그 뒤로
+   * 1초마다 `onProgress`가 앱이 꺼질 때까지 나간다 — 화면에는 "설치 실패" 상자와
+   * "내려받는 중 · 7분 경과"가 나란히 뜬다. 실물에서 실제로 그랬다.
+   */
+  const ticksAfterReturn = async (spec, opts = {}) => {
+    const seen = []
+    const r = await I.installOne(spec, { ...opts, onProgress: (p) => seen.push(p) })
+    const atReturn = seen.length
+    await sleep(2200)
+    return { r, before: atReturn, after: seen.length - atReturn }
+  }
+
+  try {
+    // (1) 무인 설치 플래그. **하나라도 빠지면 winget이 동의를 물으며 멈춘다.**
+    //     아무도 안 보는 창에서 멈추므로 5분 타임아웃까지 그냥 서 있게 된다.
+    {
+      const REQUIRED = [
+        '--silent',
+        '--accept-source-agreements',
+        '--accept-package-agreements',
+        '--disable-interactivity',
+      ]
+      for (const [key, pkg] of Object.entries(I.PACKAGES)) {
+        if (pkg.method !== 'winget') continue
+        const args = I.wingetArgs(pkg)
+        for (const f of REQUIRED) eq(`${key}: 무인 플래그 ${f}`, args.includes(f), 'true')
+        eq(`${key}: 사용자 범위로 깐다`, args.join(' ').includes('--scope user'), 'true')
+        // id를 정확히 짚는다. --exact가 없으면 검색어가 여러 개를 물어 온다.
+        eq(`${key}: id를 정확히 짚는다`, args.includes('--exact'), 'true')
+      }
+      eq('Git은 MinGit 포터블로 간다', I.PACKAGES.git.pkg, 'Git.MinGit')
+      eq('Python 설치는 관리자 창을 예고한다(burn 번들)', I.PACKAGES.python.needsAdmin, 'true')
+    }
+
+    // (2) **Claude Code는 Node가 필요 없다.** 공식 설치 스크립트가 PowerShell만 쓴다
+    //     (실측: claude.ai/install.ps1을 받아 읽었다). npm 경로로 되돌아가면
+    //     비개발자가 넘어야 할 관문이 두 개 되살아난다.
+    {
+      eq('claude 설치에 npm이 없다', /npm/i.test(I.PACKAGES.claude.command), 'false')
+      eq('claude 설치는 공식 스크립트를 쓴다', /claude\.ai\/install\.ps1/.test(I.PACKAGES.claude.command), 'true')
+      eq('REQUIREMENTS에 Node가 없다', /key: 'node'/.test(mainSrc), 'false')
+      eq('왜 뺐는지는 주석에 남아 있다', /Node\.js가 여기 없는 이유/.test(mainSrc), 'true')
+    }
+
+    // (3) ★ 핵심 회귀 시험 ★
+    //     **설치 프로그램이 exit 0을 줘도, 실제로 돌려 보고 답이 없으면 실패다.**
+    //     설치 프로그램 자리에 성공만 하는 스크립트를 두고, probe는 없는 명령으로 둔다.
+    {
+      const ghost = {
+        key: 'ghost',
+        probe: ['teamview-이런-명령은-없다-xyz', ['--version']],
+        versionRe: /(\d+\.\d+\.\d+)/,
+        auto: { method: 'script', publisher: '검사', scope: 'user', psCommand: 'exit 0' },
+      }
+      const r = await I.installOne(ghost)
+      eq('설치가 0을 줘도 확인 못 하면 verified:false', r.verified, 'false')
+      eq('그때 ok도 false다 (화면이 ok만 봐도 안전하다)', r.ok, 'false')
+      eq('버전을 지어내지 않는다', r.version, 'null')
+      eq('왜 실패했는지 남긴다', Boolean(r.error), 'true')
+      // 설치 프로그램은 잘 끝났으니 껐다 켜면 보일 수도 있다 — 그 힌트는 줘야 한다.
+      eq('껐다 켜 보라는 힌트를 준다', r.needsRestart, 'true')
+
+      // 위 시험이 의미가 있으려면 **반대쪽도 확인돼야 한다.** 늘 false를 주는
+      // 검사는 시험이 아니다. 같은 길로 진짜 있는 것을 넣으면 통과해야 한다.
+      const real = {
+        key: 'real',
+        probe: ['cmd', ['/c', 'echo', '9.9.9']],
+        versionRe: /(\d+\.\d+\.\d+)/,
+        auto: { method: 'script', publisher: '검사', scope: 'user', psCommand: 'exit 0' },
+      }
+      const r2 = await I.installOne(real)
+      eq('확인되면 verified:true', r2.verified, 'true')
+      eq('그때 버전이 실린다', r2.version, '9.9.9')
+    }
+
+    // (4) 진행 단계는 **본 것만** 말한다. 그리고 화면이 초를 셀 수 있어야 한다.
+    {
+      const seen = []
+      await I.installOne(
+        {
+          key: 'tick',
+          probe: ['cmd', ['/c', 'echo', '1.0.0']],
+          versionRe: /(\d+\.\d+\.\d+)/,
+          auto: { method: 'script', publisher: '검사', scope: 'user', psCommand: 'Start-Sleep -Milliseconds 1200' },
+        },
+        { onProgress: (p) => seen.push(p) },
+      )
+      eq('진행 상황을 밀어 준다', seen.length > 1, 'true')
+      eq('항목 이름이 실린다', seen[0].key, 'tick')
+      eq('경과 시간이 실린다', typeof seen[0].elapsedMs, 'number')
+      eq('처음은 download다', seen[0].phase, 'download')
+      eq('마지막은 verify다', seen[seen.length - 1].phase, 'verify')
+      // 설치 단계 표시를 본 적이 없으면 install이라고 하지 않는다(지어내지 않는다).
+      eq('보지 못한 단계를 말하지 않는다', seen.some((p) => p.phase === 'install'), 'false')
+    }
+
+    // (4-b) ★ 가짜 활동 ★ **어느 길로 끝나도 진행 타이머가 꺼지는가.**
+    //
+    //   실물 사고: winget이 없어 곧장 돌아가는 길만 clearInterval을 건너뛰었다.
+    //   그 하나 때문에 화면에 "설치 실패"와 "내려받는 중 · 7분 경과"가 같이 떴다.
+    //   winget이 정책으로 막힌 회사 PC가 정확히 그 길을 밟는다.
+    //   여기서는 **끝나는 길마다** 돌려준 뒤 2초 동안 소식이 더 오는지 센다.
+    {
+      const psOk = { method: 'script', publisher: '검사', scope: 'user', psCommand: 'exit 0' }
+      const cases = [
+        // 확인까지 성공하는 길
+        ['성공', { key: 'ok', probe: ['cmd', ['/c', 'echo', '1.2.3']], versionRe: /(\d+\.\d+\.\d+)/, auto: psOk }, {}],
+        // 설치는 끝났는데 확인이 안 되는 길
+        ['확인 실패', { key: 'ng', probe: ['teamview-이런-명령은-없다-xyz', ['--version']], versionRe: /(\d+\.\d+\.\d+)/, auto: psOk }, {}],
+        // 자동 설치를 아예 못 하는 길(auto가 없다)
+        ['자동 설치 불가', { key: 'noauto', probe: ['cmd', ['/c', 'echo', '1.2.3']], versionRe: /(\d+\.\d+\.\d+)/ }, {}],
+        // 던지는 길 — 패키지 id가 규칙에 안 맞으면 wingetArgs가 던진다
+        ['던지는 길', { key: 'boom', probe: ['cmd', ['/c', 'echo', '1.2.3']], versionRe: /(\d+\.\d+\.\d+)/, auto: { method: 'winget', pkg: '나쁜 id!', publisher: '검사', scope: 'user' } }, {}],
+        // 시간이 초과되는 길
+        ['시간 초과', { key: 'slow', probe: ['teamview-이런-명령은-없다-xyz', ['--version']], versionRe: /(\d+\.\d+\.\d+)/, auto: { ...psOk, psCommand: 'Start-Sleep -Seconds 60' } }, { timeoutMs: 1500 }],
+      ]
+      for (const [label, spec, opts] of cases) {
+        const t = await ticksAfterReturn(spec, opts)
+        t.after === 0
+          ? ok(`돌려준 뒤에는 진행 소식이 멈춘다: ${label}`)
+          : bad('가짜 활동', `${label} — 돌려준 뒤에도 ${t.after}번 더 왔다(타이머가 안 꺼진다)`)
+      }
+
+      // **winget이 없는 PC가 바로 그 길이다.** 실제로 없는 상태를 만들어 다시 본다.
+      const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'tv-nowinget-'))
+      process.env.PATH = empty
+      const t = await ticksAfterReturn({
+        key: 'git',
+        probe: ['git', ['--version']],
+        versionRe: /git version\s+(\S+)/,
+        auto: I.PACKAGES.git,
+      })
+      process.env.PATH = savedPath
+      if (/winget이 없어/.test(t.r.error || '')) {
+        t.after === 0
+          ? ok('winget이 없어 돌아가는 길에서도 타이머가 꺼진다')
+          : bad('가짜 활동', `winget 없음 — 돌려준 뒤에도 ${t.after}번 더 왔다`)
+      } else {
+        console.log('  · (알림) PATH를 비웠는데도 winget이 잡혔다 — 이 길은 건너뛴다')
+      }
+    }
+
+    // (5) 타임아웃이 실제로 걸리는가. 5분을 기다리는 검사는 아무도 안 돌리므로
+    //     같은 기계를 짧은 시간으로 돌려 본다(기본값이 5분인 것은 따로 확인한다).
+    {
+      eq('기본 타임아웃은 5분이다', I.INSTALL_TIMEOUT_MS, String(5 * 60 * 1000))
+      const began = Date.now()
+      const r = await I.installOne(
+        {
+          key: 'slow',
+          probe: ['teamview-이런-명령은-없다-xyz', ['--version']],
+          versionRe: /(\d+\.\d+\.\d+)/,
+          auto: { method: 'script', publisher: '검사', scope: 'user', psCommand: 'Start-Sleep -Seconds 60' },
+        },
+        { timeoutMs: 2000 },
+      )
+      const took = Date.now() - began
+      eq('시간이 지나면 끊는다', took < 30_000, 'true')
+      eq('끊겼으면 성공이라고 하지 않는다', r.verified, 'false')
+      eq('시간 초과라고 말해 준다', /끝나지 않았습니다/.test(r.error || ''), 'true')
+      // 끊긴 것은 "설치 프로그램이 잘 끝났다"가 아니다 — 껐다 켜라고 하면 안 된다.
+      eq('시간 초과에는 재시작을 권하지 않는다', Boolean(r.needsRestart), 'false')
+
+      // UAC 창이 뜨는 설치(Python은 burn 번들이다)는 사람이 창을 누를 때까지 붙잡힌다.
+      // 그 시간을 5분에 욱여넣으면 멀쩡한 설치를 우리가 끊는다 — 이제 트리째 죽이므로
+      // 잘못 끊는 비용이 크다.
+      eq('UAC를 예고하는 설치는 10분을 준다', I.ADMIN_INSTALL_TIMEOUT_MS, String(10 * 60 * 1000))
+      eq('그 판단은 needsAdmin으로 한다', /auto\.needsAdmin[\s\S]{0,60}ADMIN_INSTALL_TIMEOUT_MS/.test(installSrc), 'true')
+      eq('python이 그 대상이다', I.PACKAGES.python.needsAdmin, 'true')
+    }
+
+    // (5-b) ★ 시간이 초과되면 **손자까지** 죽는가 ★
+    //
+    //   `child.kill()`은 윈도우에서 직계 자식만 죽인다. winget이 띄운 msiexec이나
+    //   burn 번들은 그대로 살아 설치를 계속하고, 사용자가 [다시 시도]를 누르면
+    //   설치 프로그램 두 개가 겹친다. 그래서 진짜로 손자를 하나 낳아 놓고,
+    //   시간이 초과된 뒤 그 손자가 죽었는지 **pid로** 확인한다.
+    {
+      const sys = (name) => path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', name)
+      const alive = (pid) => {
+        try {
+          const out = execFileSync(sys('tasklist.exe'), ['/FI', 'PID eq ' + pid, '/NH'], {
+            encoding: 'latin1',
+            stdio: ['ignore', 'pipe', 'ignore'],
+          })
+          return new RegExp('\\b' + pid + '\\b').test(out)
+        } catch {
+          return false
+        }
+      }
+      const pidFile = path.join(os.tmpdir(), 'tv-tree-' + process.pid + '-' + Date.now() + '.txt')
+      const psCommand =
+        "$p = Start-Process -FilePath ping -ArgumentList '-n','120','127.0.0.1' -PassThru -WindowStyle Hidden; " +
+        `Set-Content -LiteralPath '${pidFile}' -Value $p.Id; ` +
+        'Start-Sleep -Seconds 120'
+      const r = await I.installOne(
+        {
+          key: 'tree',
+          probe: ['teamview-이런-명령은-없다-xyz', ['--version']],
+          versionRe: /(\d+\.\d+\.\d+)/,
+          auto: { method: 'script', publisher: '검사', scope: 'user', psCommand },
+        },
+        { timeoutMs: 4000 },
+      )
+      eq('(전제) 시간이 초과된 것이 맞다', /끝나지 않았습니다/.test(r.error || ''), 'true')
+      let pid = null
+      try {
+        pid = Number(fs.readFileSync(pidFile, 'utf8').trim())
+      } catch {
+        pid = null
+      }
+      if (!pid) {
+        console.log('  · (알림) 손자 프로세스를 못 만들었다 — 트리 종료 대조를 건너뛴다')
+      } else {
+        let dead = false
+        for (let i = 0; i < 16 && !dead; i++) {
+          if (!alive(pid)) dead = true
+          else await sleep(500)
+        }
+        dead
+          ? ok('시간이 초과되면 손자 프로세스까지 죽는다')
+          : bad('트리 종료', `손자(pid ${pid})가 살아남았다 — [다시 시도]에서 설치가 겹친다`)
+        // 살아남았으면 우리가 치운다. 검사가 남의 프로세스를 남기면 안 된다.
+        if (!dead) {
+          try {
+            execFileSync(sys('taskkill.exe'), ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' })
+          } catch {
+            /* 이미 죽었으면 그만이다 */
+          }
+        }
+      }
+      try {
+        fs.rmSync(pidFile, { force: true })
+      } catch {
+        /* 임시 파일 하나 못 지운 것으로 검사를 실패시키지 않는다 */
+      }
+      // **제목으로 찾지 않는다.** 예전에 그 방식이 사용자의 WindowsTerminal을 잡았다.
+      eq('설치도 pid로만 죽인다', /'\/PID', String\(pid\), '\/T', '\/F'/.test(installSrc), 'true')
+      eq('창 제목으로 찾는 코드가 없다', /WINDOWTITLE/i.test(installSrc), 'false')
+    }
+
+    // (6) winget이 없는 PC. **고장이 아니라 정상 경로다**(회사 PC는 그룹 정책으로 막는다).
+    //     비어 있는 폴더만 PATH에 두면 winget을 못 찾는 상태가 그대로 재현된다.
+    {
+      const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'tv-nopath-'))
+      process.env.PATH = empty
+      const det = await I.detectWinget()
+      eq('winget이 없으면 false로 답한다', det.winget, 'false')
+      eq('없는 버전을 지어내지 않는다', det.version, 'null')
+
+      const r = await I.installOne({
+        key: 'git',
+        probe: ['git', ['--version']],
+        versionRe: /git version\s+(\S+)/,
+        auto: I.PACKAGES.git,
+      })
+      eq('winget이 없으면 설치를 시도하지 않는다', /winget이 없어/.test(r.error || ''), 'true')
+      eq('그래도 성공이라고 하지 않는다', r.verified, 'false')
+      process.env.PATH = savedPath
+    }
+
+    // (7) PATH 다시 읽기. **깔고도 "없다"고 나오는 자리**를 막는 장치다.
+    //     앱이 물려받은 PATH는 설치가 끝나도 그대로라, 레지스트리에서 다시 읽어야 한다.
+    {
+      const only = fs.mkdtempSync(path.join(os.tmpdir(), 'tv-onlydir-'))
+      process.env.PATH = only // 물려받은 PATH가 빈약한 상태를 흉내 낸다
+      const r = await I.refreshPath()
+      eq('PATH를 다시 읽는다', r.ok, 'true')
+      eq('바뀌었으면 바뀌었다고 한다', r.changed, 'true')
+      // 레지스트리에 있던 경로가 실제로 들어와야 한다(없던 경로가 생기는 것이 요점이다).
+      eq('레지스트리의 경로가 들어온다', /system32/i.test(process.env.PATH), 'true')
+      // 그러면서 원래 있던 것을 잃지 않는다 — 갱신이 고치려던 문제를 다시 만들면 안 된다.
+      eq('원래 있던 경로를 잃지 않는다', process.env.PATH.includes(only), 'true')
+      // 한 번 고른 뒤에는 더 바뀔 것이 없어야 한다(계속 "바뀌었다"고 하면
+      // 화면이 매번 다시 그리거나 "다시 켜세요"를 반복하게 된다).
+      process.env.PATH = savedPath
+      await I.refreshPath()
+      const again = await I.refreshPath()
+      eq('바뀐 게 없으면 바뀌었다고 하지 않는다', again.changed, 'false')
+
+      // **문자열로 견주면 여기서 걸린다.** 우리가 머신·유저 순으로 다시 세우므로
+      // 같은 항목이라도 순서·꼬리 슬래시·빈 칸이 달라지고, `before !== next`는 거의
+      // 매번 참이 된다 — 아무것도 안 생겼는데 화면이 "다시 켜세요"를 되풀이한다.
+      const same = I.splitPath(process.env.PATH)
+      process.env.PATH = same
+        .slice()
+        .reverse()
+        .map((p) => p + '\\')
+        .join(';;')
+      const shuffled = await I.refreshPath()
+      eq('순서·꼬리 슬래시만 달라도 바뀐 것이 아니다', shuffled.changed, 'false')
+      // 반대쪽 — **레지스트리에는 있는데 프로세스에는 없던** 항목이 돌아오면 그때는
+      // 정말 바뀐 것이다(늘 false를 주는 검사는 시험이 아니다). 깔고도 "없습니다"가
+      // 뜨는 자리가 정확히 이 모양이다.
+      const reg = await I.readRegistryPath()
+      const one = I.splitPath(reg.machine)[0] ?? I.splitPath(reg.user)[0]
+      if (!one) {
+        console.log('  · (알림) 레지스트리 PATH가 비어 있다 — 반대쪽 대조를 건너뛴다')
+      } else {
+        process.env.PATH = I.splitPath(savedPath)
+          .filter((p) => I.pathKey(p) !== I.pathKey(one))
+          .join(';')
+        eq('빠져 있던 항목이 돌아오면 바뀌었다고 한다', (await I.refreshPath()).changed, 'true')
+      }
+      process.env.PATH = savedPath
+    }
+
+    // (7-b) PATH 다시 읽기를 **부르는 쪽이 끌 수 있는가.**
+    //       verifyInstalled가 항목마다 레지스트리를 읽으면 앱을 켤 때마다 PowerShell이
+    //       항목 수 + 1번 뜬다(실측 4번). 여러 항목을 잇달아 보는 쪽은 앞에서 한 번만
+    //       읽는다 — main.js의 주석이 그렇게 말하고 있으니 코드도 그래야 한다.
+    {
+      const echoSpec = { key: 'echo', probe: ['echo', ['1.0.0']], versionRe: /(\d+\.\d+\.\d+)/ }
+      const only = fs.mkdtempSync(path.join(os.tmpdir(), 'tv-norefresh-'))
+      process.env.PATH = only
+      await I.verifyInstalled(echoSpec, { refreshPath: false })
+      eq('refreshPath:false면 PATH를 건드리지 않는다', process.env.PATH, only)
+      // 반대쪽 — 기본값은 켜져 있어야 한다(설치 직후에는 정말 다시 읽어야 한다).
+      await I.verifyInstalled(echoSpec)
+      eq('기본값은 다시 읽는 것이다', /system32/i.test(process.env.PATH), 'true')
+      process.env.PATH = savedPath
+      eq(
+        'checkRequirements는 항목마다 다시 읽지 않는다',
+        /verifyInstalled\(r, \{[^}]*refreshPath: false/.test(mainSrc),
+        'true',
+      )
+      eq('그 이유가 주석에 남아 있다', /한 번만.*다시 읽는다/.test(mainSrc), 'true')
+    }
+
+    // (7-c) 사용자 PATH에 덧붙이기 — 읽기와 쓰기가 **한 PowerShell 안에서** 끝나는가.
+    //       둘로 나뉘어 있으면 그 사이(프로세스 두 번)에 winget이 HKCU Path를 바꿔도
+    //       우리가 낡은 값으로 덮어써서 그 변경이 사라진다. 하필 이 함수가 불리는
+    //       자리가 winget 포터블 설치 **직후**다.
+    {
+      const at = installSrc.indexOf('async function persistUserPath(')
+      const body = installSrc.slice(at, installSrc.indexOf('\n}\n', at))
+      eq('PowerShell을 한 번만 부른다', (body.match(/runPowerShell\(/g) || []).length, '1')
+      eq('읽기와 쓰기가 같은 스크립트에 있다', /GetValue\('Path'/.test(body) && /SetValue\('Path'/.test(body), 'true')
+      // 잘 돼 있던 것들은 그대로 지킨다.
+      eq('원본 그대로 읽는다(%VAR%를 굳히지 않는다)', /DoNotExpandEnvironmentNames/.test(body), 'true')
+      eq('ExpandString으로 쓴다', /RegistryValueKind\]::ExpandString/.test(body), 'true')
+      eq('값은 base64로 건넨다(인용 사고 방지)', /FromBase64String/.test(body), 'true')
+      eq('8000자 상한이 살아 있다', /8000/.test(body), 'true')
+      eq('지우는 코드가 없다(덧붙이기만 한다)', /DeleteValue|Remove-ItemProperty/.test(body), 'false')
+
+      // 실물 — **이미 있는 항목**을 주면 아무것도 쓰지 않고 already로 답해야 한다.
+      // (읽기 경로를 실제 레지스트리로 한 번 밟아 본다. 쓰기는 하지 않는다.)
+      const reg = await I.readRegistryPath()
+      const first = I.splitPath(reg.user)[0]
+      if (!first) {
+        console.log('  · (알림) 이 계정의 사용자 PATH가 비어 있다 — 실물 대조를 건너뛴다')
+      } else {
+        const res = await I.persistUserPath(first)
+        eq('이미 있는 폴더는 다시 넣지 않는다', `${res.ok}:${res.already}`, 'true:true')
+        eq('그때는 added를 말하지 않는다', res.added, 'undefined')
+      }
+    }
+
+    // (8) ★ 스토어 스텁을 걸러내는가 ★
+    //     새 PC에서 `python`이 마이크로소프트 스토어 스텁으로 잡히면, 훅은 매번 헛돌고
+    //     화면은 텅 빈 채로 아무도 이유를 모른다(훅은 규칙상 무조건 exit 0이다).
+    {
+      const pySpec = { key: 'python', probe: ['python', ['--version']], versionRe: /Python\s+(\d+\.\d+\.\d+)/ }
+
+      // 8-a. 진짜 스텁: 안내만 찍고 9009로 끝난다.
+      const stub = fakeBin('python', 'echo Python was not found; run without arguments to install from the Microsoft Store.\r\nexit /b 9009')
+      process.env.PATH = stub + ';' + savedPath
+      const a = await I.probeVersion(pySpec)
+      eq('스토어 스텁을 설치된 것으로 보지 않는다', a.ok, 'false')
+      eq('스텁에서 버전을 지어내지 않는다', a.version, 'null')
+
+      // 8-b. 더 고약한 쪽: **exit 0인데 아무 말이 없다.** 종료 코드만 보면 통과한다.
+      const quiet = fakeBin('python', 'exit /b 0')
+      process.env.PATH = quiet + ';' + savedPath
+      const b = await I.probeVersion(pySpec)
+      eq('조용히 0으로 끝나도 통과시키지 않는다', b.ok, 'false')
+
+      // 8-c. 심층 검증: 버전은 그럴듯하게 찍는데 **훅을 못 돌리는** python.
+      //      여기가 이 검사의 핵심이다 — 훅은 무슨 일이 있어도 exit 0이라
+      //      종료 코드로는 영원히 구별되지 않는다. 기록이 남았는지로만 가른다.
+      const liar = fakeBin('python', 'echo Python 3.13.0\r\nexit /b 0')
+      process.env.PATH = liar + ';' + savedPath
+      const c = await I.probeVersion(pySpec)
+      eq('(대조) 버전만 보면 통과해 버린다', c.ok, 'true')
+      const deep = await I.verifyHookRuns(pySpec, { hookPath: path.join(ROOT, 'hooks', 'team_events.py') })
+      eq('훅이 기록을 못 남기면 통과시키지 않는다', deep.ok, 'false')
+      eq('무엇이 안 됐는지 말해 준다', Boolean(deep.why), 'true')
+      process.env.PATH = savedPath
+
+      // 8-d. 반대쪽 — 이 PC의 진짜 python은 통과해야 한다. 안 그러면 이 검사는
+      //      "무조건 실패"일 뿐이고, 멀쩡한 python을 없다고 몰아붙이게 된다.
+      //      (실측 주의: 이 PC의 `where python` 첫 줄은 WindowsApps 아래인데
+      //       스텁이 아니라 정상 스토어판이다. 경로로 걸렀으면 여기서 틀렸다.)
+      const here = await I.probeVersion(pySpec)
+      if (here.ok) {
+        const good = await I.verifyHookRuns(pySpec, { hookPath: path.join(ROOT, 'hooks', 'team_events.py') })
+        eq('진짜 python은 훅을 돌려 통과한다', good.ok, 'true')
+      } else {
+        console.log('  · (알림) 이 컴퓨터에 python이 없다 — 반대쪽 대조를 건너뛴다')
+      }
+
+      // 8-e. ★ 설치본(asar)에서도 훅을 돌릴 수 있는가 ★
+      //
+      //   설치본에서 훅은 `resources\app.asar\hooks\team_events.py`에 있다. asar는
+      //   Electron이 fs를 패치해 줘야만 보이는 가짜 폴더라 `fs.existsSync`는 true를
+      //   주지만, **spawn된 python은 그 경로를 못 연다.** 실측:
+      //     python: can't open file '...\app.asar\hooks\team_events.py': [Errno 2]
+      //   그래서 설치본에서는 python이 영원히 installed:false였고, 사용자는 Python을
+      //   깔고 또 깔아도 "훅이 아무것도 기록하지 못했습니다"를 보며 마법사에 갇혔다.
+      //
+      //   여기서는 **경로를 python에 넘기지 않는다**는 것을 코드로 못 박고(원본을 읽어
+      //   사본을 돌린다), 파일을 못 여는 폴더에서도 통과하는지 실제로 돌려 본다.
+      //   (asar 그 자체는 electron이 있어야 흉내 낼 수 있다 — 실물 확인은 따로 한다.)
+      {
+        const v = installSrc.slice(
+          installSrc.indexOf('async function verifyHookRuns('),
+          installSrc.indexOf('\n}\n', installSrc.indexOf('async function verifyHookRuns(')),
+        )
+        eq('훅 원본을 읽어서 확인한다(existsSync로 때우지 않는다)', /readFileSync\(hookPath\)/.test(v), 'true')
+        eq('훅 경로를 python 인자로 넘기지 않는다', /\[hookPath/.test(v), 'false')
+        eq('훅 폴더를 cwd로 삼지 않는다', /dirname\(hookPath\)/.test(v), 'false')
+        eq('사본을 검사용 폴더에 쓴다', /writeFileSync\(path\.join\(lab, hookName\)/.test(v), 'true')
+
+        // 실물에 가까운 재현: 원본이 **파일 시스템에 없는** 자리를 가리켜도,
+        // 내용만 읽을 수 있으면 검증이 통과해야 한다. fs를 잠깐 갈아 끼워
+        // "읽히지만 열리지는 않는" asar를 흉내 낸다.
+        if (here.ok) {
+          const real = fs.readFileSync(path.join(ROOT, 'hooks', 'team_events.py'))
+          const ghostPath = path.join(ROOT, 'app.asar', 'hooks', 'team_events.py') // 디스크에 없다
+          const origRead = fs.readFileSync
+          fs.readFileSync = (p, ...rest) => (p === ghostPath ? real : origRead(p, ...rest))
+          let deep
+          try {
+            deep = await I.verifyHookRuns(pySpec, { hookPath: ghostPath })
+          } finally {
+            fs.readFileSync = origRead
+          }
+          eq('디스크에 없는 경로(asar)여도 훅이 돌아간다', deep.ok, 'true')
+          eq('(대조) 그 경로는 실제로 디스크에 없다', fs.existsSync(ghostPath), 'false')
+        }
+      }
+    }
+
+    // (9) 로그인 감시 간격 — 처음에는 촘촘하게. main.js 원본을 그대로 계산해 본다.
+    {
+      const from = mainSrc.indexOf('const WATCH_EVERY_MS')
+      const to = mainSrc.indexOf('})()', from)
+      if (from < 0 || to < 0) {
+        bad('감시 간격 상수를 찾지 못했다')
+      } else {
+        const block = mainSrc.slice(from, to + 4)
+        const delays = new Function(block + '\nreturn WATCH_DELAYS_MS')()
+        eq('첫 확인은 3초 뒤다', delays[0], '3000')
+        eq('백오프로 늘어난다', delays.slice(0, 5).join(','), '3000,5000,8000,13000,21000')
+        eq('그 뒤로는 30초로 고정된다', delays.slice(5).every((d) => d === 30_000), 'true')
+        eq('3분은 지켜본다', delays.reduce((a, b) => a + b, 0) >= 180_000, 'true')
+        // 요점은 이것이다 — 15초 만에 끝낸 사람이 30초를 기다리지 않는다.
+        eq('첫 확인이 30초보다 빠르다', delays[0] < 30_000, 'true')
+      }
+    }
+
+    // (10) 마법사 조건. **하위 호환이 걸린 자리다.**
+    //      `firstRunDone`은 새로 생긴 키라, 이미 잘 쓰던 사람에게는 아예 없다.
+    //      그것만 보고 띄우면 업데이트한 순간 사용자 전원이 마법사에 갇힌다.
+    //      **화면의 함수를 그대로 떼어 와서 시험한다.** 예전에는 main.js의
+    //      `firstRunState()`를 시험했는데, 그 함수는 아무도 부르지 않는 죽은 코드였다 —
+    //      여섯 개가 전부 초록인 채로 실제 게이트는 한 번도 검사되지 않았다.
+    {
+      const W = loadFrom('renderer/wizard.js', ['localDone', 'alreadyDone', 'shouldOpen', 'missingItems'], [
+        'let __local = false',
+        'let backendDone = null',
+        'let projectCount = null',
+        'let reqs = []',
+        'const localStorage = { getItem: () => (__local ? "1" : null) }',
+        'global.__set = (done, rs, projects) => { __local = false; backendDone = done; reqs = rs; projectCount = projects }',
+        '',
+      ].join('\n'))
+      const ALL_OK = [
+        { key: 'python', optional: false, installed: true },
+        { key: 'claude', optional: false, installed: true },
+        { key: 'git', optional: true, installed: true },
+      ]
+      const NO_PY = ALL_OK.map((r) => (r.key === 'python' ? { ...r, installed: false } : r))
+      const NO_GIT = ALL_OK.map((r) => (r.key === 'git' ? { ...r, installed: false } : r))
+
+      global.__set(null, ALL_OK, 1)
+      eq('다 갖췄으면 표시가 없어도 마법사를 띄우지 않는다', W.shouldOpen(), 'false')
+
+      global.__set(null, NO_PY, 1)
+      eq('필수가 빠졌으면 띄운다', W.shouldOpen(), 'true')
+
+      global.__set(null, NO_GIT, 1)
+      eq('git만 없는 것은 막지 않는다(선택 항목)', W.shouldOpen(), 'false')
+
+      global.__set(null, ALL_OK, 0)
+      eq('붙은 프로젝트가 없으면 띄운다', W.shouldOpen(), 'true')
+
+      global.__set(true, NO_PY, 0)
+      eq('끝냈다고 한 사람은 다시 가두지 않는다', W.shouldOpen(), 'false')
+
+      global.__set(null, NO_PY, 1)
+      eq('무엇이 빠졌는지 알려 준다', W.missingItems().map((r) => r.key).join(','), 'python')
+    }
+
+    // (11) 계약 동결. 화면(마법사)이 이것만 믿고 따로 만들어지고 있다 —
+    //      이름이 하나만 어긋나도 양쪽이 조용히 못 만난다.
+    {
+      for (const ch of [
+        'env:can-auto-install',
+        'env:install-auto',
+        'env:path-refresh',
+        'app:relaunch',
+        'project:create',
+        'wizard:done',
+      ]) {
+        eq(`main이 ${ch}를 받는다`, mainSrc.includes(`ipcMain.handle('${ch}'`), 'true')
+      }
+      eq('설치 진행 상황을 밀어 준다', /send\('env:install-progress'/.test(mainSrc), 'true')
+      for (const api of [
+        'canAutoInstall',
+        'autoInstall',
+        'onInstallProgress',
+        'refreshPath',
+        'relaunch',
+        'createProject',
+        'wizardDone',
+      ]) {
+        eq(`preload가 ${api}를 노출한다`, new RegExp('\\b' + api + ':\\s').test(preSrc), 'true')
+      }
+      // 예전 화면이 쓰던 것도 그대로 있어야 한다(업데이트로 버튼이 사라지면 안 된다).
+      eq('예전 env:install 경로가 살아 있다', /ipcMain\.handle\('env:install'/.test(mainSrc), 'true')
+      eq('예전 install()도 그대로다', /\binstall:\s*\(key\)/.test(preSrc), 'true')
+
+      // 다시 켜기는 **정상 종료**여야 한다. `app.exit(0)`은 before-quit/will-quit을
+      // 건너뛴다 — 돌고 있는 claude 세션과 띄워 둔 개발 서버 정리가 통째로 빠져,
+      // 다시 켠 앱이 남의 포트와 남의 클레임(10분 TTL)을 마주한다.
+      const relaunch = mainSrc.slice(
+        mainSrc.indexOf("ipcMain.handle('app:relaunch'"),
+        mainSrc.indexOf('})', mainSrc.indexOf("ipcMain.handle('app:relaunch'")),
+      )
+      eq('다시 켜기는 app.quit()으로 끝낸다', /app\.quit\(\)/.test(relaunch), 'true')
+      eq('app.exit로 건너뛰지 않는다', /app\.exit\(/.test(relaunch), 'false')
+      eq('정리할 것이 실제로 걸려 있다', (mainSrc.match(/app\.on\('before-quit'/g) || []).length > 0, 'true')
+    }
+
+    // (12) 프로젝트 만들기 — 이름은 사람이 자유롭게 치는 값이다. 그대로 경로에
+    //      붙이면 엉뚱한 곳에 폴더가 생긴다(`..\..\Windows` 같은 것).
+    {
+      const block = mainSrc.slice(mainSrc.indexOf("ipcMain.handle('project:create'"))
+      // 폴더 이름으로 못 쓰는 글자와 경로 구분자를 막고 있는가.
+      eq('쓸 수 없는 글자를 막는다', block.includes('x00-\\x1f') && block.includes('?*'), 'true')
+      eq('상위 폴더로 못 올라간다', block.includes("clean === '..'"), 'true')
+      eq('git이 없으면 건너뛴다(실패가 아니다)', /probeVersion\(gitReq\)/.test(block), 'true')
+      eq('기본 자리는 문서 폴더다', /getPath\('documents'\)/.test(block), 'true')
+
+      // (12-b) 구성이 실패하면 **빈 폴더를 남기지 않는다.** 남기면 재시도가
+      //        "같은 이름의 폴더가 이미 있습니다"에 막혀 그 이름을 영영 못 쓴다.
+      //        되돌리는 것은 **우리가 방금 만든 것일 때만**이다 — 사람이 미리 만들어 둔
+      //        빈 폴더를 우리가 지우면 그게 더 나쁘다.
+      const create = block.slice(0, block.indexOf("ipcMain.handle('wizard:done'"))
+      eq('우리가 만든 것인지 기억해 둔다', /created = !existed/.test(create), 'true')
+      eq('실패하면 되돌린다', /if \(created\)[\s\S]{0,200}rmSync\(dir/.test(create), 'true')
+      // 지우는 자리는 그 가드 안 하나뿐이어야 한다(다른 데서 또 지우면 가드가 무의미하다).
+      eq('폴더를 지우는 자리는 하나뿐이다', (create.match(/rmSync\(dir/g) || []).length, '1')
+      eq('못 지웠으면 어디를 치우면 되는지 알려 준다', /폴더가 남아 있습니다: \$\{dir\}/.test(create), 'true')
+      eq('되돌렸는지도 응답에 담는다', /rolledBack/.test(create), 'true')
+    }
+  } finally {
+    process.env.PATH = savedPath
+  }
+}
+
+/**
+ * 객체 리터럴의 **최상위 키**만 뽑는다(중첩 객체·문자열·주석 안은 세지 않는다).
+ * `braceIdx`는 여는 `{`의 자리. `key: 값`도 `key,`(단축 표기)도 키로 센다.
+ */
+function keysOfObject(src, braceIdx) {
+  const keys = []
+  let depth = 0
+  let prev = ''
+  let i = braceIdx
+  while (i < src.length) {
+    const c = src[i]
+    if (c === '/' && src[i + 1] === '/') {
+      const nl = src.indexOf('\n', i)
+      if (nl < 0) break
+      i = nl + 1
+      continue
+    }
+    if (c === '/' && src[i + 1] === '*') {
+      const end = src.indexOf('*/', i)
+      if (end < 0) break
+      i = end + 2
+      continue
+    }
+    if (c === '"' || c === "'" || c === '`') {
+      i++
+      while (i < src.length && src[i] !== c) i += src[i] === '\\' ? 2 : 1
+      i++
+      prev = c
+      continue
+    }
+    if (c === '{' || c === '(' || c === '[') {
+      depth++
+      prev = c
+      i++
+      continue
+    }
+    if (c === '}' || c === ')' || c === ']') {
+      depth--
+      if (depth === 0) break
+      prev = c
+      i++
+      continue
+    }
+    if (/\s/.test(c)) {
+      i++
+      continue
+    }
+    if (depth === 1 && (prev === '{' || prev === ',') && /[A-Za-z_$]/.test(c)) {
+      const m = /^([A-Za-z_$][\w$]*)\s*[:,}]/.exec(src.slice(i))
+      if (m) {
+        keys.push(m[1])
+        i += m[1].length
+        continue
+      }
+    }
+    prev = c
+    i++
+  }
+  return keys
+}
+
+// ── 18-b. 스텁의 **IPC 응답**이 실제 핸들러와 같은가 ────────────────────────
+//
+// 같은 병의 다른 자리다. 화면(마법사)은 이제 게시자·패키지 id·설치 범위를 하드코딩
+// 사전 없이 `canAutoInstall().packages`에서만 가져온다 — 화면이 값을 지어내지 못하게
+// 하려는 것이다. 그런데 스텁이 그 필드를 아예 안 주면, 화면 검사는 "대조할 것이 없어서"
+// 조용히 통과한다(실제로 결함을 심었을 때 못 잡았다).
+//
+// 그래서 여기서는 **스텁을 진짜로 불러 응답을 받아** main.js가 만들어 내는 응답과
+// 통째로 맞대 본다. 값 하나가 달라도 실패한다 — 그 값이 곧 사용자가 설치 전에 보는
+// "누가 만든 무엇을 어디서 받아 오는가"이기 때문이다.
+async function ipcContractChecks() {
+  console.log('\nIPC 응답 계약 (프로덕션 ↔ 검사 스텁)')
+  const mainSrc = fs.readFileSync(path.join(ROOT, 'main.js'), 'utf8').replace(/\r\n/g, '\n')
+  const installer = require(path.join(ROOT, 'install.js'))
+
+  /** 검사 스텁을 진짜로 불러 온다 — electron 자리에만 가짜를 끼운다. */
+  const loadStub = (scenario) => {
+    const Module = require('module')
+    const stubPath = require.resolve(path.join(ROOT, 'tools', 'ui-stub.js'))
+    const origLoad = Module._load
+    const savedScenario = process.env.SCENARIO
+    let api = null
+    process.env.SCENARIO = scenario
+    Module._load = function (request, ...rest) {
+      if (request === 'electron') {
+        return { contextBridge: { exposeInMainWorld: (_name, exposed) => (api = exposed) } }
+      }
+      return origLoad.call(this, request, ...rest)
+    }
+    try {
+      delete require.cache[stubPath]
+      require(stubPath)
+    } finally {
+      Module._load = origLoad
+      delete require.cache[stubPath]
+      if (savedScenario === undefined) delete process.env.SCENARIO
+      else process.env.SCENARIO = savedScenario
+    }
+    return api
+  }
+
+  // main.js의 REQUIREMENTS와 핸들러의 매핑을 **원본 그대로** 돌린다.
+  // (여기서 다시 적으면 검사가 거짓말을 한다.)
+  const rAt = mainSrc.indexOf('const REQUIREMENTS = [')
+  const REQUIREMENTS = new Function(
+    'installer',
+    mainSrc.slice(rAt, mainSrc.indexOf('\n]\n', rAt) + 3) + '\nreturn REQUIREMENTS',
+  )(installer)
+  const hAt = mainSrc.indexOf("ipcMain.handle('env:can-auto-install'")
+  const handler = mainSrc.slice(hAt, mainSrc.indexOf('\n})\n', hAt))
+  const from = handler.indexOf('REQUIREMENTS.filter(')
+  const mapExpr = handler.slice(from, handler.indexOf('\n  }', from)).trim().replace(/,$/, '')
+  const prodPackages = (found) =>
+    new Function('REQUIREMENTS', 'installer', 'found', 'return ' + mapExpr)(REQUIREMENTS, installer, found)
+
+  const sortKeys = (o) => Object.fromEntries(Object.entries(o).sort(([a], [b]) => (a < b ? -1 : 1)))
+  const diff = (got, want) => {
+    if (got.length !== want.length) return `항목 수가 다르다 (스텁 ${got.length} / 앱 ${want.length})`
+    for (let i = 0; i < want.length; i++) {
+      const g = sortKeys(got[i] ?? {})
+      const w = sortKeys(want[i])
+      for (const k of new Set([...Object.keys(g), ...Object.keys(w)])) {
+        if (JSON.stringify(g[k]) !== JSON.stringify(w[k])) {
+          return `${w.key ?? i}.${k}: 스텁 ${JSON.stringify(g[k])} ≠ 앱 ${JSON.stringify(w[k])}`
+        }
+      }
+    }
+    return null
+  }
+
+  // (1) 자동 설치 목록 — winget이 있는 PC
+  {
+    const got = await loadStub('wizard').canAutoInstall()
+    eq('canAutoInstall이 packages를 준다', Array.isArray(got.packages), 'true')
+    const want = prodPackages({ winget: true, version: '1.11.400' })
+    const d = diff(got.packages ?? [], want)
+    d === null
+      ? ok(`설치 목록이 앱이 주는 값과 같다 (${want.length}개, 게시자·id·범위·명령까지)`)
+      : bad('설치 목록 계약', `${d} — 화면이 지어낸 값을 검사가 그대로 통과시키게 된다`)
+  }
+
+  // (2) winget이 막힌 회사 PC. **claude는 공식 스크립트라 여전히 깔 수 있다** —
+  //     available이 항목마다 갈리는지가 여기서 갈린다(전부 false로 두면 결함을 못 잡는다).
+  {
+    const got = await loadStub('wizard-nowinget').canAutoInstall()
+    eq('winget이 없는 갈래는 winget:false', got.winget, 'false')
+    eq('없는 버전을 지어내지 않는다', got.version, 'null')
+    const want = prodPackages({ winget: false, version: null })
+    const d = diff(got.packages ?? [], want)
+    d === null ? ok('winget이 없을 때의 항목별 판정도 앱과 같다') : bad('설치 목록 계약(winget 없음)', d)
+    const can = (k) => (got.packages ?? []).find((p) => p.key === k)?.available
+    eq('winget이 없어도 claude는 깔 수 있다', can('claude'), 'true')
+    eq('winget이 필요한 항목은 못 깐다', `${can('python')}/${can('git')}`, 'false/false')
+  }
+
+  // (3) 준비물 목록 — **앱이 절대 주지 않는 항목을 그리지 않는가.**
+  //     Node는 REQUIREMENTS에서 빠졌다(공식 스크립트가 PowerShell만 쓴다). 스텁에만
+  //     남아 있으면 화면 검사가 있지도 않은 줄을 계속 확인하게 된다.
+  {
+    const cAt = mainSrc.indexOf('async function checkRequirements(')
+    const outKeys = keysOfObject(mainSrc, mainSrc.indexOf('{', mainSrc.indexOf('out.push(', cAt)))
+    const known = new Map(REQUIREMENTS.map((r) => [r.key, r]))
+    for (const scenario of ['normal', 'missing', 'wizard', 'wizard-login']) {
+      const list = await loadStub(scenario).checkRequirements()
+      const strays = list.filter((r) => !known.has(r.key)).map((r) => r.key)
+      const fields = [...new Set(list.flatMap((r) => Object.keys(r)))].sort()
+      const problems = []
+      if (strays.length) problems.push(`앱에 없는 항목: ${strays.join(', ')}`)
+      const extra = fields.filter((f) => !outKeys.includes(f))
+      const gone = outKeys.filter((f) => !fields.includes(f))
+      if (extra.length) problems.push(`지어낸 필드: ${extra.join(', ')}`)
+      if (gone.length) problems.push(`빠뜨린 필드: ${gone.join(', ')}`)
+      for (const r of list) {
+        const real = known.get(r.key)
+        if (!real) continue
+        // 값이 바뀌지 않는 것들은 앱이 주는 그대로여야 한다(화면이 이 문구를 그린다).
+        for (const [k, want] of [
+          ['label', real.label],
+          ['why', real.why],
+          ['url', real.url ?? null],
+          ['optional', Boolean(real.optional)],
+          ['canInstall', Boolean(real.auto)],
+        ]) {
+          if (JSON.stringify(r[k]) !== JSON.stringify(want)) {
+            problems.push(`${r.key}.${k}: 스텁 ${JSON.stringify(r[k])} ≠ 앱 ${JSON.stringify(want)}`)
+          }
+        }
+      }
+      problems.length === 0
+        ? ok(`준비물 목록이 앱과 같다: ${scenario}`)
+        : bad(`준비물 목록 계약(${scenario})`, problems.join(' / '))
+    }
+  }
+}
+
+// ── 18. 검사 스텁이 **없는 계약을 지어내지 않는가** ─────────────────────────
+//
+// 실물 사고: 마법사(renderer/wizard.js)는 상태 이벤트에서 `firstRunDone`을 받길
+// 기다렸는데, 정작 `pumpStatusAll`의 payload에는 그 필드가 **없었다.** 저장소에서
+// 그 필드를 status에 싣는 곳은 검사 스텁(tools/ui-stub.js) 하나뿐이었다 —
+// **검사 스텁이 프로덕션에 없는 계약을 지어내서** 화면 검사(check-ui)를 통과시켰다.
+// 화면은 초록불인데 실물은 배선이 끊겨 있던 것이다.
+//
+// 그래서 여기서 **두 payload의 필드 집합을 맞대 본다.** 스텁이 지어내도 잡히고,
+// 프로덕션이 새 필드를 늘렸는데 스텁이 안 따라와도 잡힌다.
+function statusContractChecks() {
+  console.log('\n상태 payload 계약 (프로덕션 ↔ 검사 스텁)')
+  const mainSrc = fs.readFileSync(path.join(ROOT, 'main.js'), 'utf8').replace(/\r\n/g, '\n')
+  const stubSrc = fs.readFileSync(path.join(ROOT, 'tools', 'ui-stub.js'), 'utf8').replace(/\r\n/g, '\n')
+
+  const mainKeys = keysOfObject(
+    mainSrc,
+    mainSrc.indexOf('{', mainSrc.indexOf('const payload = {', mainSrc.indexOf('function pumpStatusAll('))),
+  )
+  const stubKeys = keysOfObject(stubSrc, stubSrc.indexOf('{', stubSrc.indexOf('cb(', stubSrc.indexOf('onStatus:'))))
+
+  if (mainKeys.length < 3 || stubKeys.length < 3) {
+    bad('상태 payload를 읽지 못했다', `main ${mainKeys.length}개 / stub ${stubKeys.length}개`)
+  } else {
+    const only = (a, b) => a.filter((k) => !b.includes(k))
+    const invented = only(stubKeys, mainKeys)
+    const missing = only(mainKeys, stubKeys)
+    invented.length === 0
+      ? ok(`스텁이 없는 필드를 지어내지 않는다 (${stubKeys.length}개)`)
+      : bad('지어낸 계약', `스텁에만 있다: ${invented.join(', ')} — 화면 검사만 통과하고 실물은 끊긴다`)
+    missing.length === 0
+      ? ok('스텁이 실제 필드를 빠뜨리지 않는다')
+      : bad('빠진 계약', `프로덕션에만 있다: ${missing.join(', ')} — 그 갈래는 화면에서 한 번도 안 그려진다`)
+  }
+
+  // 이번 사고의 본체. 셋이 다 있어야 배선이 산다.
+  eq('상태에 firstRunDone이 실린다', mainKeys.includes('firstRunDone'), 'true')
+  eq('그 값은 설정에서 온다', /firstRunDone: Boolean\(cfg\.firstRunDone\)/.test(mainSrc), 'true')
+  const wiz = fs.readFileSync(path.join(ROOT, 'renderer', 'wizard.js'), 'utf8')
+  eq('화면이 그 값을 실제로 읽는다', /firstRunDone/.test(wiz), 'true')
+  // 표시를 남기는 쪽도 같은 키여야 한다(wizard:done이 config에 적는 그 키다).
+  eq('마법사를 끝내면 그 키를 적는다', /saveConfig\(\{ \.\.\.loadConfig\(\), firstRunDone: true \}\)/.test(mainSrc), 'true')
+}
+
 // ── 정리 ───────────────────────────────────────────────────────────────────
 // 계정 검사는 비동기(명령 실행·감시 흐름)라 끝난 뒤에 정리한다.
+statusContractChecks()
 terminalChecks()
 accountChecks()
   .catch((e) => bad('계정 검사가 던졌다', e && e.message))
+  .then(() => installChecks())
+  .catch((e) => bad('설치 검사가 던졌다', (e && e.stack) || (e && e.message)))
+  .then(() => ipcContractChecks())
+  .catch((e) => bad('IPC 계약 검사가 던졌다', (e && e.stack) || (e && e.message)))
   .then(() => {
     fs.rmSync(LAB, { recursive: true, force: true })
     if (failed) {
