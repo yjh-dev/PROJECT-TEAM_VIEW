@@ -1,0 +1,105 @@
+# 자동 검사 — 사람 리뷰가 없는 자리를 대신한다.
+#
+# 이 저장소는 1인 저장소라 PR을 봐 주는 사람이 없다. 규칙(.claude/rules/git-workflow.md)은
+# 그런 경우 **CI 통과를 게이트로 삼으라**고 정해 두었다. 여기가 그 게이트다.
+#
+# ── 여기서 도는 것 ──────────────────────────────────────────────────────────
+#   참조·동선  tools/check-refs.js · tools/check-nav.js   (수 초)
+#   로직      tools/check-logic.js                        (개발 PC 기준 46초)
+#
+# ── 여기서 **일부러 뺀** 것 ─────────────────────────────────────────────────
+#   화면      tools/check-ui.js  →  .github/workflows/ui-check.yml 로 옮겼다(수동 실행).
+#             Electron을 36번 띄우고 **글자 폭을 재서** 잘림·겹침을 판정하는 검사인데,
+#             renderer/styles.css가 첫 글꼴로 "Malgun Gothic"(한글)을 쓴다. GitHub
+#             러너(Windows Server) 이미지에 그 글꼴이 있는지 확인하지 못했다. 없으면
+#             글자 폭이 통째로 달라져 **코드가 멀쩡해도 빨간불**이 된다. 상시 빨간 CI는
+#             게이트가 아니라 소음이라, 게이트에서 빼고 수동 워크플로로 남겼다.
+#             (자세한 사정은 ui-check.yml 주석)
+#
+# ── 의존성을 설치하지 않는 이유 ─────────────────────────────────────────────
+#   여기 도는 세 검사는 node_modules가 **하나도 필요 없다.** node_modules를 지운 사본에서
+#   셋 다 통과하는 것을 확인했다(참조/동선 즉시, 로직 46초). check-logic은 tools/ui-stub.js를
+#   불러오지만 그 안의 require('electron')을 Module._load로 가로채 가짜를 끼우므로
+#   electron 실물(약 100MB)도 필요 없다. 그래서 설치·캐시 단계 자체가 없다 — 매 실행이
+#   내려받기 0바이트로 끝난다. (설치가 필요한 화면 검사 쪽에만 캐시를 뒀다.)
+name: 검사
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+# 검사는 저장소를 읽기만 한다. 그 이상은 주지 않는다.
+permissions:
+  contents: read
+
+# 같은 브랜치에 연달아 밀면 앞의 실행은 취소한다(뒤엣것이 정답이다).
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 빠른 검사 — 여기서 걸리면 화면이 통째로 안 뜨거나 방 하나가 고립된다.
+  refs-nav:
+    name: 참조·동선
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          # 개발 PC와 같은 버전으로 고정한다. 올릴 때는 두 곳을 같이 올린다.
+          node-version: '22.14.0'
+
+      # 렌더러 모듈의 끊긴 참조·문법 오류, 그리고 **설치본에서 빠지는 파일**을 잡는다.
+      - name: 참조 검사
+        run: node tools/check-refs.js
+
+      # 가구가 통로를 막아 자리가 고립되지 않았는지. renderer 모듈을 실제로 불러온다.
+      - name: 동선 검사
+        run: node --no-warnings tools/check-nav.js
+
+  # 로직 검사 — main.js/install.js에서 함수를 떼어 실제로 돌려 본다.
+  #
+  # 러너에서 이 검사가 쓰는 것들(전부 windows-latest 이미지에 기본으로 있다):
+  #   git         임시 저장소를 만들어 스냅샷·되돌리기를 시험한다(사용자 저장소는 안 건드린다)
+  #   powershell  HKCU\Environment의 PATH를 **읽는다.** 쓰기는 이미 등록된 경로를 다시
+  #               넣어 보는 경로뿐이라 실제로는 아무것도 안 쓴다(ALREADY로 끝난다).
+  #   python      hooks/team_events.py 사본을 임시 폴더에서 돌려 기록이 남는지 본다.
+  #               훅은 표준 라이브러리만 쓴다(json/os/re/sys/time). python이 없으면
+  #               검사가 스스로 "건너뛴다"고 알리고 넘어간다.
+  #   tasklist/taskkill/ping  시간 초과 시 손자 프로세스까지 죽는지 확인한다.
+  #               자기가 띄운 ping만 대상이고, pid로만 죽인다(창 제목으로 찾지 않는다).
+  #
+  # `claude` CLI는 러너에 없다. 검사는 그 갈래를 스스로 건너뛴다(빈 출력 → loggedIn:false).
+  # **로그인·토큰이 필요한 단계는 하나도 없다.** 전부 이 러너 안에서 끝난다.
+  logic:
+    name: 로직
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.14.0'
+
+      # 러너에 python이 있는지 로그에 남긴다. 없으면 위 훅 갈래가 조용히 빠지므로,
+      # "통과"의 의미가 달라진 것을 나중에 알아볼 수 있어야 한다.
+      - name: 환경 기록 (python 유무)
+        # 명령이 없을 때의 동작이 셸마다 달라서 bash로 못 박는다(러너에 기본으로 있다).
+        shell: bash
+        run: |
+          node --version
+          git --version
+          python --version 2>&1 || echo "python 없음 — 훅 갈래는 건너뛴다"
+        continue-on-error: true
+
+      - name: 로직 검사
+        run: node tools/check-logic.js

@@ -1,0 +1,81 @@
+# 화면 검사 — **수동 실행 전용.** 게이트가 아니다.
+#
+# 왜 자동(push/PR)에서 뺐나:
+#
+#   tools/check-ui.js는 Electron을 36번 띄워(show:false, 하드웨어 가속 끔) 화면을 재고,
+#   잘림·겹침·손닿는 크기를 판정한다. 재는 값이 **글자 폭**이라 글꼴이 바뀌면 결과가
+#   바뀐다. renderer/styles.css의 첫 글꼴은 "Malgun Gothic"(한글)이다.
+#   GitHub 러너(Windows Server) 이미지에 그 글꼴이 있는지 **확인하지 못했다.**
+#   없으면 다른 글꼴로 대체되면서 코드가 멀쩡해도 잘림·겹침이 무더기로 뜬다.
+#   게다가 갈래마다 고정 대기(2.6초 등) 뒤에 재기 때문에, 소프트웨어 렌더링이 느린
+#   러너에서는 **아직 안 그려진 화면**을 재서 실패할 수 있다.
+#
+#   상시 빨간 CI는 게이트가 아니라 소음이다. 그래서 자동 게이트(checks.yml)에서 빼고,
+#   여기서 **눌러서 돌려 볼 수 있게** 남겼다. 실패해도 커밋에 빨간 X가 붙지 않는다.
+#
+# 한 번 돌려서 초록이 나오면 그때 checks.yml로 옮기면 된다. 판단 근거는 로그다:
+#   - "잘림"이 여러 갈래에서 한꺼번에 나오면 글꼴 문제일 가능성이 크다.
+#     (러너에서 `[System.Drawing.Text.InstalledFontCollection]::new().Families` 로 확인)
+#   - "결과를 받지 못했습니다"가 나오면 Electron이 러너에서 아예 못 뜬 것이다.
+#   - 특정 갈래만 산발적으로 실패하면 대기 시간(렌더 속도) 문제다.
+name: 화면 검사 (수동)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ui-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ui:
+    name: 화면 (Electron)
+    runs-on: windows-latest
+    # 개발 PC에서 36갈래에 2분 43초(실측). 러너는 소프트웨어 렌더링이라 더 걸린다고 보고
+    # 넉넉히 잡는다. 갈래마다 60초 자체 제한(ui-audit.js의 bail)이 있어 매달리지는 않는다.
+    timeout-minutes: 30
+    env:
+      # electron 내려받기 캐시를 워크스페이스 안으로 못 박는다(경로가 정해져야 캐시가 산다).
+      ELECTRON_CACHE: ${{ github.workspace }}\.cache\electron
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # 개발 PC와 같은 pnpm. package.json에 packageManager 필드가 없어 여기서 고정한다.
+      # (더 나은 길: package.json에 "packageManager": "pnpm@11.17.0"을 넣고 이 줄을 지우는 것.
+      #  이번 작업은 .github/ 밖을 건드리지 않기로 해서 손대지 않았다.)
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.17.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.14.0'
+          # pnpm store 캐시(setup-node가 알아서 잡아 준다). 매번 받지 않게 한다.
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      # electron 실행파일(약 100MB)은 postinstall이 따로 내려받는다. 별도로 캐시한다.
+      - name: electron 캐시
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}\.cache\electron
+          key: electron-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+
+      # 잠금 파일 그대로 설치한다(재현 가능). electron의 postinstall은 pnpm-workspace.yaml의
+      # allowBuilds로 허용돼 있고, 이것이 실제로 실행파일을 만드는 것을 확인했다.
+      - name: 의존성 설치
+        run: pnpm install --frozen-lockfile
+
+      # 실행파일이 없으면 화면 검사는 36갈래 모두 "결과를 받지 못했습니다"로 끝난다.
+      # 그 전에 무엇이 잘못됐는지 분명히 말하고 멈춘다.
+      - name: electron 실행파일 확인
+        run: |
+          node -e "const p=require('electron'); const fs=require('fs'); if(!fs.existsSync(p)) { console.error('electron 실행파일이 없습니다: '+p+' — postinstall(allowBuilds)이 돌지 않았습니다'); process.exit(1) } console.log('electron: '+p)"
+
+      - name: 화면 검사
+        run: node tools/check-ui.js
