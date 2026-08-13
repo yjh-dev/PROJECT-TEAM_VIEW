@@ -3303,6 +3303,217 @@ function sessionChecks() {
   delete global.__cfg
 }
 
+// ── 21. 한도에 걸린 뒤 대기 지시가 줄줄이 죽지 않는가 ──────────────────────
+//
+// 실측: 지시 5건을 넣어 둔 채 한도에 걸리자 **5건이 연달아 실패**했다. 자동 재시도는
+// 없는데(위 20번에서 못 박았다) 실패 직후 `pumpQueue`가 1초 뒤 다음 지시를 집었고,
+// 그것도 같은 벽에 부딪혔기 때문이다. 여기서 보는 것들은 전부 "틀려도 조용한" 자리다:
+//
+//   붙잡기   기다리면 풀리는 실패(wait)에만 홀드가 걸리는가 · 손볼 실패에는 안 걸리는가
+//   보존     홀드 중에 집지 않는가 · **큐에서 지우지 않는가**(기다리는 것이지 취소가 아니다)
+//   이어짐   풀린 뒤 맨 앞 지시부터 그대로 이어 도는가
+//   시각     문구에 시각이 없어도 `until`이 실제 값인가 · 잘못 읽어도 하루를 넘기지 않는가
+//   범위     붙잡힌 회사만 멈추는가(다른 프로젝트는 계속 돌아야 한다)
+function holdChecks() {
+  console.log('\n한도 홀드')
+  const mainSrc = fs.readFileSync(path.join(ROOT, 'main.js'), 'utf8').replace(/\r\n/g, '\n')
+  /** main.js의 한 줄짜리 const를 그대로. 검사가 값을 지어내면 앱이 바뀌어도 초록불이다. */
+  const oneLine = (name) => {
+    const m = new RegExp(`^const ${name} = .*$`, 'm').exec(mainSrc)
+    if (!m) throw new Error(`main.js에서 상수 ${name}을 찾지 못했습니다`)
+    return m[0]
+  }
+  const block = (head, end = '\n}\n') => {
+    const i = mainSrc.indexOf(head)
+    if (i < 0) throw new Error(`main.js에서 ${head}를 찾지 못했습니다`)
+    return mainSrc.slice(i, mainSrc.indexOf(end, i) + end.length)
+  }
+  const valueOf = (name) => new Function(oneLine(name) + `; return ${name}`)()
+
+  // **원본 함수 그대로 돌린다.** 가짜를 끼우는 곳은 `runCommand` 하나뿐이다 —
+  // 실제로 claude를 띄우는 자리이고, 이 검사가 보려는 것은 "집었는가 아닌가"다.
+  const H = loadFrom(
+    'main.js',
+    [
+      'tzOffsetMinutes',
+      'isoWithOffset',
+      'resetAtFrom',
+      'resetTimeFrom',
+      'failureFromOutput',
+      'holdFor',
+      'noteHold',
+      'holdActive',
+      'holdInfo',
+      'clearHold',
+      'flagAge',
+      'takeOneCommand',
+      'pumpQueue',
+    ],
+    [
+      "const fs = require('fs')",
+      "const path = require('path')",
+      oneLine('CANCEL_NAME'),
+      oneLine('COMMANDS_NAME'),
+      oneLine('CANCEL_TTL_S'),
+      oneLine('queueHolds'),
+      oneLine('HOLD_DEFAULT_MS'),
+      oneLine('HOLD_MAX_MS'),
+      block('const FAILURE_KINDS = [', '\n]\n'),
+      oneLine('CLI_ERROR_LINE'),
+      oneLine('CLI_LIMIT_LINE'),
+      'global.__ran = []',
+      'function runCommand(c, cmd) { global.__ran.push(cmd) }',
+      '',
+    ].join('\n'),
+  )
+
+  const KINDS = new Function(block('const FAILURE_KINDS = [', '\n]\n') + '; return FAILURE_KINDS')()
+  const HOLD_DEFAULT_MS = valueOf('HOLD_DEFAULT_MS')
+  const HOLD_MAX_MS = valueOf('HOLD_MAX_MS')
+  const QUEUE_FILE = valueOf('COMMANDS_NAME')
+
+  const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'tv-hold-'))
+  const A = path.join(HOME, 'alpha') // 한도에 걸리는 회사
+  const B = path.join(HOME, 'beta') // 멀쩡한 옆 회사
+  const qPath = (dir) => path.join(dir, '.claude', QUEUE_FILE)
+  const queue = (dir, n) => {
+    fs.mkdirSync(path.dirname(qPath(dir)), { recursive: true })
+    const lines = []
+    for (let i = 1; i <= n; i++) lines.push(JSON.stringify({ ts: i, agent: 'lead', text: `지시${i}`, status: 'pending' }))
+    fs.writeFileSync(qPath(dir), lines.join('\n') + '\n', 'utf8')
+  }
+  const left = (dir) => {
+    try {
+      return fs.readFileSync(qPath(dir), 'utf8').split(/\r?\n/).filter((l) => l.trim()).length
+    } catch {
+      return 0
+    }
+  }
+  /** 그 시각인 척하고 한 번 돌린다. `pumpQueue`는 안에서 `Date.now()`를 본다. */
+  const at = (ms, fn) => {
+    const real = Date.now
+    Date.now = () => ms
+    try {
+      return fn()
+    } finally {
+      Date.now = real
+    }
+  }
+  const took = () => {
+    const r = global.__ran
+    global.__ran = []
+    return r
+  }
+  // **사유도 지어내지 않는다.** 실측으로 받은 CLI 줄을 원본 판별기에 그대로 넣는다.
+  const why = (line) => H.failureFromOutput(line, { trusted: true })
+
+  const NOW = Date.parse('2026-08-13T15:00:00+09:00')
+  const LIMIT = "You've hit your session limit · resets 6:50pm (Asia/Seoul)"
+  const RESET_ISO = new Date(Date.parse('2026-08-13T18:50:00+09:00')).toISOString()
+
+  // ── 21-1. wait 실패에만 홀드가 걸린다 ────────────────────────────────────
+  const wLimit = why(LIMIT)
+  eq('한도 문구가 기다릴 실패로 읽힌다', wLimit && wLimit.wait, 'true')
+  H.noteHold(A, wLimit, NOW)
+  const h1 = H.holdInfo(A, NOW)
+  h1 ? ok('한도에 걸리면 그 회사를 붙잡는다') : bad('홀드', '한도 실패인데 홀드가 안 걸렸다 — 다음 지시가 곧바로 같은 벽에 부딪힌다')
+  if (h1) {
+    eq('이유는 FAILURE_KINDS의 라벨 그대로다', h1.reason, '토큰 사용량 한도')
+    eq('지어낸 문구가 아니다', KINDS.some((k) => k.label === h1.reason), 'true')
+    eq('풀리는 시각은 문구에서 읽은 그 시각이다', h1.until, RESET_ISO)
+    eq('until은 ISO 문자열이다', /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(h1.until), 'true')
+    eq('홀드 계약은 until·reason 둘뿐이다', Object.keys(h1).sort().join(','), 'reason,until')
+  }
+  H.clearHold(A)
+  eq('서버 혼잡도 기다리면 풀린다 — 붙잡는다', H.noteHold(A, why('Error: Overloaded (529)'), NOW)?.reason, '서버 혼잡')
+  H.clearHold(A)
+
+  // 손봐야 하는 실패는 붙잡지 않는다. 기다린다고 풀리지 않으므로 멈춰 있어 봐야
+  // 사용자만 기다린다.
+  eq('로그인 만료는 홀드하지 않는다', H.noteHold(A, why('Error: 401 unauthorized'), NOW), 'null')
+  eq('결제 문제도 홀드하지 않는다', H.noteHold(A, why('Error: insufficient credit balance'), NOW), 'null')
+  eq(
+    '사유를 못 찾은 코드 오류도 홀드하지 않는다',
+    H.noteHold(A, { wait: false, label: null, message: '실행이 코드 1로 끝났습니다.' }, NOW),
+    'null',
+  )
+  // 아는 실패가 아니면(라벨이 없으면) 홀드도 없다 — 화면에 적을 이유를 지어내게 된다.
+  eq('라벨 없는 실패는 붙잡지 않는다', H.noteHold(A, { wait: true, label: null, message: '알 수 없음' }, NOW), 'null')
+  eq('붙잡지 않았으면 상태에도 없다', H.holdInfo(A, NOW), 'null')
+
+  // ── 21-2. 홀드 중에는 집지 않고, 큐도 그대로 둔다 ────────────────────────
+  queue(A, 5) // 실측 사고와 같은 상황: 대기 5건
+  H.noteHold(A, wLimit, NOW)
+  const cA = { dir: A, child: null }
+  for (let i = 0; i < 3; i++) at(NOW + i * 1000, () => H.pumpQueue(cA)) // 1초 폴을 세 번
+  eq('홀드 중에는 지시를 집지 않는다', took().length, 0)
+  eq('그래도 큐에서 지우지 않는다 (기다리는 것이지 취소가 아니다)', left(A), 5)
+
+  // ── 21-3. 붙잡힌 회사만 멈춘다 ───────────────────────────────────────────
+  // 옆 회사가 **이미 다른 이유로** 붙잡혀 있을 때 A의 홀드가 그걸 덮어쓰면, 화면에는
+  // 겪지도 않은 이유와 시각이 뜬다. 회사들은 서로를 모른다 — 홀드도 그래야 한다.
+  H.noteHold(B, why('Error: Overloaded (529)'), NOW)
+  H.noteHold(A, wLimit, NOW)
+  eq('한 회사의 홀드가 옆 회사 것을 덮지 않는다', H.holdInfo(B, NOW)?.reason, '서버 혼잡')
+  eq('한 번도 안 걸린 회사는 붙잡히지 않는다', H.holdActive(path.join(HOME, 'gamma'), NOW), 'false')
+  H.clearHold(B)
+  queue(B, 2)
+  at(NOW, () => H.pumpQueue({ dir: B, child: null }))
+  eq('다른 프로젝트는 계속 돈다', took().length, 1)
+  eq('옆 회사의 큐는 정상으로 줄어든다', left(B), 1)
+  eq('옆 회사에는 홀드가 없다', H.holdInfo(B, NOW), 'null')
+
+  // ── 21-4. 풀리면 그대로 이어서 돈다 ──────────────────────────────────────
+  const after = Date.parse(RESET_ISO) + 1000
+  at(after, () => H.pumpQueue(cA))
+  const ran = took()
+  eq('홀드가 풀리면 이어서 돈다', ran.length, 1)
+  eq('맨 앞 지시부터 이어 간다 (버려지지 않았다)', ran[0]?.text, '지시1')
+  eq('나머지는 그대로 큐에 남는다', left(A), 4)
+  eq('풀린 홀드는 상태에서 사라진다', H.holdInfo(A, after), 'null')
+
+  // ── 21-5. 풀리는 시각을 못 읽었을 때 ─────────────────────────────────────
+  // `API Error: 429 Too Many Requests`에는 시각이 없다. **그래도 `until`은 실제 값이어야
+  // 한다** — 화면이 "언제 이어지는지"를 그 값 하나로 그린다.
+  H.clearHold(A)
+  const wNoTime = why('API Error: 429 Too Many Requests')
+  eq('시각 없는 한도 문구도 기다릴 실패다', wNoTime && wNoTime.wait, 'true')
+  eq('풀리는 시각을 못 읽으면 null이다', H.resetAtFrom(wNoTime.message, NOW), 'null')
+  H.noteHold(A, wNoTime, NOW)
+  const h2 = H.holdInfo(A, NOW)
+  eq('그래도 홀드는 걸린다', Boolean(h2), 'true')
+  eq('기본 대기가 붙는다', h2 && h2.until, new Date(NOW + HOLD_DEFAULT_MS).toISOString())
+  eq('until에 null을 싣지 않는다', h2 && Number.isFinite(Date.parse(h2.until)), 'true')
+  eq('기본 대기는 몇 분 수준이다', HOLD_DEFAULT_MS <= 15 * 60_000 && HOLD_DEFAULT_MS >= 60_000, 'true')
+
+  // ── 21-6. 시각을 잘못 읽어도 하루를 통째로 세우지 않는다 ─────────────────
+  // 문구에는 날짜가 없어서(`resets 11pm`) 시간대를 한 번 잘못 읽으면 홀드가 24시간이
+  // 된다. 그날 하루 앱은 죽은 것처럼 보인다.
+  H.clearHold(A)
+  H.noteHold(A, why("You've hit your session limit · resets 11pm (Asia/Seoul)"), NOW)
+  eq('홀드에 상한이 있다', H.holdInfo(A, NOW).until, new Date(NOW + HOLD_MAX_MS).toISOString())
+
+  // 짧은 기본 대기가 문구에서 읽어 낸 정확한 시각을 덮으면 그만큼 일찍 다시 부딪힌다.
+  H.clearHold(A)
+  H.noteHold(A, wLimit, NOW)
+  H.noteHold(A, wNoTime, NOW)
+  eq('나중의 짧은 대기가 정확한 시각을 덮지 않는다', H.holdInfo(A, NOW).until, RESET_ISO)
+
+  // ── 21-7. 배선 — 신호가 화면까지 이어지는가 ──────────────────────────────
+  const pumpSrc = block('function pumpQueue(')
+  eq('pumpQueue가 집기 전에 홀드를 본다', pumpSrc.indexOf('holdActive(') < pumpSrc.indexOf('takeOneCommand('), 'true')
+  eq('홀드 때문에 큐를 지우지 않는다', /unlinkSync\(qf\)|clearQueue/.test(pumpSrc), 'false')
+  const runSrc = block('function runCommand(')
+  eq('실패 처리가 홀드를 건다', runSrc.slice(runSrc.indexOf('const finishExit')).includes('noteHold('), 'true')
+  // 상태 payload — 프론트에 준 계약이 실제로 실리는 자리다.
+  eq('상태의 프로젝트마다 hold가 실린다', /\n\s*hold: holdInfo\(dir\),/.test(mainSrc), 'true')
+  eq('취소는 기다릴 일 자체를 없앤다', /clearHold\(projectDir\)/.test(mainSrc), 'true')
+  eq('프로젝트를 떼면 홀드도 지운다', block('function closeCompany(').includes('clearHold(dir)'), 'true')
+
+  fs.rmSync(HOME, { recursive: true, force: true })
+  delete global.__ran
+}
+
 // main.js가 정한 값을 그대로 쓴다(검사가 지어낸 값으로 돌면 의미가 없다).
 const usageConst = (name) =>
   Number(
@@ -3317,6 +3528,7 @@ const USAGE_WEEK_DAYS_VALUE = usageConst('USAGE_WEEK_DAYS')
 // ── 정리 ───────────────────────────────────────────────────────────────────
 // 계정 검사는 비동기(명령 실행·감시 흐름)라 끝난 뒤에 정리한다.
 statusContractChecks()
+holdChecks()
 terminalChecks()
 accountChecks()
   .catch((e) => bad('계정 검사가 던졌다', e && e.message))

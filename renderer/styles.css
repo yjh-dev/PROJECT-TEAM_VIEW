@@ -1138,6 +1138,41 @@ body.resizing * {
   color: #e0af68;
 }
 
+/* 한도로 큐가 붙잡힌 동안의 안내. 입력창 **바로 위**에 둔다 — 다시 지시를 적으려는
+   손이 지나가는 자리라, 여기 없으면 아무도 못 본다.
+   색은 다른 안내(#env·한도 기록)와 같은 계열로 맞춘다. 빨강은 고장 신호라 쓰지
+   않는다 — 이것은 고장이 아니라 **기다리는 중**이다. */
+#hold {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  background: rgba(224, 175, 104, 0.12);
+  border: 1px solid rgba(224, 175, 104, 0.3);
+  border-radius: 6px;
+  overflow-wrap: anywhere; /* 이유·시각은 남이 정한 길이라 좁은 채팅 폭에서 넘칠 수 있다 */
+}
+
+/* display를 준 요소에는 [hidden]이 안 먹는다 — 이 함정으로 세 번 당했다. */
+#hold[hidden] {
+  display: none;
+}
+
+#hold p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #e0af68;
+}
+
+/* 왜 멈췄는지가 첫 줄이다. 나머지 두 줄보다 먼저 읽혀야 한다. */
+#hold-why {
+  font-weight: 700;
+  color: #f0c68a;
+}
+
+#hold p + p {
+  margin-top: 4px;
+}
+
 /* `⚠`·`▶`·`■` 같은 글리프는 줄상자를 키운다 — 이 버튼들만 39px이 되어 상단바 전체가
    5px 높아졌다(실측: 다른 버튼 34px). 줄높이를 고정해 키를 맞춘다. */
 #gitinit,

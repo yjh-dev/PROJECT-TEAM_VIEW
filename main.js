@@ -1943,6 +1943,10 @@ function pumpStatusAll({ force = false } = {}) {
     queued: pendingCount(dir),
     health: projectHealth(dir),
     run: runState(dir),
+    // 대기 중인 지시가 왜 안 도는지. `{ until: ISO, reason: FAILURE_KINDS의 label }`
+    // 또는 null. 이게 없으면 화면에는 "대기 N건"만 뜬 채 아무 일도 안 일어나고,
+    // 사용자는 앱이 멈춘 줄 안다(한도가 풀리길 기다리는 중일 뿐인데).
+    hold: holdInfo(dir),
   }))
   // 기억해 둔 채팅 폭을 같이 보낸다. 화면이 처음 뜰 때 지난번 폭으로 맞춘다.
   const cfg = loadConfig()
@@ -4346,6 +4350,88 @@ function limitHitFrom(why, now) {
   return { at: new Date(now).toISOString(), resetAt: resetAtFrom(message, now) }
 }
 
+// ---------------------------------------------------------------------------
+// 한도에 걸린 회사의 대기열을 붙잡아 둔다
+//
+// 자동 재시도는 없다 — 실패한 지시는 큐로 돌아가지 않는다. 그런데 실패한 **직후**
+// `pumpQueue`가 1초 뒤 다음 지시를 집었고, 그것도 같은 한도에 부딪혔다. 실측:
+// 지시 5건을 넣어 둔 채 한도에 걸리자 **5건이 연달아 실패**했다(이 세션에서만 두 번).
+// 사용자에게 남는 것은 "지시 실패" 다섯 줄이고 시킨 일은 하나도 남지 않는다.
+//
+// `FAILURE_KINDS`의 `wait`가 이미 "손댈 것 없이 기다리면 풀리는 실패"를 가려 준다.
+// 그런 실패면 **집는 것을 잠시 멈춘다.** 큐에서 지우지는 않는다 — 기다리는 것이지
+// 취소가 아니다. 홀드가 풀리면 다음 폴에서 그대로 이어서 돈다.
+//
+// 홀드는 **그 회사에만** 건다. 토큰 한도는 실은 계정 단위라 다른 프로젝트도 같이
+// 걸릴 공산이 크지만, 그건 부딪혀 봐야 아는 일이고 여기서 지레 막으면 멀쩡한
+// 프로젝트까지 세운다. 회사들은 서로를 모른다는 이 앱의 원칙도 그대로 지킨다.
+const queueHolds = new Map() // dir -> { until(ms), reason }
+
+// 풀리는 시각을 문구에서 못 읽었을 때의 기본 대기.
+//
+// `API Error: 429 Too Many Requests`처럼 시각이 없는 문구도 온다. 그때는 얼마나
+// 남았는지 알 방법이 없다 — **모르는 시각을 지어내는 대신 짧게 잡고 한 번 더
+// 부딪혀 본다.** 길게 잡으면 이미 풀린 한도에 앱이 묶인 채로 남고(사용자는 멈춘
+// 줄 안다), 짧게 잡아 봐야 손해는 헛시도 한 번이다. 한도에 걸린 실행은 몇 초 만에
+// 끝나고 토큰도 쓰지 않는다. 5분이면 "5건이 줄줄이 실패"가 "최악의 경우 5분에 한 건"이
+// 되고, 그 한 번이 새 문구를 물어 오면 거기 적힌 시각으로 홀드가 정확해진다.
+const HOLD_DEFAULT_MS = 5 * 60_000
+// 홀드의 최대치.
+//
+// `resetAtFrom`은 날짜 없는 벽시계 시각("resets 11pm")을 오늘/내일에 얹는다. 시간대나
+// am/pm을 한 번 잘못 읽으면 **24시간짜리 홀드**가 걸리고, 그날 하루 앱은 죽은 것처럼
+// 보인다. 세션 한도 창은 5시간이라 그보다 한참 먼 시각은 우리가 잘못 읽은 쪽이다.
+// 6시간에서 끊고, 그 뒤에는 한 번 더 부딪혀 정확한 시각을 다시 받는다.
+const HOLD_MAX_MS = 6 * 60 * 60_000
+
+/**
+ * 이 실패로 큐를 붙잡아야 하는가. 붙잡아야 하면 `{ until(ms), reason }`, 아니면 null.
+ *
+ * `until`은 **언제나 실제 값**이다 — 모르면 null을 싣는 게 아니라 기본 대기를 쓴다.
+ * `reason`은 `FAILURE_KINDS`의 `label` 그대로다. 라벨이 없으면 우리가 아는 실패가
+ * 아니라는 뜻이므로 홀드도 걸지 않는다(문구를 지어내지 않는다).
+ */
+function holdFor(why, now) {
+  if (!why || !why.wait || !why.label) return null
+  const iso = resetAtFrom(why.message, now)
+  const at = iso ? Date.parse(iso) : NaN
+  const until = Number.isFinite(at) && at > now ? Math.min(at, now + HOLD_MAX_MS) : now + HOLD_DEFAULT_MS
+  return { until, reason: why.label }
+}
+
+/** 실패 하나를 보고 필요하면 그 회사를 붙잡는다. 건 홀드(또는 이미 걸려 있던 것), 없으면 null. */
+function noteHold(dir, why, now = Date.now()) {
+  const hold = holdFor(why, now)
+  if (!hold) return null
+  // 이미 걸린 홀드가 더 멀면 그대로 둔다 — 짧은 기본 대기가 문구에서 읽어 낸
+  // 정확한 시각을 덮어쓰면 그만큼 일찍 다시 부딪힌다.
+  const prev = queueHolds.get(dir)
+  if (prev && prev.until > hold.until) return prev
+  queueHolds.set(dir, hold)
+  return hold
+}
+
+/** 지금 이 회사가 붙잡혀 있는가. 시간이 지났으면 그 자리에서 푼다. */
+function holdActive(dir, now = Date.now()) {
+  const h = queueHolds.get(dir)
+  if (!h) return false
+  if (h.until > now) return true
+  queueHolds.delete(dir)
+  return false
+}
+
+/** 화면에 실을 모양: `{ until: ISO 문자열, reason: FAILURE_KINDS의 label }` 또는 null. */
+function holdInfo(dir, now = Date.now()) {
+  if (!holdActive(dir, now)) return null
+  const h = queueHolds.get(dir)
+  return { until: new Date(h.until).toISOString(), reason: h.reason }
+}
+
+/** 붙잡아 둔 것을 푼다. 취소처럼 **기다릴 일 자체가 없어졌을 때**만 부른다. */
+function clearHold(dir) {
+  queueHolds.delete(dir)
+}
+
 /**
  * 이번 실행이 실패했는가, 실패했다면 왜인가. 성공이면 `null`.
  *
@@ -4687,15 +4773,24 @@ function runCommand(c, cmd) {
       const why = failureFor(dir, sid, startedAt, code, output)
       // 한도에 걸린 사실과 풀리는 시각을 남긴다. 사용량 화면이 이걸 보여 준다.
       lastLimitHit = limitHitFrom(why, Date.now()) || lastLimitHit
+      // **기다리면 풀리는 실패면 이 회사의 큐를 붙잡는다.** 안 그러면 1초 뒤 폴이
+      // 다음 지시를 집어 같은 벽에 부딪힌다(실측: 대기 5건이 연달아 실패).
+      const held = noteHold(dir, why, Date.now())
       // **기다리면 되는 것은 실패라고 적지 않는다.** 실측(08-02 08:13:58):
       //     회사 실행이 코드 1로 끝남 (daily)
       //         토큰 사용량 한도: You've hit your session limit · resets 6:50pm (Asia/Seoul)
       // 사유는 바로 아랫줄에 있는데 결과는 `코드 1` — 고쳐야 할 실패와 똑같이 보인다.
       // 한도는 손댈 것이 없고 풀릴 때까지 기다리면 되는 일이다. 줄부터 다르게 적는다.
       if (why?.wait) {
+        const waiting = pendingCount(dir)
         logRenderer(
           `회사 실행이 한도에 걸려 멈춤 (${path.basename(dir)}) — ${why.label}` +
-            (why.resetAt ? ` · ${why.resetAt} 풀림` : ''),
+            (why.resetAt ? ` · ${why.resetAt} 풀림` : '') +
+            // 붙잡아 둔 사실도 남긴다. 이게 없으면 "지시가 대기 중인데 아무 일도
+            // 안 일어난다"가 로그만 봐서는 멈춘 것과 구별되지 않는다.
+            (held
+              ? ` · 대기 ${waiting}건은 ${new Date(held.until).toLocaleTimeString()}까지 붙잡아 둡니다`
+              : ''),
           '지시',
         )
       } else {
@@ -4809,6 +4904,9 @@ const CANCEL_TTL_S = 300
 /** 그 회사의 대기열을 한 번 들여다본다. 회사는 **한 번에 한 건만** 처리한다. */
 function pumpQueue(c) {
   if (!c || c.child) return
+  // 한도·혼잡으로 붙잡아 둔 동안에는 **집지 않는다.** 큐는 그대로 남는다 —
+  // 기다리는 것이지 취소가 아니다. 시간이 지나면 다음 폴에서 그대로 이어서 돈다.
+  if (holdActive(c.dir)) return
   const claudeDir = path.join(c.dir, '.claude')
   // 취소 직후에는 새 지시를 시작하지 않는다. 깃발은 실행이 끝나며 내려간다.
   //
@@ -4871,6 +4969,7 @@ function closeCompany(dir) {
   clearInterval(c.queueTimer)
   killChild(c)
   clearClaim(c.dir)
+  clearHold(dir) // 뗀 프로젝트의 홀드를 들고 있을 이유가 없다
   companies.delete(dir)
 }
 
@@ -4913,6 +5012,9 @@ ipcMain.handle('command:cancel', (_e, dir) => {
     /* 훅이 없는 프로젝트면 깃발도 의미가 없다 */
   }
   const killed = killChild(companies.get(projectDir))
+  // 큐를 통째로 버렸으니 기다릴 일도 없어졌다. 홀드를 남겨 두면 방금 취소한 사람이
+  // 곧바로 보내는 새 지시까지 그 자리에서 멈춘다.
+  clearHold(projectDir)
   try {
     appendJsonl(eventsFileFor(projectDir), {
       ts: Date.now() / 1000,
@@ -4934,6 +5036,14 @@ ipcMain.handle('command:cancel', (_e, dir) => {
 // 것은 **언제나 회사**다(위 pumpQueue). 보내는 쪽에 고를 것이 없다 — 예전에는
 // "새 세션으로 즉시 실행" 체크박스가 있었고, 끄고 보내면 지시가 그때 마침 턴을
 // 끝내는 아무 세션에게 갔다. 회사가 하나뿐이면 그 갈림길 자체가 없다.
+//
+// **손으로 보낸 지시라고 홀드를 건너뛰지 않는다.** 여기는 사용자가 보내는 유일한
+// 길이라서, 이 길에 예외를 두면 홀드가 사실상 없는 것과 같아진다 — 애초에 줄줄이
+// 죽은 5건도 전부 사람이 보낸 지시였다. 한도 중에 태워 봐야 몇 초 만에 같은 실패로
+// 끝나고, 그게 바로 우리가 없애려던 장면이다. 대신 홀드를 응답과 상태에 실어
+// "언제 이어지는지"를 보여 준다. 정말 지금 당장 다시 해 보고 싶으면 이미 길이
+// 있다 — 취소(`command:cancel`)가 홀드를 푼다. 그건 사용자가 큐를 버리겠다고
+// 명시적으로 고른 자리다.
 // ---------------------------------------------------------------------------
 
 function appendJsonl(file, obj) {
@@ -4979,5 +5089,8 @@ ipcMain.handle('command:send', async (_e, { dir, agent, text, broadcast }) => {
   if (c) pumpQueue(c)
   pumpStatusAll({ force: true })
   // 회사가 닫혀 있으면 지시는 파일에 남지만 아무도 집어가지 않는다. 숨기지 않는다.
-  return { ok: true, dir: projectDir, companyOpen: Boolean(c), busy }
+  //
+  // **한도로 붙잡혀 있으면 그것도 그대로 알린다.** 보낸 지시는 큐에 남아 있고 홀드가
+  // 풀리면 그대로 돈다 — 여기서 홀드를 무시하고 즉시 태우지는 않는다(아래 주석 참고).
+  return { ok: true, dir: projectDir, companyOpen: Boolean(c), busy, hold: holdInfo(projectDir) }
 })

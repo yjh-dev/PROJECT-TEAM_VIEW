@@ -48,6 +48,11 @@
 //   session-nogrowth 첫 턴에 다시 읽은 것이 없어 배수를 낼 수 없는 대화
 //                    (firstRead null → growth null. 0으로 나눠 NaN·Infinity가 뜨는지)
 //
+//   한도 홀드. 한도로 실패하면 앱이 그 회사의 큐를 리셋 시각까지 붙잡아 둔다.
+//   hold-active    붙잡힌 회사 + 대기 지시 2건 — 왜 안 도는지·언제 다시 도는지·대기
+//                  지시가 취소된 게 아니라는 것이 화면에 있는가
+//   hold-none      붙잡히지 않은 회사 + 대기 지시 1건 — **아무것도 뜨지 않아야 한다**
+//
 //   첫 실행 설치 마법사. `wizard`로 시작하는 갈래는 ui-audit.js가 단계까지 눌러 준다.
 //   **다른 갈래에서는 마법사가 뜨면 안 된다** — 그것을 지키는 것이 `firstRunDone`이다.
 //   wizard           아무것도 없는 새 PC (0단계 환영)
@@ -745,6 +750,50 @@ for (const s of SESSION_CASES) {
 // (main.js startNewSession). 스텁이 그 조건을 지어내지 않게, 아래 startNewSession은
 // 이 프로젝트 목록의 상태를 그대로 보고 판단한다.
 PROJECTS['session-light'] = PROJECTS.teamfull
+
+// ---------------------------------------------------------------------------
+// 한도 홀드 (`projects[].hold`)
+//
+// 한도로 실패하면 앱이 **그 회사의 큐를 리셋 시각까지 붙잡아 둔다.** 그 전에는 걸린
+// 뒤에도 대기 지시를 하나씩 집어 전부 실패시켰다.
+//
+// ⚠ **여기 실리는 필드는 계약에 있는 것뿐이다** — `until`과 `reason` 둘뿐이고, 화면이
+//   읽기 편하라고 '남은 분'·'멈춤 여부' 같은 편의 필드를 얹지 않는다. 그런 필드를 스텁만
+//   싣는 순간 화면 검사는 통과하고 실물에서는 그 자리가 비어 버린다(이 저장소가 두 번
+//   당한 사고다). 남은 시간은 **화면이 `until`에서 낸다.**
+//
+//   hold-active  붙잡힌 회사 + 대기 지시 2건 — 왜 안 도는지·언제 다시 도는지·대기 지시가
+//                취소된 게 아니라는 것이 화면에 있는가. `reason`은 앱이 실제로 붙이는 말
+//                그대로다(main.js FAILURE_KINDS의 '토큰 사용량 한도').
+//   hold-none    붙잡히지 않은 회사 + 대기 지시 1건 — **아무것도 뜨지 않아야 한다.**
+//                대기 지시가 있는 것과 붙잡힌 것은 다른 상태다(대기만 보고 안내를 띄우면
+//                평소에도 계속 떠 있게 된다).
+const HOLD_REASON = '토큰 사용량 한도'
+const HOLD_UNTIL = new Date(Date.now() + 170 * 60_000).toISOString()
+
+PROJECTS['hold-active'] = [
+  { dir: 'C:\\dev\\2026\\shop', exists: true, company: 'open', queued: 2,
+    health: health({ agents: 11 }), run: { script: null, running: false, url: null },
+    hold: { until: HOLD_UNTIL, reason: HOLD_REASON } },
+  // 다른 회사는 멀쩡하다 — 안내가 **붙잡힌 회사에만** 붙는지 보려면 옆에 성한 회사가 있어야 한다.
+  { dir: 'C:\\dev\\2026\\board', exists: true, company: 'busy', queued: 1,
+    health: health({ agents: 11 }), run: { script: null, running: false, url: null }, hold: null },
+]
+PROJECTS['hold-none'] = [
+  { dir: 'C:\\dev\\2026\\shop', exists: true, company: 'open', queued: 1,
+    health: health({ agents: 11 }), run: { script: null, running: false, url: null }, hold: null },
+]
+/** 홀드 갈래. 나머지는 `normal`과 같게 둔다 — 여러 가지가 같이 달라지면 무엇 때문에
+ *  깨졌는지 알 수 없다. */
+const HOLD_CASES = ['hold-active', 'hold-none']
+for (const s of HOLD_CASES) {
+  ENV[s] = okEnv
+  REQS[s] = REQS.normal
+  EVENTS[s] = EVENTS.normal
+  USAGE[s] = realUsage
+  USAGE_STATS[s] = normalStats
+  SESSION_COST[s] = SESSION_LIGHT
+}
 
 // 사용자가 예산을 바꾸면 **다음에 물어볼 때 답이 달라져야 한다.** 늘 같은 답을 주면
 // "저장했다는데 화면은 그대로"를 검사가 볼 수 없다.

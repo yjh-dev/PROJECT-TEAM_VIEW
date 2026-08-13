@@ -560,6 +560,15 @@
              파일을 누르면 탐색기에서 그 파일이 선택된 채로 열린다. -->
         <div id="outputs" hidden></div>
         <footer>
+          <!-- 한도로 큐가 붙잡혀 있을 때만 뜬다. 붙잡힌 동안 화면은 **그냥 조용한 것과
+               구별되지 않아서**, 사용자는 지시가 씹힌 줄 알고 같은 지시를 또 보낸다.
+               세 줄로 나눈 이유가 그것이다: 왜 멈췄나(앱이 준 말 그대로) · 언제 다시
+               도나 · 보내 둔 지시는 어떻게 되나. 홀드가 아니면 아무것도 그리지 않는다. -->
+          <div id="hold" hidden role="status">
+            <p id="hold-why"></p>
+            <p id="hold-when"></p>
+            <p id="hold-keep"></p>
+          </div>
           <textarea
             id="chat-input"
             rows="2"

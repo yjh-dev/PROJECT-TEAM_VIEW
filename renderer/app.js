@@ -3185,6 +3185,8 @@ on('onStatus', ({ projects, activeDir: active, max, chatWidth, usage, team }) =>
 
   renderRun(me)
   renderGit(me)
+  // 한도로 큐가 붙잡혀 있으면 왜 안 도는지 알린다. 붙잡히지 않았으면 자리를 비운다.
+  renderHold(me)
 
   // 첫 안내는 **프로젝트가 있는지 알고 난 뒤에** 띄운다. 예전에는 시작하자마자
   // "캐릭터를 클릭하고 지시를 보내세요"라고 했는데, 보낼 프로젝트가 없을 때도
@@ -3349,6 +3351,9 @@ function renderTabs(projects, active, max) {
     // 마우스를 올리면 진단이 통째로 보인다. 배지 한 칸에는 하나밖에 못 담는다.
     tab.title = [
       p.dir,
+      // 붙잡힌 회사는 배지만 보면 그냥 대기와 똑같다. 보고 있지 않은 탭에서도
+      // 왜 안 도는지 알 수 있어야 한다(자세한 것은 그 탭으로 옮기면 입력창 위에 뜬다).
+      ...(p.hold ? [`멈춤: ${p.hold.reason ?? '앱이 이유를 알려주지 않았습니다'}`] : []),
       `훅: ${h.hooks ? '등록됨' : '없음 — 활동이 기록되지 않습니다'}`,
       `팀원: ${h.agents ? `${h.agents}명` : '없음 — 리드가 혼자 일합니다'}`,
       `CLAUDE.md: ${h.guide ? '있음' : '없음 — 담당 배분을 리드가 모릅니다'}`,
@@ -3645,6 +3650,78 @@ async function makeGit(dir, { fromAttach = false } = {}) {
 }
 
 gitBtn.addEventListener('click', () => activeDir && makeGit(activeDir))
+
+// ---------- 한도 홀드 ----------
+//
+// 한도에 걸리면 앱이 **그 회사의 큐를 리셋 시각까지 붙잡아 둔다**(그 전에는 걸린 뒤에도
+// 대기 지시를 하나씩 집어 전부 실패시켰다). 붙잡힌 동안 화면은 그냥 조용한 것과
+// 구별되지 않아서, 사용자는 지시가 씹힌 줄 알고 같은 것을 또 보낸다.
+//
+// 그래서 세 가지를 적는다 — **왜 멈췄나 · 언제 다시 도나 · 보내 둔 지시는 어떻게 되나.**
+// 이유(`reason`)는 앱이 준 말을 **그대로** 쓴다. 화면이 원인을 지어내면 숫자를 지어내는
+// 것보다 나쁘다(사용자는 엉뚱한 것을 고치러 간다). 남은 시간도 `until`에서만 나온다.
+const holdEl = document.getElementById('hold')
+const holdWhyEl = document.getElementById('hold-why')
+const holdWhenEl = document.getElementById('hold-when')
+const holdKeepEl = document.getElementById('hold-keep')
+
+/**
+ * 남은 시간을 사람이 읽는 꼴로. 알고 싶은 것은 초가 아니라 "얼마나 더"다.
+ * 이미 지났거나 잴 수 없으면 **null** — 지어내지 않는다.
+ */
+function fmtLeft(ms) {
+  if (!Number.isFinite(ms)) return null
+  const m = Math.round(ms / 60_000)
+  if (m <= 0) return null
+  if (m < 60) return `약 ${m}분 뒤`
+  // 시간만 적고 반올림하면 86분이 "약 1시간 뒤"가 되어 26분을 삼킨다. 남는 분을 같이 적는다.
+  if (m < 24 * 60) {
+    const h = Math.floor(m / 60)
+    const rest = m % 60
+    return rest ? `약 ${h}시간 ${rest}분 뒤` : `약 ${h}시간 뒤`
+  }
+  return `약 ${Math.round(m / (24 * 60))}일 뒤`
+}
+
+/**
+ * 지금 보고 있는 회사가 붙잡혀 있으면 입력창 위에 알린다. 아니면 **아무것도 그리지 않는다.**
+ * 상태는 계속 오므로 글이 바뀔 때만 손댄다 — 매번 다시 쓰면 읽어 주는 기계가 같은 말을
+ * 몇 번이고 되풀이한다.
+ */
+function renderHold(p) {
+  const hold = p?.hold ?? null
+  holdEl.hidden = !hold
+  if (!hold) return
+
+  const reason = String(hold.reason ?? '').trim()
+  const at = hold.until ? new Date(hold.until) : null
+  const known = at && !Number.isNaN(at.getTime())
+  const left = known ? fmtLeft(at.getTime() - Date.now()) : null
+  const waiting = Number(p?.queued) || 0
+
+  setText(holdWhyEl, reason ? `지시를 잠시 멈췄습니다 — ${reason}` : '지시를 잠시 멈췄습니다.')
+  setText(
+    holdWhenEl,
+    !known
+      ? '언제 다시 시작하는지는 앱이 알지 못합니다.'
+      : left
+        ? `${left}(${fmtWhen(hold.until)})에 다시 시작합니다.`
+        : '곧 다시 시작합니다.',
+  )
+  // **취소된 것이 아니라는 말이 이 안내의 핵심이다.** 이게 없으면 사용자는 [작업 취소]를
+  // 누르거나 같은 지시를 다시 보낸다.
+  setText(
+    holdKeepEl,
+    waiting
+      ? `대기 중인 지시 ${waiting}건은 취소되지 않았습니다 — 그때까지 기다렸다가 그대로 이어서 처리합니다.`
+      : '보내 두신 지시는 취소되지 않습니다 — 그때까지 기다렸다가 그대로 이어서 처리합니다.',
+  )
+}
+
+/** 같은 글이면 손대지 않는다(읽어 주는 기계가 같은 말을 되풀이하지 않게). */
+function setText(el, text) {
+  if (el.textContent !== text) el.textContent = text
+}
 
 // ---------- 로컬 실행 ----------
 //

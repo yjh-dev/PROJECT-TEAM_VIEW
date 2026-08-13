@@ -76,6 +76,10 @@ contextBridge.exposeInMainWorld('teamView', {
   // 이벤트에는 어느 프로젝트 것인지가 실려 온다. 렌더러는 보고 있는 것만 그린다.
   onEvents: (cb) => ipcRenderer.on('events:new', (_e, payload) => cb(payload)),
   onReset: (cb) => ipcRenderer.on('events:reset', (_e, payload) => cb(payload)),
+  // 프로젝트마다 `hold`가 함께 온다: **한도로 대기열을 붙잡아 둔 동안**
+  // `{ until: '2026-08-13T02:50:00.000Z', reason: '토큰 사용량 한도' }`, 아니면 null.
+  // `until`은 언제나 실제 ISO 시각이고(모르면 기본 대기가 들어간다), `reason`은 앱이
+  // 쓰는 실패 이름 그대로다. 지시는 큐에 그대로 남아 있고 그 시각이 지나면 이어서 돈다.
   onStatus: (cb) => ipcRenderer.on('projects:status', (_e, status) => cb(status)),
   onRunFailed: (cb) => ipcRenderer.on('run:failed', (_e, info) => cb(info)),
   onCommandFailed: (cb) => ipcRenderer.on('command:failed', (_e, info) => cb(info)),

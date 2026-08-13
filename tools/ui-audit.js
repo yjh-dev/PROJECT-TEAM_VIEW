@@ -176,6 +176,17 @@ app.whenReady().then(async () => {
   } catch (err) {
     out.대화갈아타기 = ['새 대화 흐름 검사 실패: ' + (err?.message ?? err)]
   }
+
+  // 한도 홀드도 **모양이 아니라 내용**이다. 안내가 예쁘게 떠 있어도 이유를 화면이
+  // 지어냈거나 남은 시간이 앱이 준 시각에서 나온 것이 아니면 아무 쓸모가 없다.
+  try {
+    const probes = await runHoldProbes(win)
+    if (probes.found.length) out.한도홀드 = probes.found
+    if (probes.ran.length) out.흐름 = [out.흐름, ...probes.ran].filter(Boolean).join(' · ')
+    if (probes.notes.length) out.알림 = [out.알림, ...probes.notes].filter(Boolean).join(' / ')
+  } catch (err) {
+    out.한도홀드 = ['한도 홀드 검사 실패: ' + (err?.message ?? err)]
+  }
   clearTimeout(bail)
 
   out.손닿는크기 = out.손닿는크기.filter((i) => !HIT_EXEMPT.has(i.요소))
@@ -1147,6 +1158,203 @@ const READ_SESSION = `(() => {
     err: visText(err),
     memoShown: vis(ta),
     memo: ta ? ta.value : null,
+  }
+})()`
+
+// ---------------------------------------------------------------------------
+// 한도 홀드 — **왜 안 도는지가 화면에 있는가**
+//
+// 한도로 실패하면 앱이 그 회사의 큐를 리셋 시각까지 붙잡아 둔다. 붙잡힌 동안 화면은
+// 그냥 조용한 것과 구별되지 않아서, 사용자는 지시가 씹힌 줄 알고 같은 것을 또 보내거나
+// [작업 취소]를 누른다. 여기서 보는 것:
+//   - 붙잡혔는데 **화면이 아무 말도 안 하지 않는가**
+//   - 멈춘 이유가 **앱이 준 말 그대로인가** (화면이 원인을 지어내지 않는가)
+//   - 남은 시간이 **앱이 준 `until`에서 나온 것인가** · 언제 다시 도는지 시각이 있는가
+//   - **대기 지시가 취소된 게 아니라는 것**이 분명한가 (이게 없으면 사용자가 취소해 버린다)
+//   - 퍼센트가 없는가 · 셈이 글자로 새어 나오지 않는가
+//   - 붙잡히지 않았으면 **아무것도 뜨지 않는가** (대기 지시가 있는 것과는 다른 상태다)
+async function runHoldProbes(win) {
+  const found = []
+  const ran = []
+  const notes = []
+  if (!S.startsWith('hold')) return { found, ran, notes }
+  const js = (code) => win.webContents.executeJavaScript(code)
+
+  // 앱이 실제로 준 값. **화면의 글자는 전부 여기서 나와야 한다.**
+  const got = await js(ACTIVE_HOLD)
+  const seen = await js(READ_HOLD)
+  const hold = got.hold ?? null
+
+  if (!hold) {
+    ran.push('홀드 없음 확인')
+    // 대기 지시가 있는 것과 붙잡힌 것은 다른 상태다. 대기만 보고 안내를 띄우면 평소에도 뜬다.
+    if (seen.shown) found.push(`붙잡히지 않았는데 멈춤 안내가 떠 있다: "${seen.text}"`)
+    return { found, ran, notes }
+  }
+  ran.push('한도 홀드 화면 대조')
+
+  // 화면을 보기 전에 **스텁부터 의심한다.** 스텁이 지어낸 모양 위에서 도는 검사는
+  // 초록불이어도 아무것도 지켜 주지 못한다(이 저장소에서 두 번 났다).
+  {
+    const shape = holdShapeProblems(hold)
+    found.push(...shape.found)
+    notes.push(...shape.notes)
+  }
+
+  if (!seen.shown) {
+    found.push('앱이 큐를 붙잡아 뒀는데 화면에 아무 말이 없다 — 사용자는 지시가 씹힌 줄 안다')
+    return { found, ran, notes }
+  }
+
+  // 1) 이 앱의 규칙 — **퍼센트를 쓰지 않는다.** 분모 없는 퍼센트는 전부 한도로 읽힌다.
+  const pct = seen.text.match(/[^\s]{0,12}%/)
+  if (pct) found.push(`멈춤 안내에 퍼센트가 적혔다: "${pct[0]}" — 견줄 분모가 없어서 잘못 읽힌다`)
+  const junk = seen.text.match(/NaN|Infinity|undefined|null|Invalid Date|\[object/)
+  if (junk) found.push(`멈춤 안내에 셈이 그대로 새어 나왔다: "${junk[0]}"`)
+
+  // 2) **이유는 앱이 준 말 그대로다.** 화면이 원인을 지어내면 숫자를 지어내는 것보다
+  //    나쁘다 — 사용자가 엉뚱한 것을 고치러 간다.
+  const reason = typeof hold.reason === 'string' ? hold.reason.trim() : ''
+  if (!reason) {
+    notes.push('앱이 이유를 주지 않아 이유 대조는 하지 못했다')
+  } else {
+    if (!seen.text.includes(reason)) {
+      found.push(`멈춘 이유가 화면에 없다 (앱 "${reason}" / 화면 "${seen.text}")`)
+    } else if (!seen.why.endsWith(reason)) {
+      // 앱의 말 뒤에 화면이 자기 진단을 덧붙였다는 뜻이다.
+      found.push(`화면이 앱이 준 이유 뒤에 말을 덧붙였다: "${seen.why}" (앱이 준 것은 "${reason}")`)
+    }
+  }
+
+  // 3) **남은 시간은 `until`에서만 나온다.** 지어낸 시간이면 여기서 갈린다.
+  const until = hold.until ? Date.parse(hold.until) : NaN
+  if (Number.isNaN(until)) {
+    if (!/알지 못|알 수 없/.test(seen.text)) {
+      found.push('언제 풀리는지 앱이 주지 않았는데 화면이 그 사실을 말하지 않는다')
+    }
+  } else {
+    // 화면을 그린 순간과 여기서 세는 순간이 1분 경계를 넘을 수 있다. 앞뒤 1분까지 인정한다.
+    const wants = [until - Date.now(), until - Date.now() + 60_000, until - Date.now() - 60_000]
+      .map(fmtLeftLike)
+      .filter(Boolean)
+    if (wants.length && !wants.some((w) => seen.text.includes(w))) {
+      found.push(`남은 시간이 앱이 준 시각에서 나오지 않았다 (until로 세면 "${wants[0]}" / 화면 "${seen.when}")`)
+    }
+    const d = new Date(until)
+    const mm = String(d.getMinutes()).padStart(2, '0')
+    const h12 = String(d.getHours() % 12 || 12).padStart(2, '0')
+    const h24 = String(d.getHours()).padStart(2, '0')
+    if (!seen.text.includes(`${h12}:${mm}`) && !seen.text.includes(`${h24}:${mm}`)) {
+      found.push(`다시 시작하는 시각(${h24}:${mm})이 화면에 없다 — "약 몇 시간 뒤"만으로는 언제인지 모른다`)
+    }
+  }
+
+  // 4) **대기 중인 지시가 취소된 게 아니라는 것.** 이 말이 없으면 사용자는 [작업 취소]를
+  //    누르거나 같은 지시를 다시 보낸다 — 그러면 붙잡아 둔 보람이 없다.
+  if (!/취소되지 않|취소하지 않|취소되지는 않/.test(seen.text)) {
+    found.push('대기 중인 지시가 취소된 것이 아니라는 말이 화면에 없다')
+  }
+  if (!/이어서|이어갑니다|이어서 처리/.test(seen.text)) {
+    found.push('기다렸다가 그대로 이어서 처리한다는 말이 화면에 없다')
+  }
+  const queued = Number(got.queued) || 0
+  if (queued > 0 && !seen.text.includes(`${queued}건`)) {
+    found.push(`대기 중인 지시가 ${queued}건인데 화면에 그 수가 없다`)
+  }
+  return { found, ran, notes }
+}
+
+/**
+ * **검사 스텁이 계약에 없는 모양을 지어내지 않았는가.**
+ *
+ * 홀드의 계약은 `{ until, reason } | null` 둘뿐이다. 화면이 읽기 편하라고 '남은 분' 같은
+ * 편의 필드를 스텁만 실으면, 화면 검사는 통과하고 실물에서는 그 자리가 빈다(이 저장소가
+ * 두 번 당한 사고다). 프로덕션이 이미 홀드를 내보내고 있으면 그쪽 필드와도 맞대 보고,
+ * 아직 없으면 **알림만 남긴다** — 검사가 자기 자신을 속이지 않게.
+ */
+const HOLD_FIELDS = ['until', 'reason']
+function holdShapeProblems(hold) {
+  const out = { found: [], notes: [] }
+  const got = Object.keys(hold)
+  const invented = got.filter((k) => !HOLD_FIELDS.includes(k))
+  const missing = HOLD_FIELDS.filter((k) => !got.includes(k))
+  if (invented.length) out.found.push(`스텁이 홀드에 계약에 없는 필드를 실었다: ${invented.join(', ')}`)
+  if (missing.length) out.found.push(`스텁이 홀드에서 계약 필드를 빠뜨렸다: ${missing.join(', ')}`)
+  let src
+  try {
+    src = fs.readFileSync(MAIN_JS, 'utf8').replace(/\r\n/g, '\n')
+  } catch {
+    out.notes.push('main.js를 읽지 못해 홀드 계약을 프로덕션과 대조하지 못했다')
+    return out
+  }
+  const at = src.search(/hold:\s*\{/)
+  if (at < 0) {
+    out.notes.push('main.js에 아직 홀드가 없어 계약을 프로덕션과 대조하지 못했다(백엔드 작업 중)')
+    return out
+  }
+  const open = src.indexOf('{', at)
+  const close = src.indexOf('}', open)
+  const want = src
+    .slice(open + 1, close)
+    .replace(/^[ \t]*\/\/.*$/gm, '')
+    .split(',')
+    .map((p) => (p.split(':')[0] || '').trim())
+    .filter((k) => /^[A-Za-z_$][\w$]*$/.test(k))
+  const only = (a, b) => a.filter((k) => !b.includes(k))
+  if (only(got, want).length) out.found.push(`스텁의 홀드에 앱에 없는 필드가 있다: ${only(got, want).join(', ')}`)
+  if (only(want, got).length) out.found.push(`스텁의 홀드가 앱의 필드를 빠뜨렸다: ${only(want, got).join(', ')}`)
+  return out
+}
+
+/** renderer/app.js의 `fmtLeft`와 같은 셈. 화면에 적힌 남은 시간을 되짚어 보려면 필요하다.
+ *  (형식이 어긋나면 이 검사가 시끄럽게 틀린다 — 조용히 통과하는 것보다 낫다.) */
+function fmtLeftLike(ms) {
+  if (!Number.isFinite(ms)) return null
+  const m = Math.round(ms / 60_000)
+  if (m <= 0) return null
+  if (m < 60) return `약 ${m}분 뒤`
+  if (m < 24 * 60) {
+    const h = Math.floor(m / 60)
+    const rest = m % 60
+    return rest ? `약 ${h}시간 ${rest}분 뒤` : `약 ${h}시간 뒤`
+  }
+  return `약 ${Math.round(m / (24 * 60))}일 뒤`
+}
+
+/** 지금 보고 있는 회사의 홀드와 대기 건수. 화면이 읽는 것과 **같은 자리**에서 가져온다. */
+const ACTIVE_HOLD = `(async () => {
+  const r = await window.teamView.listProjects()
+  const list = (r && r.projects) || []
+  const p = list.find((x) => x.dir === (r && r.activeDir)) || list[0]
+  return { hold: (p && p.hold) || null, queued: (p && p.queued) || 0 }
+})()`
+
+/** 멈춤 안내에서 읽어 오는 것. **보이는 글자만** 모은다(감춘 줄의 글이 섞이면 판정이 뒤집힌다). */
+const READ_HOLD = `(() => {
+  const vis = (e) => {
+    if (!e) return false
+    const s = getComputedStyle(e)
+    if (s.display === 'none' || s.visibility === 'hidden' || Number(s.opacity) === 0) return false
+    const r = e.getBoundingClientRect()
+    return r.width > 0 && r.height > 0
+  }
+  const visText = (root) => {
+    if (!root) return ''
+    let s = ''
+    for (const n of root.childNodes) {
+      if (n.nodeType === 3) { s += ' ' + n.textContent; continue }
+      if (n.nodeType !== 1 || !vis(n)) continue
+      s += ' ' + visText(n)
+    }
+    return s.replace(/\\s+/g, ' ').trim()
+  }
+  const box = document.getElementById('hold')
+  return {
+    shown: vis(box),
+    text: visText(box),
+    why: visText(document.getElementById('hold-why')),
+    when: visText(document.getElementById('hold-when')),
+    keep: visText(document.getElementById('hold-keep')),
   }
 })()`
 
