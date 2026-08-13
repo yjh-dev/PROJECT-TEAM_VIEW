@@ -1362,7 +1362,36 @@ async function send() {
     : res.busy
       ? '대기열에 넣었습니다 — 앞 작업이 끝나면 이어서 처리합니다'
       : '회사가 받았습니다 — 곧 팀이 움직입니다'
+  // **무거워졌다는 말은 보내는 순간에 해야 한다.** 같은 내용이 사용량 화면에도 있지만
+  // 그건 열어 봐야 보여서, 대화가 아무리 무거워져도 갈아타는 일이 일어나지 않았다.
+  // 실측: insta-filter가 질문 하나에 183k를 다시 읽을 때까지 자랐고, 갈아탄 뒤 41k가
+  // 됐다(4.4분의 1). 그동안 화면에는 계속 적혀 있었다.
+  //
+  // 보낸 것을 막지는 않는다 — 지시는 이미 갔다. 다음에 누를지는 사람이 정한다.
+  noteHeavySession(res.session)
   inputEl.value = ''
+}
+
+/**
+ * 대화가 무거우면 지시를 보낸 직후 한 줄로 알린다.
+ *
+ * 같은 대화에서 여러 번 반복하면 잔소리가 되고 무시하게 되므로 **한 번만** 띄운다.
+ * 갈아타면(응답 수가 줄면) 다시 알릴 수 있게 초기화한다.
+ */
+let heavyNoticedTurns = -1
+function noteHeavySession(s) {
+  if (!s || !s.heavy || typeof s.turns !== 'number') return
+  if (heavyNoticedTurns >= 0 && s.turns >= heavyNoticedTurns) return
+  heavyNoticedTurns = s.turns
+  const read = typeof s.lastRead === 'number' ? fmtTokens(s.lastRead) : null
+  const times = typeof s.growth === 'number' ? ` (처음의 ${s.growth.toFixed(0)}배)` : ''
+  addMsg(
+    'sys',
+    '이 대화가 무거워졌습니다',
+    `응답 ${s.turns}개까지 쌓여서, 질문 하나에 ${read ?? '많은 양'}을 다시 읽고 있습니다${times}.` +
+      ` 새 대화를 시작하면 그 양이 처음 값으로 줄어듭니다 — 옛 대화 기록은 지워지지 않습니다.` +
+      ` 위쪽 사용량에서 [새 대화 시작]을 누르면 됩니다.`
+  )
 }
 
 sendBtn.addEventListener('click', send)
