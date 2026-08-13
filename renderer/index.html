@@ -47,6 +47,17 @@
       <span id="status" class="warn">시작 중…</span>
       <!-- 지금 일하는 사람을 한 줄로. 캐릭터를 일일이 쫓지 않아도 보이게. -->
       <span id="now"></span>
+      <!-- 오늘 쓴 양. 상단은 좁으니 **숫자 한 줄만** 두고 자세한 것은 눌러서 편다.
+           **막대도 퍼센트도 없다.** 한때 여기에 게이지가 있었다 — 실측 평균에서 임의로
+           뽑은 눈금(하루 1.5M)을 분모로 삼아 "일간 90%"를 그렸는데, 같은 시각 Claude의
+           실제 화면은 세션 55%였다. 재는 기간도(달력 하루 vs 5시간 롤링), 분모도, 세는
+           대상도 달랐다. 한도가 아닌 것을 한도처럼 보이게 만든 것이라 통째로 걷어냈다.
+           집계가 안 끝났으면 0이 아니라 '집계 중'이다(0은 "안 썼다"는 거짓말이 된다). -->
+      <button id="usage-btn" hidden type="button" aria-expanded="false" aria-haspopup="true">
+        <span class="sr-only">토큰 사용량 —</span>
+        <span id="usage-sum">집계 중</span>
+        <span id="usage-dot" hidden aria-hidden="true"></span>
+      </button>
       <!-- 나머지 전부가 여기 들어간다. **손볼 게 있으면 점이 붙는다** — 숨겼다고
            놓치면 안 되는 것들(세팅 빠짐·되돌리기 없음·연결 끊김)이 있기 때문이다. -->
       <button id="menu" type="button" aria-expanded="false" aria-haspopup="true" title="설정·상태·기록">
@@ -127,6 +138,130 @@
           상태 다시 확인
         </button>
       </section>
+    </div>
+
+    <!-- 사용량 자세히 — 상단 숫자를 눌러서 연다. **여닫기는 `hidden`으로만** 한다.
+         (display를 준 요소에는 [hidden]이 안 먹는다 — check-ui의 '숨김 실패'.)
+
+         이 화면이 답하는 질문은 **"얼마나 남았나"가 아니라 "무엇이 토큰을 먹었나"다.**
+         남은 한도는 앱이 알 수 없다(구독 한도를 주는 통로가 없다). 그걸 아는 척하려고
+         임의의 눈금을 분모로 세웠던 것이 이 화면의 이전 판이었고, 그래서 세션 55%인
+         계정에 "일간 90%"를 띄웠다. 지금은 **센 값만 그대로** 적는다.
+
+         규칙 둘: 없는 숫자를 지어내지 않는다(못 세었으면 '집계 중'으로 비운다).
+         그리고 **퍼센트를 쓰지 않는다** — 분모가 없는 퍼센트는 전부 한도로 읽힌다. -->
+    <div id="usage-pop" hidden role="dialog" aria-labelledby="usage-pop-title">
+      <header>
+        <h4 id="usage-pop-title">토큰 사용량</h4>
+        <span id="usage-plan" hidden></span>
+        <button id="usage-close" type="button" title="사용량 닫기">×</button>
+      </header>
+
+      <!-- **이 줄은 숨기지 않는다.** 여기 적힌 숫자를 한도로 읽는 순간 이 화면은
+           거짓말이 된다. 어디를 봐야 진짜 한도가 나오는지까지 적는다. -->
+      <p id="usage-disclaim">
+        이 숫자는 이 컴퓨터에 남은 기록(~/.claude)을 세어 더한 값입니다. Claude가 보여 주는
+        남은 한도와는 다른 숫자입니다 — 세는 기간도 대상도 다릅니다. 남은 한도는
+        Claude 설정 → 사용량에서 확인하세요.
+      </p>
+
+      <!-- 아직 다 세지 못했을 때. 이 줄이 떠 있는 동안 숫자 자리는 비어 있다. -->
+      <p id="usage-state" hidden></p>
+
+      <!-- 한도에 걸려 멈춘 적이 있으면 언제 걸렸고 언제 풀리는지. -->
+      <p id="usage-limit" hidden></p>
+
+      <!-- 얼마나 썼나 — 표는 app.js가 채운다. 퍼센트가 아니라 **센 값 그대로**다. -->
+      <section id="usage-now-sec">
+        <h5>얼마나 썼나</h5>
+        <div id="usage-now"></div>
+      </section>
+
+      <!-- **이게 실제로 제일 중요한 정보다.** 캐시 읽기가 출력의 수백 배이고,
+           Claude 화면에는 없는 숫자다. 사용량을 줄이는 데 쓸모 있는 것은 이쪽이다. -->
+      <section id="usage-cache-sec">
+        <h5>무엇이 토큰을 먹었나 (오늘)</h5>
+        <p id="usage-cache"></p>
+        <p id="usage-cache-note"></p>
+      </section>
+
+      <!-- 지금 이 대화가 얼마나 무거운가 — **이 화면에서 손쓸 수 있는 것은 여기 하나다.**
+           위의 숫자들은 이미 쓴 값이라 바꿀 수 없지만, 대화 하나가 매 턴 다시 읽는 양은
+           갈아타면 처음으로 돌아간다(실측: 198턴째에 첫 턴의 14배 — 같은 질문이 14배로
+           비싸진 것이다).
+
+           규칙은 이 화면의 나머지와 같다. **퍼센트를 쓰지 않고 배수로 적는다**(분모 없는
+           퍼센트는 전부 한도로 읽힌다). 기록이 없으면(null) 0으로 그리지 않고 "아직
+           기록이 없습니다"라고 적는다 — 0은 "안 썼다"는 거짓말이다.
+
+           통로(getSessionCost) 자체가 없는 낡은 preload에서는 이 자리를 통째로 비운다. -->
+      <section id="usage-ses-sec" hidden>
+        <h5>지금 대화</h5>
+        <p id="usage-ses"></p>
+        <p id="usage-ses-note"></p>
+        <!-- 지금 못 하는 것은 감추지 않고 **비활성으로 죽인다** — 눌러도 아무 일이 없는
+             버튼이 남으면 고장으로 보이고, 사라지면 그런 길이 있는 줄도 모른다.
+             누르면 곧바로 갈아타지 않는다. 반드시 확인 창(#ses-confirm)을 거친다. -->
+        <button id="usage-ses-new" type="button">새 대화 시작</button>
+      </section>
+
+      <!-- 오늘이 평소보다 많은지만 알면 된다. 외부 차트 라이브러리는 쓰지 않는다. -->
+      <section id="usage-trend-sec">
+        <h5>최근 14일 (출력)</h5>
+        <div id="usage-spark" role="img"></div>
+        <p id="usage-trend-note"></p>
+      </section>
+    </div>
+
+    <!-- 새 대화로 갈아탈지 묻는 창. **묻지 않고 갈아타지 않는다** — 지금까지 쌓인 맥락이
+         끊기는 일이라, 무엇이 사라지고 무엇이 남는지 보여 준 뒤에 고르게 한다.
+         (특히 **옛 대화 기록 파일은 지워지지 않는다**. 그 사실을 모르면 아무도 누르지 않는다.)
+
+         여기 인수인계 메모가 있는 이유가 이 기능의 핵심이다. 맥락을 통째로 끌고 가면
+         비용이 그대로 따라오지만, **요약 몇 줄만 넘기면** 새 대화는 처음 값으로 시작하면서
+         하던 일은 이어진다. 그래서 입력칸을 확인 창 안에 둔다 — 갈아탄 뒤에 따로 적으라고
+         하면 아무도 안 적는다.
+
+         **여닫기는 `hidden`으로만** 한다(display를 준 요소에는 [hidden]이 안 먹는다). -->
+    <div id="ses-confirm" hidden role="dialog" aria-modal="true" aria-labelledby="ses-title">
+      <div id="ses-box">
+        <h4 id="ses-title">새 대화를 시작할까요?</h4>
+        <p id="ses-why"></p>
+        <ul id="ses-facts">
+          <li>
+            <b>끊기는 것</b> — 지금까지 나눈 이야기입니다. 새 대화는 앞의 내용을 기억하지 못합니다.
+          </li>
+          <li>
+            <b>그대로 남는 것</b> — <b>옛 대화 기록 파일은 지워지지 않습니다</b>(앱이 그대로 보관합니다).
+            화면의 대화 내용, 프로젝트 파일·설정·팀원도 그대로입니다.
+          </li>
+          <li id="ses-gain">
+            새 대화는 매 턴 다시 읽는 양이 처음 값으로 돌아갑니다 — 같은 질문이 다시 싸집니다.
+          </li>
+        </ul>
+
+        <label class="ses-label" for="ses-handoff">인수인계 메모 <span>(선택 — 안 적어도 됩니다)</span></label>
+        <p id="ses-hint">
+          새 대화에 이어서 알려 줄 내용이 있으면 3~5줄로 적으세요. 예: 지금 무슨 기능을 만들던 중인지,
+          정한 방식. 맥락을 통째로 끌고 가는 대신 <b>이 요약만 넘기기 때문에</b> 다시 읽는 양이 줄어듭니다.
+          적어 둔 메모는 새 대화의 첫 지시에 한 번만 붙습니다.
+        </p>
+        <textarea
+          id="ses-handoff"
+          rows="4"
+          spellcheck="false"
+          placeholder="예) 결제 화면을 만들던 중. 카드사 응답은 당분간 흉내(mock)로 두기로 했다."
+        ></textarea>
+
+        <!-- 앱이 거절했을 때 그 이유를 **그대로** 적는 자리(예: 실행 중입니다).
+             여기서 문구를 새로 지어내면 실제로 무엇이 막혔는지와 화면의 말이 어긋난다. -->
+        <p id="ses-err" hidden></p>
+
+        <div class="ses-acts">
+          <button id="ses-go" type="button" class="ses-primary">새 대화 시작</button>
+          <button id="ses-cancel" type="button">그만두기</button>
+        </div>
+      </div>
     </div>
 
     <!-- 팀원 관리 — ☰ 안의 [팀원 관리]로 연다. **여닫기는 `hidden`으로만** 한다.

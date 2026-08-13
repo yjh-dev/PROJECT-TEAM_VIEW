@@ -22,6 +22,32 @@
 //   acctbusy 지시가 도는 중 — 계정 바꾸기가 **비활성으로 죽고** 이유가 보이는지
 //            (`acct`로 시작하는 갈래는 tools/ui-audit.js가 ☰를 열어 준다)
 //
+//   상단 사용량. `usage`로 시작하는 갈래는 ui-audit.js가 상단 숫자를 눌러 편다.
+//   **여섯 갈래의 초기 조건이 서로 다르다** — 하나라도 같으면 그 조건에서만 나는
+//   결함이 원리적으로 발생 불가가 된다(마법사 여섯 갈래가 전부 캐릭터 0명이라
+//   가림 결함을 한 번도 못 잡던 것과 같은 사고다).
+//   usage-pending  첫 집계가 끝나기 전(ready:false — today/week/days가 전부 null)
+//                  0으로 그리면 "안 썼다"는 거짓이 된다. (한 번도 안 돌린 새 PC는
+//                  이 상태가 아니라 `empty`처럼 **0이 채워진 ready:true**다.)
+//   usage-partial  안 쓴 날(0)과 못 본 날(null)이 한 차트에 섞인 상태 —
+//                  **0은 바닥 막대, null은 빈칸**으로 갈려야 한다
+//   usage-newday   자정 직후 — 지난 날 기록은 있는데 **오늘은 아직 전부 0**이다.
+//                  캐시 읽기가 출력의 몇 배인지 낼 수 없는(0으로 나누는) 유일한 갈래라,
+//                  여기서 화면이 배수를 지어내면 잡힌다
+//   usage-limit    한도에 걸린 기록이 있는 상태 — 리셋 시각이 보이는지
+//   usage-huge     아주 큰 숫자(cacheRead 21.6억, 실측) — 자리수에 레이아웃이 버티는지
+//   usage-none     preload가 낡아 `getUsageStats` 통로 자체가 없는 상태 —
+//                  **상단 숫자가 숨는 유일한 실제 경로다**(앱은 어떤 경우에도 객체를 준다)
+//
+//   지금 대화의 무게 · 새 대화로 갈아타기. `session`으로 시작하는 갈래는 ui-audit.js가
+//   사용량 화면을 펴고 [새 대화 시작]까지 눌러 본다(확인 창을 거치는지·메모가 실려 가는지).
+//   session-heavy    실측 그대로 무거운 대화(198턴 · 0.02M → 0.29M) + 놀고 있는 회사 —
+//                    갈아타기가 성공한다. 갈아탄 뒤에는 무게가 null이 된다(앱과 같다)
+//   session-light    가벼운 대화 + **지시가 도는 회사** — 앱이 거절하고 이유를 준다
+//   session-none     기록이 하나도 없다(값이 null) — 0으로 그리면 "안 썼다"가 된다
+//   session-nogrowth 첫 턴에 다시 읽은 것이 없어 배수를 낼 수 없는 대화
+//                    (firstRead null → growth null. 0으로 나눠 NaN·Infinity가 뜨는지)
+//
 //   첫 실행 설치 마법사. `wizard`로 시작하는 갈래는 ui-audit.js가 단계까지 눌러 준다.
 //   **다른 갈래에서는 마법사가 뜨면 안 된다** — 그것을 지키는 것이 `firstRunDone`이다.
 //   wizard           아무것도 없는 새 PC (0단계 환영)
@@ -469,6 +495,277 @@ for (const s of WIZ_CASES) EVENTS[s] = []
 // **말풍선까지** 떠야 마법사를 뚫는지 제대로 볼 수 있다.
 EVENTS['wizard-office'] = EVENTS.normal
 
+// ---------------------------------------------------------------------------
+// 상단 사용량 (getUsageStats)
+//
+// ⚠ **여기 실리는 필드는 계약에 있는 것뿐이고, 값도 프로덕션이 낼 수 있는 것뿐이다.**
+// 편의상 하나라도 더 얹으면 화면 검사만 통과하고 실물에서는 그 필드가 없어 자리가
+// 비어 버린다. 이 저장소에서 이미 두 번 났다 — 스텁만 `firstRunDone`을 실어서 마법사가
+// 죽은 배선 위에 서 있었고, 스텁만 `null`을 돌려줘서 "새 PC에는 상단 숫자가 안 뜬다"는
+// **프로덕션에 없는 상태**를 검사가 지켜 주고 있었다(앱은 어떤 경우에도 객체를 준다).
+//
+// 계약: { ready, plan, today, week, days[], limitHit }
+//       ready:false면 **today/week/days가 전부 null**이다 — 0이 아니라 '모른다'.
+//       today/week: { input, output, cacheRead, cacheWrite, msgs }
+//       days[]:     { date, output, cacheRead, msgs, partial }
+//                   partial:true면 output/cacheRead/msgs가 **전부 null**이다.
+//       **분모(예산·한도)는 계약에 없다.** 한때 앱이 실측 평균에서 뽑은 눈금을 예산이라
+//       부르며 실어 보냈고, 화면은 그것으로 "일간 90%"를 그렸다(그 시각 Claude의 실제
+//       세션은 55%였다). 지어낸 분모는 앱에도 스텁에도 두지 않는다.
+//
+// 그리고 갈래마다 **초기 조건이 서로 달라야 한다.** 마법사 검사 여섯 갈래가 전부
+// "캐릭터 0명"이라 가림 결함이 원리적으로 발생 불가였던 전례가 있다. 아래 갈래들은
+// 못 본 기록 / 안 쓴 날이 섞인 차트 / 오늘이 아직 0인 자정 직후 / 한도에 걸린 기록 /
+// 아주 큰 숫자 / 통로 없음으로 갈린다.
+const bucket = (input, output, cacheRead, cacheWrite, msgs) => ({ input, output, cacheRead, cacheWrite, msgs })
+
+// main.js와 같은 값이어야 한다. 다르면 검사가 프로덕션에 없는 모양을 지켜 주게 된다.
+const USAGE_SCAN_DAYS = 8 // 앱이 실제로 열어 보는 파일의 범위(mtime 기준)
+const USAGE_KEEP_DAYS = 14 // 화면에 넘겨주는 날짜 수
+
+/** 'YYYY-MM-DD' **로컬 날짜**. 프로덕션 usageDayKey와 같아야 한다 — toISOString을
+ *  쓰면 한국에서 오전 9시 이전에 마지막 칸이 어제로 찍힌다. */
+const dayKey = (d) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+
+/**
+ * 오래된 것부터 오늘까지 14칸. `known`에는 **앱이 실제로 세는 8일치만** 넣는다.
+ *
+ * 앞의 6칸은 `partial: true`다 — 앱은 mtime이 8일 안쪽인 파일만 열기 때문에 그보다
+ * 오래된 날은 "안 썼다(0)"가 아니라 **"모른다(null)"**이다. 0으로 채워 보내면 화면이
+ * 바닥에 붙은 막대를 그리고, 그 가짜 0이 평균에 섞여 "평소의 2.4배" 같은 틀린 말을 만든다.
+ */
+const dayList = (known, mul) => {
+  if (known.length !== USAGE_SCAN_DAYS) {
+    throw new Error(`앱이 실제로 세는 날은 ${USAGE_SCAN_DAYS}일이다 (받은 것: ${known.length}일)`)
+  }
+  const unknown = USAGE_KEEP_DAYS - known.length
+  const at = (i) => {
+    const d = new Date()
+    d.setHours(12, 0, 0, 0) // 정오에서 빼면 하루 경계·서머타임에 밀리지 않는다
+    d.setDate(d.getDate() - (USAGE_KEEP_DAYS - 1 - i))
+    return dayKey(d)
+  }
+  const out = []
+  for (let i = 0; i < unknown; i++) {
+    out.push({ date: at(i), output: null, cacheRead: null, msgs: null, partial: true })
+  }
+  known.forEach((output, i) => {
+    out.push({
+      date: at(unknown + i),
+      output,
+      cacheRead: Math.round(output * mul),
+      msgs: output === 0 ? 0 : Math.max(1, Math.round(output / 900)),
+      partial: false,
+    })
+  })
+  return out
+}
+
+// 평범한 하루. 숫자는 실측(오늘 출력 100만, 캐시 읽기 1.36억)에서 가져온다.
+// **앱이 세는 8일치만** 적는다 — 그보다 오래된 6일은 dayList가 '모른다'로 채운다.
+const NORMAL_DAYS = [1_402_900, 310_700, 905_100, 1_060_400, 220_800, 1_333_000, 741_600, 1_002_962]
+const normalStats = {
+  ready: true,
+  plan: 'max',
+  today: bucket(125_825, 1_002_962, 135_800_963, 8_768_723, 1_114),
+  week: bucket(701_300, 5_465_762, 742_910_400, 47_902_100, 6_082),
+  days: dayList(NORMAL_DAYS, 135),
+  limitHit: null,
+}
+
+/**
+ * **첫 집계가 끝나기 전.** 앱은 이때도 객체를 준다 — `ready:false`로 "아직 모른다"고
+ * 말할 뿐이다(상단 숫자가 사라지지는 않는다. 사라지는 것은 통로가 없을 때뿐이고, 그건
+ * `usage-none`이 본다). 앱을 막 켠 몇 초, 그리고 한도 리셋 뒤 다시 세는 동안이 이 상태다.
+ */
+const notCountedStats = {
+  ready: false,
+  plan: null,
+  today: null,
+  week: null,
+  days: null,
+  limitHit: null,
+}
+
+/**
+ * **한 번도 안 돌린 컴퓨터.** 여기가 예전에 스텁이 `null`을 지어내던 자리다 —
+ * "상단 숫자가 안 뜬다"고 했지만 실제로는 뜬다. 앱은 기록이 하나도 없어도 집계를 마치고
+ * `ready:true`를 준다. 그래서 새 PC가 진짜로 보는 화면은 **'오늘 출력 0' + 아는 8일은 0,
+ * 나머지 6일은 빈칸인 차트**다.
+ */
+const freshStats = {
+  ready: true,
+  plan: null,
+  today: bucket(0, 0, 0, 0, 0),
+  week: bucket(0, 0, 0, 0, 0),
+  days: dayList([0, 0, 0, 0, 0, 0, 0, 0], 0),
+  limitHit: null,
+}
+
+const USAGE_STATS = {
+  normal: normalStats,
+  stress: normalStats,
+  nologin: normalStats,
+  rundead: normalStats,
+  team: normalStats,
+  teamfull: normalStats,
+  acct: normalStats,
+  acctlong: normalStats,
+  acctout: normalStats,
+  acctfigma: normalStats,
+  acctbusy: normalStats,
+  // 붙인 프로젝트도 준비물도 없는 컴퓨터 = 쓴 기록이 없는 컴퓨터.
+  empty: freshStats,
+  missing: freshStats,
+}
+
+// 1) 기록을 못 봤다. **자리는 잡되 숫자는 없다** — 0으로 그리면 "안 썼다"가 된다.
+USAGE_STATS['usage-pending'] = notCountedStats
+// 2) **안 쓴 날(0)과 못 본 날(null)이 한 차트에 섞인 상태.** 둘을 같게 그리면
+//    "6일 내리 안 썼다"는 거짓 그림이 되고, 가짜 0이 평균에 섞여 배수도 틀려진다.
+USAGE_STATS['usage-partial'] = {
+  ready: true,
+  plan: 'max',
+  today: bucket(112_400, 902_100, 121_800_400, 7_902_100, 1_002),
+  week: bucket(402_800, 2_562_700, 344_200_900, 22_400_500, 2_848),
+  days: dayList([0, 0, 1_020_400, 0, 0, 640_200, 0, 902_100], 134),
+  limitHit: null,
+}
+// 3) **자정 직후.** 지난 날 기록은 있는데 오늘은 아직 전부 0이다(매일 실제로 지나가는
+//    상태다). 캐시 읽기를 출력으로 나눌 수 없는 유일한 갈래라, 화면이 배수를 지어내거나
+//    0으로 나눈 Infinity를 적으면 여기서 잡힌다. 플랜도 없다(로그인 정보를 못 읽은 PC).
+USAGE_STATS['usage-newday'] = {
+  ready: true,
+  plan: null,
+  today: bucket(0, 0, 0, 0, 0),
+  week: bucket(588_100, 4_462_800, 602_110_300, 39_002_400, 4_968),
+  days: dayList([1_402_900, 310_700, 905_100, 1_060_400, 220_800, 1_333_000, 741_600, 0], 135),
+  limitHit: null,
+}
+// 4) 한도에 걸렸던 기록이 있는 상태. 리셋 시각이 화면에 나와야 한다.
+USAGE_STATS['usage-limit'] = {
+  ready: true,
+  plan: 'max',
+  today: bucket(98_200, 1_240_800, 168_400_500, 10_204_000, 1_388),
+  week: bucket(612_400, 8_902_300, 1_180_400_000, 71_002_000, 9_774),
+  days: dayList([1_302_000, 1_188_000, 640_000, 1_500_400, 1_010_000, 1_260_000, 998_000, 1_240_800], 136),
+  limitHit: {
+    at: new Date(Date.now() - 96 * 60_000).toISOString(),
+    resetAt: new Date(Date.now() + 86 * 60_000).toISOString(),
+  },
+}
+// 5) 아주 큰 숫자. `cacheRead: 2165974000`은 실측값이다 — 자리수 때문에 레이아웃이
+//    가장 먼저 무너지는 자리다(응답 건수도 4만 건대라 한 줄이 길어진다).
+USAGE_STATS['usage-huge'] = {
+  ready: true,
+  plan: 'max',
+  today: bucket(1_882_004, 4_212_337, 2_165_974_000, 61_300_912, 41_882),
+  week: bucket(9_440_118, 22_004_551, 11_820_663_004, 318_772_400, 214_663),
+  days: dayList([4_004_000, 3_880_200, 2_220_000, 4_512_000, 3_090_400, 2_808_000, 4_102_600, 4_212_337], 514),
+  limitHit: null,
+}
+// 6) `usage-none`은 값이 아니라 **통로가 없는** 갈래다(설치본을 덮어쓰다 만 PC —
+//    preload가 화면보다 낡다). 상단 숫자가 숨는 경로는 이것뿐이라, 값을 두지 않고
+//    파일 끝에서 api.getUsageStats 자체를 지운다.
+
+/** 사용량 갈래. 화면의 **나머지는 `normal`과 같게** 둔다 — 여러 가지가 같이 달라지면
+ *  무엇 때문에 깨졌는지 알 수 없다. */
+const USAGE_CASES = ['usage-pending', 'usage-partial', 'usage-newday', 'usage-limit', 'usage-huge', 'usage-none']
+for (const s of USAGE_CASES) {
+  ENV[s] = okEnv
+  REQS[s] = REQS.normal
+  PROJECTS[s] = PROJECTS.normal
+  EVENTS[s] = EVENTS.normal
+  USAGE[s] = realUsage
+}
+
+// ---------------------------------------------------------------------------
+// 지금 대화의 무게 (getSessionCost) · 새 대화로 갈아타기 (startNewSession)
+//
+// ⚠ **여기 실리는 필드도 계약에 있는 것뿐이다**(main.js `sessionCostFrom`의 반환 그대로):
+//     { turns, firstRead, lastRead, growth, heavy, sizeBytes } | null
+//   `firstRead`는 첫 턴이 0일 때 **0이 아니라 null**이고, 그러면 `growth`도 null이다
+//   (0으로 나눌 수 없다). 값이 통째로 null인 것은 **기록이 하나도 없을 때**다 —
+//   갈아탄 직후가 실제로 그 상태다. 여기서 0을 지어내면 "안 썼다"는 거짓이 된다.
+//
+//   heavy도 지어내지 않는다. main.js의 기준(lastRead ≥ 0.2M 또는 growth ≥ 10)으로
+//   계산해 둔 값이고, ui-audit.js가 그 상수를 main.js에서 떼어 와 다시 맞대 본다.
+//
+// 갈래마다 **초기 조건이 서로 다르다**(마법사 여섯 갈래가 전부 캐릭터 0명이라 가림
+// 결함을 못 잡던 전례가 있다):
+//   session-heavy    실측 그대로 무거운 대화 + 놀고 있는 회사 → 갈아타기가 성공한다
+//   session-light    가벼운 대화 + **지시가 도는 회사** → 앱이 거절한다(이유가 보이는지)
+//   session-none     기록이 하나도 없다(값이 null) → 0으로 그리면 잡힌다
+//   session-nogrowth 첫 턴에 다시 읽은 것이 없어 배수를 낼 수 없다 → NaN·Infinity가 뜨는지
+const SESSION_HEAVY = { turns: 198, firstRead: 20_400, lastRead: 291_600, growth: 14.3, heavy: true, sizeBytes: 2_411_008 }
+const SESSION_LIGHT = { turns: 12, firstRead: 21_200, lastRead: 46_600, growth: 2.2, heavy: false, sizeBytes: 184_320 }
+
+const SESSION_COST = {
+  normal: SESSION_LIGHT,
+  stress: SESSION_HEAVY,
+  nologin: SESSION_LIGHT,
+  rundead: SESSION_LIGHT,
+  team: SESSION_LIGHT,
+  teamfull: SESSION_LIGHT,
+  // 붙인 프로젝트도 없는 컴퓨터에는 오간 대화가 없다.
+  empty: null,
+  missing: null,
+  // 실측 그대로(insta-filter 198턴 · 0.02M → 0.29M).
+  'session-heavy': SESSION_HEAVY,
+  // 실측(shop을 막 시작했을 때). 갈아탈 이유가 없는 대화에서 화면이 조용한지 본다.
+  'session-light': { turns: 6, firstRead: 18_900, lastRead: 24_800, growth: 1.3, heavy: false, sizeBytes: 61_440 },
+  'session-none': null,
+  'session-nogrowth': { turns: 2, firstRead: null, lastRead: 18_400, growth: null, heavy: false, sizeBytes: 38_912 },
+}
+for (const s of ACCT) SESSION_COST[s] = SESSION_LIGHT
+for (const s of WIZ_CASES) SESSION_COST[s] = null
+SESSION_COST['wizard-office'] = null
+// 사용량 갈래에서도 이 줄이 같이 그려진다 — **퍼센트 금지 검사가 새 문구까지 본다.**
+// 무게는 사용량 집계와 다른 곳에서 나오므로 갈래마다 따로 정한다.
+SESSION_COST['usage-pending'] = null // 아직 아무것도 세지 못한 상태
+SESSION_COST['usage-partial'] = SESSION_LIGHT
+SESSION_COST['usage-newday'] = SESSION_HEAVY // 어제부터 이어 온 대화는 자정을 넘어도 무겁다
+SESSION_COST['usage-limit'] = SESSION_HEAVY // 한도에 걸릴 만큼 쓴 사람의 대화
+SESSION_COST['usage-huge'] = { turns: 812, firstRead: 24_800, lastRead: 402_900, growth: 16.2, heavy: true, sizeBytes: 41_226_240 }
+SESSION_COST['usage-none'] = null
+
+/** 새 대화 갈래. 사용량 화면을 펴야 보이므로 **나머지는 사용량 갈래와 같게** 둔다. */
+const SESSION_CASES = ['session-heavy', 'session-light', 'session-none', 'session-nogrowth']
+for (const s of SESSION_CASES) {
+  ENV[s] = okEnv
+  REQS[s] = REQS.normal
+  EVENTS[s] = EVENTS.normal
+  USAGE[s] = realUsage
+  USAGE_STATS[s] = normalStats
+  // 사무실에 사람이 있는 채로 확인 창을 띄운다 — 이름표가 창을 뚫는지 볼 수 있다.
+  PROJECTS[s] = PROJECTS.team
+}
+// **거절 갈래만 회사가 돌고 있다.** 앱은 실행 중이면 갈아타지 않고 이유를 준다
+// (main.js startNewSession). 스텁이 그 조건을 지어내지 않게, 아래 startNewSession은
+// 이 프로젝트 목록의 상태를 그대로 보고 판단한다.
+PROJECTS['session-light'] = PROJECTS.teamfull
+
+// 사용자가 예산을 바꾸면 **다음에 물어볼 때 답이 달라져야 한다.** 늘 같은 답을 주면
+// "저장했다는데 화면은 그대로"를 검사가 볼 수 없다.
+// 갈래에 따로 적지 않았으면 **기록을 아직 못 본 상태**다. `null`로 두면 안 된다 —
+// 앱은 어떤 경우에도 객체를 준다(마법사 갈래처럼 아무것도 없는 새 PC도 마찬가지다).
+let usageStats = USAGE_STATS[S] ?? notCountedStats
+
+// 지금 대화의 무게. **갈아타면 이 값이 null이 된다** — 앱도 그렇다(새 세션에는 기록이
+// 아직 없다). 늘 같은 답을 주면 "갈아탔다는데 화면은 옛 무게 그대로"를 검사가 볼 수 없다.
+let sessionCost = SESSION_COST[S] ?? null
+// 앱이 갈아타기를 거절하는 조건은 하나뿐이다 — **활성 프로젝트가 돌고 있을 때**
+// (main.js `startNewSession`의 `companyBusy(dir)`). 스텁이 조건을 지어내지 않게
+// 프로젝트 목록에 적힌 상태를 그대로 본다.
+const sessionBusy = (PROJECTS[S] ?? [])[0]?.company === 'busy'
+// 검사가 "무엇을 들려 보냈는지" 되짚기 위한 기록. **`teamView`에는 손대지 않는다** —
+// 앱의 계약에 편의 필드를 하나라도 얹으면 검사만 통과하고 실물에서 그 자리가 비는
+// 사고가 난다(이 저장소에서 두 번 났다). 그래서 이름이 다른 별도 창구로 낸다.
+// **렌더러는 이것을 쓰면 안 된다** — tools/ui-audit.js가 renderer/*.js에 이 이름이
+// 나오면 실패로 잡는다(검사에만 있는 통로 위에 화면이 서는 것을 막는다).
+const newSessionCalls = []
+
 const noop = () => {}
 let installCb = null // 설치 진행 소식을 받는 쪽(마법사)
 const wizInstalled = new Set() // 이 실행에서 실제로 깔린 것(확인까지 끝난 것만)
@@ -507,6 +804,22 @@ const api = {
   createAgent: async (_dir, spec) => ({ ok: false, code: 'VALIDATION', error: `${spec?.id}은(는) 이미 팀에 있습니다` }),
   fireAgent: async (_dir, id) => ({ ok: true, id, movedTo: `C:\\dev\\2026\\shop\\.claude\\team-fired\\${id}.md`, requeued: 1 }),
   install: async () => ({ ok: false, canceled: true }),
+  // 상단 사용량. **계약에 있는 필드만** 실려 나간다(위 USAGE_STATS 참고).
+  // **쓰기 통로는 없다.** 예전에는 `setUsageBudget`으로 분모를 정하게 했는데, 그 분모가
+  // 애초에 한도가 아니었다. 앱이 모르는 것을 사용자에게 정하게 하고 그 결과를 퍼센트로
+  // 그린 것이라 통로째로 걷어냈다(main.js에도 없다).
+  getUsageStats: async () => usageStats,
+  // 지금 대화의 무게. **계약에 있는 필드만** 실려 나간다(위 SESSION_COST 참고).
+  getSessionCost: async () => sessionCost,
+  // 새 대화로 갈아타기. 앱이 주는 답 그대로 — 성공하면 { ok: true, id }, 실행 중이면
+  // { ok: false, reason: '실행 중입니다' }(문구도 main.js가 쓰는 그대로여야 한다).
+  startNewSession: async (opts) => {
+    newSessionCalls.push(opts)
+    if (sessionBusy) return { ok: false, reason: '실행 중입니다' }
+    // 갈아탄 직후에는 기록이 없다 — 앱의 sessionCost도 여기서 null을 준다.
+    sessionCost = null
+    return { ok: true, id: '9f1c2a54-0000-4000-8000-0000000000aa' }
+  },
   // 로그인은 브라우저에서 사람이 마쳐야 끝난다. **끝나지 않는 갈래**가 있어야
   // "기다리는 중…"이 화면에서 어떻게 보이는지 잴 수 있다.
   login: async () => {
@@ -619,9 +932,22 @@ const api = {
 // 화면이 죽지 않고 "직접 받아 설치하는 길"로 빠지는지 눌러서 확인하려면 없는
 // 상태를 만들 수 있어야 한다.
 if (process.env.OLD_BRIDGE) {
-  for (const k of ['canAutoInstall', 'autoInstall', 'onInstallProgress', 'refreshPath', 'relaunch', 'createProject', 'wizardDone']) {
+  for (const k of ['canAutoInstall', 'autoInstall', 'onInstallProgress', 'refreshPath', 'relaunch', 'createProject', 'wizardDone', 'getUsageStats', 'getSessionCost', 'startNewSession']) {
     delete api[k]
   }
 }
 
+// 사용량 통로만 없는 갈래. **상단 숫자가 숨는 실제 경로는 이것뿐이다** — 앱의
+// getUsageStats는 기록을 하나도 못 봐도 객체를 돌려주므로(ready:false), '값이 null'인
+// 상태는 프로덕션에 없다. 그 자리를 스텁이 지어내면 "새 PC에는 사용량이 안 뜬다"는
+// 도달 불가능한 동작을 검사가 지켜 주게 된다(실제로 그렇게 되어 있었다).
+if (S === 'usage-none') delete api.getUsageStats
+
 contextBridge.exposeInMainWorld('teamView', api)
+
+// **검사 전용 창구.** 앱의 계약(`teamView`)과 섞이지 않게 이름부터 다르게 둔다.
+// 여기 있는 것은 "무엇을 들려 보냈는가"의 기록뿐이고, 값은 문자열로만 나간다
+// (구조를 그대로 넘기면 검사가 스텁 안의 객체를 붙잡고 있게 된다).
+contextBridge.exposeInMainWorld('__uiStubSpy', {
+  newSessionCalls: () => newSessionCalls.map((c) => JSON.stringify(c ?? null)),
+})

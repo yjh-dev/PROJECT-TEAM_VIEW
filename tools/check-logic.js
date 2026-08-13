@@ -512,6 +512,18 @@ guide.includes('qa-tester') && guide.includes('마지막 관문')
     'const readSessionError = () => (process.env.WHY === "1" ? { message: "한도", label: "토큰 사용량 한도", hint: null } : null)',
     // 끝나지 않은 팀원 판정은 아래 10번에서 따로 본다. 여기서는 없다고 둔다.
     'const unfinishedAgents = () => (process.env.LEFT ? process.env.LEFT.split(",") : [])',
+    // 실행 출력에서 사유를 찾는 갈래도 **진짜 코드**로 붙인다(세워 두면 그 갈래가
+    // 끊겨도 검사가 통과한다 — stdout을 버리던 시절이 정확히 그랬다).
+    lead.slice(kindsAt, lead.indexOf('\n]\n', kindsAt) + 3),
+    // stdout에서 사유로 인정할 줄을 가리는 잣대도 **진짜 코드**로 붙인다. 여기를
+    // 스텁으로 세우면 "좁혔다"는 것이 검사에서만 사실이 된다.
+    /^const CLI_ERROR_LINE = .*$/m.exec(lead)[0],
+    /^const CLI_LIMIT_LINE = .*$/m.exec(lead)[0],
+    lead.slice(lead.indexOf('function resetTimeFrom'), lead.indexOf('\n}\n', lead.indexOf('function resetTimeFrom')) + 3),
+    lead.slice(
+      lead.indexOf('function failureFromOutput'),
+      lead.indexOf('\n}\n', lead.indexOf('function failureFromOutput')) + 3,
+    ),
     lead.slice(lead.indexOf('function failureFor'), fj + 3),
     'module.exports = { failureFor }',
   ].join('\n')
@@ -532,10 +544,41 @@ guide.includes('qa-tester') && guide.includes('마지막 관문')
   unknown && typeof unknown.message === 'string'
     ? ok('사유를 못 찾아도 실패는 실패로 알린다')
     : bad('실패 판정', '사유가 없으면 성공으로 처리된다 — "작업이 끝났습니다"가 뜬다')
+  // **기록에 없어도 출력에는 있다.** 실측으로 겪은 그 자리다 — 세션 기록에서 못 찾은
+  // 사유가 stdout에는 그대로 찍혀 있었는데, 그 stdout을 통째로 버리고 있었다.
+  process.env.WHY = '0'
+  const fromOut = failureFor('d', 's', 0, 1, { stdout: "You've hit your session limit · resets 2:50am (Asia/Seoul)" })
+  fromOut?.label === '토큰 사용량 한도'
+    ? ok('기록에 없어도 실행 출력에서 사유를 찾는다')
+    : bad('출력 사유', `stdout에 사유가 찍혀 있는데 "코드 1"만 남는다 — ${JSON.stringify(fromOut)}`)
+  fromOut?.wait === true && fromOut?.resetAt === '2:50am (Asia/Seoul)'
+    ? ok('그 사유에 기다릴 일인지·언제 풀리는지가 붙는다')
+    : bad('출력 사유 부가정보', JSON.stringify(fromOut))
+  // **그렇다고 답변 본문까지 사유로 삼으면 안 된다.** stdout 꼬리는 모델의 최종 답변이다 —
+  // 결제 기능을 만들면 거기에 'rate limit'·429가 얼마든 들어 있고, 예전 구현은 그걸
+  // 그대로 "토큰 사용량 한도"로 읽어 있지도 않은 한도 실패를 지어냈다.
+  const answer = failureFor('d', 's', 0, 1, {
+    stdout: ['429 rate limit 처리를 붙였습니다.', 'payment 실패는 billing 로그로 남깁니다.'].join('\n'),
+  })
+  answer?.label === null
+    ? ok('답변 본문의 "rate limit"을 사유로 삼지 않는다')
+    : bad('출력 사유 과잉', `팀원이 한도를 논한 것이 한도 실패가 된다 — ${JSON.stringify(answer)}`)
+  answer?.source === null
+    ? ok('사유를 못 찾았으면 출처도 없다')
+    : bad('사유 출처', `출처가 붙어 있다 — 한도 기록까지 흘러간다: ${JSON.stringify(answer)}`)
+  // stderr는 CLI가 낸 것이라 줄을 가리지 않는다. 그리고 stdout보다 먼저 본다.
+  const fromErr = failureFor('d', 's', 0, 1, { stdout: '완료했습니다.', stderr: 'rate limit exceeded' })
+  fromErr?.label === '토큰 사용량 한도' && fromErr?.source === 'stderr'
+    ? ok('stderr에 찍힌 사유는 그대로 받는다')
+    : bad('stderr 사유', JSON.stringify(fromErr))
   process.env.WHY = '1'
   failureFor('d', 's', 0, 1)?.label === '토큰 사용량 한도'
     ? ok('사유를 찾으면 그대로 붙인다')
     : bad('사유 전달', '찾은 사유가 버려진다')
+  // 기록이 더 정확하다(이번 실행 것만 골라 본다). 출력이 뒤에서 덮으면 안 된다.
+  failureFor('d', 's', 0, 1, { stdout: 'Error: Overloaded (529)' })?.label === '토큰 사용량 한도'
+    ? ok('기록에서 찾은 사유를 출력이 덮지 않는다')
+    : bad('사유 우선순위', '나중 것이 앞선 것을 덮는다')
 }
 
 // ── 10. 팀원이 일하는 중에 끝났으면 "작업 종료"가 아니다 ────────────────────
@@ -618,7 +661,8 @@ guide.includes('qa-tester') && guide.includes('마지막 관문')
       'teamCatalog', 'listTeam', 'teamWriteBlock', 'afterTeamChange',
       'hireAgent', 'yamlValue', 'renderAgentFile', 'createAgent',
       'requeueToLead', 'fireAgent', 'setupProject', 'staleAgents',
-      'rosterLine', 'promptFor',
+      // promptFor는 인수인계 메모를 이 둘을 통해 붙인다(20번에서 따로 본다).
+      'rosterLine', 'takeHandoff', 'handoffBlock', 'promptFor',
     ],
     [
       "const fs = require('fs')",
@@ -2268,7 +2312,12 @@ async function ipcContractChecks() {
     process.env.SCENARIO = scenario
     Module._load = function (request, ...rest) {
       if (request === 'electron') {
-        return { contextBridge: { exposeInMainWorld: (_name, exposed) => (api = exposed) } }
+        // **`teamView`만 집는다.** 스텁은 검사용 스파이(`__uiStubSpy` 등)를 따로 더
+        // 내걸기도 하는데, 마지막에 걸린 것을 받아 두면 그날부터 api가 통째로 엉뚱한
+        // 물건이 된다(실제로 `canAutoInstall is not a function`으로 터졌다).
+        return {
+          contextBridge: { exposeInMainWorld: (name, exposed) => name === 'teamView' && (api = exposed) },
+        }
       }
       return origLoad.call(this, request, ...rest)
     }
@@ -2422,6 +2471,849 @@ function statusContractChecks() {
   eq('마법사를 끝내면 그 키를 적는다', /saveConfig\(\{ \.\.\.loadConfig\(\), firstRunDone: true \}\)/.test(mainSrc), 'true')
 }
 
+// ── 19. 계정 전체 사용량 ───────────────────────────────────────────────────
+//
+// 이 집계는 **틀리면 조용히 틀린다.** 숫자가 두 배가 되어도 화면에는 그냥 큰 숫자가
+// 보일 뿐이고, 반대로 성능을 틀리면 앱이 통째로 멎는다. 그래서 소스에서 그대로 떼어
+// 실제 파일에 대고 돌려 본다.
+//
+// 여기서 보는 것들:
+//   증분    같은 파일을 두 번 훑어도 합계가 두 배가 되지 않는가(오프셋이 맞는가)
+//   축소    파일이 줄어들면 처음부터 다시 세는가(안 그러면 두 번 센다)
+//   내구성  usage 없는 줄·깨진 JSON·쓰다 만 마지막 줄에 죽지 않는가
+//   경계    자정에서 오늘이 올바르게 갈리는가(기록은 UTC, 사람의 하루는 로컬이다)
+//   성능    오래된 파일을 아예 열지 않는가
+//
+// **예산 검사는 없앴다 — 기능 자체가 없어졌기 때문이다.** 한때 실측 평균에서 뽑은
+// 눈금을 분모로 삼아 퍼센트를 그렸는데, 우리가 재는 것(달력 하루·최근 7일·출력 토큰)이
+// Claude가 재는 것(5시간 롤링 세션·목요일 리셋 주간·모델별)과 아예 달랐다. 없어진
+// 기능을 계속 검사하면 검사가 거짓말을 한다.
+//
+// 아래 둘은 **검사가 구조적으로 못 잡던 자리**다. 값의 모양만 보고 그 값이 진짜인지는
+// 보지 않았기 때문에 리뷰에서 한꺼번에 드러났다. 이제는 그 상황을 실제로 만들어서 본다:
+//   창밖    14칸을 내보내면서 뒤쪽 6칸을 **가짜 0**으로 채우지 않는가(`days.length===14`만
+//           보면 0인지 진짜인지 알 수 없다 — 그래서 오래 통과했다)
+//   리셋중  재집계 리셋이 걸린 **그 순간의 상태**로 "오늘 0"을 내보내지 않는가
+async function usageChecks() {
+  console.log('\n계정 전체 사용량')
+
+  // 상수는 **main.js에서 그대로 떼어 온다.** 검사가 값을 지어내면 앱이 바뀌어도
+  // 검사만 계속 초록불이 된다(이 저장소에서 이미 한 번 그랬다).
+  const constsFrom = (file, names) => {
+    const src = fs.readFileSync(path.join(ROOT, file), 'utf8').replace(/\r\n/g, '\n')
+    return (
+      names
+        .map((n) => {
+          const m = new RegExp(`^const ${n} = .*$`, 'm').exec(src)
+          if (!m) throw new Error(`${file}에서 상수 ${n}을 찾지 못했습니다`)
+          return m[0]
+        })
+        .join('\n') + '\n'
+    )
+  }
+
+  const CONSTS = [
+    'USAGE_SCAN_DAYS',
+    'USAGE_KEEP_DAYS',
+    'USAGE_WEEK_DAYS',
+    'USAGE_REFRESH_MS',
+    'USAGE_WALK_DEPTH',
+    // stdout에서 사유로 인정할 줄을 가리는 잣대. 이게 없으면 모델의 답변 본문이 곧 사유가 된다.
+    'CLI_ERROR_LINE',
+    'CLI_LIMIT_LINE',
+  ]
+  const U = loadFrom(
+    'main.js',
+    [
+      'newUsageState',
+      'newUsageDay',
+      'usageDayKey',
+      'usageDayKeysBack',
+      'usageFilesUnder',
+      'addUsageLine',
+      'endsWithNewline',
+      'scanUsageFile',
+      'pruneUsageDays',
+      'refreshUsage',
+      'currentLimitHit',
+      'usageCoveredDays',
+      'usageStatsSnapshot',
+      'tzOffsetMinutes',
+      'isoWithOffset',
+      'resetAtFrom',
+      'limitHitFrom',
+      'failureFromOutput',
+      'resetTimeFrom',
+      'makeTailBuffer',
+    ],
+    [
+      "const fs = require('fs')",
+      "const path = require('path')",
+      "const readline = require('readline')",
+      constsFrom('main.js', CONSTS),
+      // FAILURE_KINDS는 배열 리터럴이라 통째로 떼어 온다(limitHitFrom이 쓴다).
+      (() => {
+        const src = fs.readFileSync(path.join(ROOT, 'main.js'), 'utf8').replace(/\r\n/g, '\n')
+        const i = src.indexOf('const FAILURE_KINDS')
+        return src.slice(i, src.indexOf('\n]\n', i) + 3)
+      })(),
+      '',
+    ].join('\n'),
+  )
+
+  // ── 실험실 ────────────────────────────────────────────────────────────────
+  const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'tv-usage-'))
+  const ROOTDIR = path.join(HOME, 'projects')
+  const proj = path.join(ROOTDIR, 'C--dev-demo')
+  const subs = path.join(proj, 'sess-1', 'subagents')
+  fs.mkdirSync(subs, { recursive: true })
+
+  const NOW = Date.now()
+  /** 기록 한 줄. `timestamp`는 실물처럼 UTC로 적는다 — 집계가 로컬로 되돌려야 한다. */
+  const rec = (when, out) =>
+    JSON.stringify({
+      timestamp: new Date(when).toISOString(),
+      message: {
+        usage: { input_tokens: 10, output_tokens: out, cache_read_input_tokens: 5, cache_creation_input_tokens: 7 },
+      },
+    })
+  const put = (file, lines) => fs.writeFileSync(file, lines.map((l) => l + '\n').join(''), 'utf8')
+  const totals = (st) => {
+    const t = { output: 0, msgs: 0, input: 0, cacheRead: 0, cacheWrite: 0 }
+    for (const d of st.days.values()) {
+      t.output += d.output
+      t.msgs += d.msgs
+      t.input += d.input
+      t.cacheRead += d.cacheRead
+      t.cacheWrite += d.cacheWrite
+    }
+    return t
+  }
+
+  // ── 19-1. 같은 파일을 두 번 훑어도 합계가 두 배가 되지 않는가 ─────────────
+  // 증분 오프셋이 어긋나면 여기서 바로 두 배가 된다. 화면에는 "많이 썼구나"로만 보인다.
+  const lead = path.join(proj, 'sess-1.jsonl')
+  put(lead, [rec(NOW, 100), rec(NOW, 200), rec(NOW, 300)])
+  {
+    const st = U.newUsageState()
+    await U.refreshUsage(st, ROOTDIR, NOW)
+    const once = totals(st)
+    eq('첫 집계가 실제로 센다', `${once.output}/${once.msgs}`, '600/3')
+    eq('입력·캐시도 함께 센다', `${once.input}/${once.cacheRead}/${once.cacheWrite}`, '30/15/21')
+    await U.refreshUsage(st, ROOTDIR, NOW)
+    await U.refreshUsage(st, ROOTDIR, NOW)
+    const again = totals(st)
+    eq('두 번 세 번 훑어도 합계는 그대로', `${again.output}/${again.msgs}`, '600/3')
+
+    // 덧붙은 줄만 새로 센다(파일 전체를 다시 세지 않는다).
+    fs.appendFileSync(lead, rec(NOW, 400) + '\n', 'utf8')
+    await U.refreshUsage(st, ROOTDIR, NOW)
+    eq('덧붙은 만큼만 늘어난다', `${totals(st).output}/${totals(st).msgs}`, '1000/4')
+  }
+
+  // ── 19-2. 파일이 줄어들면 처음부터 다시 센다 ──────────────────────────────
+  // 세션을 지우거나 압축하면 파일이 짧아진다. 오프셋을 그대로 둔 채 이어서 세면
+  // 옛 몫이 남아 있는 위에 새 몫이 또 얹힌다 — 되돌릴 방법이 없다.
+  {
+    const st = U.newUsageState()
+    await U.refreshUsage(st, ROOTDIR, NOW)
+    eq('줄기 전', totals(st).output, '1000')
+    put(lead, [rec(NOW, 50)]) // 통째로 짧아졌다
+    await U.refreshUsage(st, ROOTDIR, NOW)
+    eq('줄어들면 처음부터 다시 센다', `${totals(st).output}/${totals(st).msgs}`, '50/1')
+
+    // 파일이 사라진 경우도 같다 — 남겨 두면 없는 사용량이 계속 보인다.
+    const temp = path.join(proj, 'sess-tmp.jsonl')
+    put(temp, [rec(NOW, 777)])
+    await U.refreshUsage(st, ROOTDIR, NOW)
+    eq('새 파일도 집계에 들어온다', totals(st).output, '827')
+    fs.unlinkSync(temp)
+    await U.refreshUsage(st, ROOTDIR, NOW)
+    eq('사라진 파일 몫은 남지 않는다', totals(st).output, '50')
+  }
+
+  // ── 19-3. 이상한 줄에 죽지 않는가 ─────────────────────────────────────────
+  // 기록에는 usage 없는 줄이 훨씬 많고, 지금 쓰는 중이라 끊긴 줄도 섞인다.
+  {
+    const st = U.newUsageState()
+    const messy = path.join(subs, 'agent-1.jsonl')
+    put(messy, [
+      '',
+      '{ 이건 JSON이 아니다 "usage"',
+      JSON.stringify({ timestamp: new Date(NOW).toISOString(), type: 'user', message: { content: 'hi' } }),
+      JSON.stringify({ timestamp: new Date(NOW).toISOString(), message: { usage: null } }),
+      JSON.stringify({ message: { usage: { output_tokens: 9 } } }), // 시각이 없다
+      rec(NOW, 42),
+    ])
+    put(lead, [rec(NOW, 8)])
+    let threw = null
+    try {
+      await U.refreshUsage(st, ROOTDIR, NOW)
+    } catch (e) {
+      threw = e
+    }
+    eq('깨진 줄이 있어도 던지지 않는다', threw && threw.message, 'null')
+    eq('셀 수 있는 줄만 센다', `${totals(st).output}/${totals(st).msgs}`, '50/2')
+    eq('팀원 기록(subagents)도 함께 센다', st.days.size > 0 && totals(st).output === 50, 'true')
+  }
+
+  // ── 19-4. 쓰다 만 마지막 줄 ───────────────────────────────────────────────
+  // jsonl은 지금도 쓰이는 중이다. 개행이 아직 안 붙은 꼬리를 세어 버리면, 그 줄이
+  // 완성된 다음에 **또** 센다. 개행이 붙을 때까지 기다렸다가 그때 한 번만 세야 한다.
+  {
+    const st = U.newUsageState()
+    const half = path.join(proj, 'sess-2.jsonl')
+    fs.writeFileSync(half, rec(NOW, 11) + '\n' + rec(NOW, 22).slice(0, 40), 'utf8') // 꼬리가 끊겨 있다
+    put(lead, [])
+    put(path.join(subs, 'agent-1.jsonl'), [])
+    await U.refreshUsage(st, ROOTDIR, NOW)
+    eq('끊긴 꼬리는 세지 않는다', `${totals(st).output}/${totals(st).msgs}`, '11/1')
+    // 나머지가 마저 쓰였다
+    fs.writeFileSync(half, rec(NOW, 11) + '\n' + rec(NOW, 22) + '\n', 'utf8')
+    await U.refreshUsage(st, ROOTDIR, NOW)
+    eq('완성된 뒤 한 번만 센다', `${totals(st).output}/${totals(st).msgs}`, '33/2')
+    fs.unlinkSync(half)
+  }
+
+  // ── 19-5. 날짜 경계(자정) ─────────────────────────────────────────────────
+  // 기록의 시각은 UTC다. 앞 10자를 그대로 날짜로 쓰면 한국에서는 자정부터 아침
+  // 아홉 시까지 쓴 것이 전부 어제로 들어간다 — 화면의 "오늘"은 로컬 자정 기준이다.
+  {
+    const st = U.newUsageState()
+    const midnight = new Date(NOW)
+    midnight.setHours(0, 0, 0, 0) // 오늘 로컬 자정
+    const boundary = path.join(proj, 'sess-3.jsonl')
+    put(lead, [])
+    put(path.join(subs, 'agent-1.jsonl'), [])
+    put(boundary, [
+      rec(midnight.getTime() - 1000, 500), // 어제 23:59:59
+      rec(midnight.getTime() + 1000, 60), // 오늘 00:00:01
+      rec(midnight.getTime() + 3600_000, 40), // 오늘 01:00
+    ])
+    await U.refreshUsage(st, ROOTDIR, NOW)
+    const snap = U.usageStatsSnapshot(st, NOW, { plan: 'max', limitHit: null })
+    eq('자정 직전 것은 오늘이 아니다', snap.today.output, '100')
+    eq('오늘 건수도 갈린다', snap.today.msgs, '2')
+    eq('어제 것도 사라지지 않는다(주간에 들어간다)', snap.week.output, '600')
+    const yesterday = snap.days[snap.days.length - 2]
+    eq('어제 칸에 정확히 들어간다', yesterday.output, '500')
+    fs.unlinkSync(boundary)
+  }
+
+  // ── 19-6. 오래된 파일은 아예 열지 않는가(성능의 전부다) ───────────────────
+  // 전체는 207파일 597MB다. 매번 다 읽으면 앱이 얼어붙는다. 후보를 mtime으로 먼저
+  // 거르는 이 한 줄이 그걸 막는다.
+  {
+    const old = path.join(proj, 'sess-old.jsonl')
+    put(old, [rec(NOW - 40 * 86400_000, 999)])
+    const long = (NOW - (USAGE_SCAN_DAYS_VALUE + 2) * 86400_000) / 1000
+    fs.utimesSync(old, long, long)
+    const picked = U.usageFilesUnder(ROOTDIR, NOW, USAGE_SCAN_DAYS_VALUE)
+    eq('오래된 파일은 후보에서 빠진다', picked.some((f) => f.path === old), 'false')
+    const fresh = (NOW - 3600_000) / 1000
+    fs.utimesSync(old, fresh, fresh)
+    eq('최근에 손댄 파일은 들어온다', U.usageFilesUnder(ROOTDIR, NOW, USAGE_SCAN_DAYS_VALUE).some((f) => f.path === old), 'true')
+    // 깊은 곳(subagents)까지 닿는가 — 여기가 끊기면 사용량의 3분의 2를 놓친다.
+    eq(
+      '팀원 폴더까지 훑는다',
+      U.usageFilesUnder(ROOTDIR, NOW, USAGE_SCAN_DAYS_VALUE).some((f) => f.path.includes('subagents')),
+      'true',
+    )
+    fs.unlinkSync(old)
+  }
+
+  // (19-7의 예산 검사는 기능과 함께 없앴다. 분모가 되돌아오지 않는지는 19-11에서 본다.)
+
+  // ── 19-8. 화면에 보낼 모양(계약) ──────────────────────────────────────────
+  // 프론트가 이 필드 이름을 그대로 읽는다. 하나만 어긋나도 화면은 빈칸이 된다.
+  {
+    const st = U.newUsageState()
+    const empty = U.usageStatsSnapshot(st, NOW, { plan: null, limitHit: null })
+    eq('첫 집계 전에는 ready:false', empty.ready, 'false')
+    eq('그때도 필드는 다 있다(값만 null)', Object.keys(empty).join(','), 'ready,plan,today,week,days,limitHit')
+    eq('준비 전에는 숫자를 지어내지 않는다', `${empty.today}/${empty.week}/${empty.days}`, 'null/null/null')
+
+    await U.refreshUsage(st, ROOTDIR, NOW)
+    const s = U.usageStatsSnapshot(st, NOW, { plan: 'max', limitHit: null })
+    eq('집계 뒤에는 ready:true', s.ready, 'true')
+    eq('최상위 필드', Object.keys(s).join(','), 'ready,plan,today,week,days,limitHit')
+    eq('오늘 필드', Object.keys(s.today).join(','), 'input,output,cacheRead,cacheWrite,msgs')
+    eq('주간 필드', Object.keys(s.week).join(','), 'input,output,cacheRead,cacheWrite,msgs')
+    eq('날짜 칸 필드', Object.keys(s.days[s.days.length - 1]).join(','), 'date,output,cacheRead,msgs,partial')
+    // 분모는 아예 오지 않는다. 필드가 다시 생기면 최상위 필드 검사가 먼저 걸린다.
+    eq('분모(예산·한도)를 실어 보내지 않는다', 'budget' in s || 'limit' in s, 'false')
+    eq('날짜는 14개', s.days.length, '14')
+    eq('오래된 것부터', s.days[0].date < s.days[13].date, 'true')
+    eq('마지막 칸이 오늘이다', s.days[13].date, U.usageDayKey(NOW))
+    eq('플랜은 받은 대로만(지어내지 않는다)', s.plan, 'max')
+  }
+
+  // ── 19-9. 한도에 걸린 사실 ────────────────────────────────────────────────
+  // "언제 풀리나"는 문구 안에 이미 있다. 계산할 수 있는 시각으로 바꿔 둔다.
+  {
+    // 08-11 01:24:55Z = 서울 08-11 10:24. 문구에 든 표준시로 계산해야 하므로
+    // 이 검사는 이 컴퓨터의 시간대와 상관없이 같은 답이 나와야 한다.
+    const at = Date.parse('2026-08-11T01:24:55.195Z')
+    eq(
+      '풀리는 시각을 절대 시각으로',
+      U.resetAtFrom("You've hit your session limit · resets 6:50pm (Asia/Seoul)", at),
+      '2026-08-11T18:50:00+09:00',
+    )
+    // **이미 지난 시각이면 다음 날이다.** 한도가 풀리는 때는 언제나 앞이다 —
+    // 오늘 날짜에 그냥 얹으면 "8시간 전에 풀렸다"는 시각이 나온다.
+    eq('지난 시각은 다음 날로', U.resetAtFrom('resets 2:50am (Asia/Seoul)', at), '2026-08-12T02:50:00+09:00')
+    eq('자정도 읽는다', U.resetAtFrom('resets 12:00am (Asia/Seoul)', at), '2026-08-12T00:00:00+09:00')
+    eq('다른 표준시도 그 지역 시각으로', U.resetAtFrom('resets 9:00pm (America/New_York)', at), '2026-08-11T21:00:00-04:00')
+    eq('시각이 없으면 null', U.resetAtFrom('API Error: 429 Too Many Requests', at), 'null')
+
+    const limitMsg = "You've hit your session limit · resets 6:50pm (Asia/Seoul)"
+    const hit = U.limitHitFrom({ message: limitMsg, source: 'session' }, at)
+    eq('한도 실패만 남긴다', `${hit.at}|${hit.resetAt}`, '2026-08-11T01:24:55.195Z|2026-08-11T18:50:00+09:00')
+    eq('stderr에서 온 것도 남긴다', U.limitHitFrom({ message: limitMsg, source: 'stderr' }, at) !== null, 'true')
+    // **stdout에서 주운 것은 사실로 치지 않는다.** 그건 모델의 답변 본문일 수 있고,
+    // 한 번 남으면 있지도 않았던 "한도에 걸렸던 기록"이 24시간 화면에 뜬다.
+    eq('stdout에서 온 것은 남기지 않는다', U.limitHitFrom({ message: limitMsg, source: 'stdout' }, at), 'null')
+    eq('출처를 모르면 남기지 않는다', U.limitHitFrom({ message: limitMsg }, at), 'null')
+    eq('서버 혼잡은 한도가 아니다', U.limitHitFrom({ message: 'Error: Overloaded (529)', source: 'session' }, at), 'null')
+    eq('로그인 만료도 아니다', U.limitHitFrom({ message: '401 unauthorized', source: 'session' }, at), 'null')
+    eq('사유가 없으면 남길 것도 없다', U.limitHitFrom(null, at), 'null')
+
+    // 풀린 뒤에도 계속 띄우면 거짓말이 된다.
+    eq('풀리기 전에는 보여 준다', U.currentLimitHit(hit, at + 60_000) !== null, 'true')
+    eq('풀린 뒤에는 내린다', U.currentLimitHit(hit, Date.parse('2026-08-11T18:50:01+09:00')), 'null')
+    eq('하루 지난 것도 내린다', U.currentLimitHit({ at: new Date(at).toISOString(), resetAt: null }, at + 30 * 3600_000), 'null')
+  }
+
+  // ── 19-10. stdout을 버려서 사라졌던 사유 ──────────────────────────────────
+  // `claude -p`는 결과와 한도 안내를 **stdout**으로 낸다. 그걸 'ignore'로 버리는 바람에
+  // FAILURE_KINDS의 한도 판별은 만들어진 뒤로 입력이 도달한 적이 없었다.
+  {
+    const OUT = ['Analyzing repository…', '', "You've hit your session limit · resets 2:50am (Asia/Seoul)"].join('\n')
+    const why = U.failureFromOutput(OUT)
+    eq('출력에서 사유를 읽는다', why && why.label, '토큰 사용량 한도')
+    eq('기다리면 되는 실패로 가른다', why && why.wait, 'true')
+    eq('풀리는 시각도 함께', why && why.resetAt, '2:50am (Asia/Seoul)')
+    eq('사유가 든 줄만 보여 준다', why && why.message, "You've hit your session limit · resets 2:50am (Asia/Seoul)")
+    eq('모르는 출력은 사유로 삼지 않는다', U.failureFromOutput('Done. 3 files changed.'), 'null')
+    eq('빈 출력도 마찬가지', U.failureFromOutput(''), 'null')
+    eq('출처를 함께 알려 준다', why && why.source, 'stdout')
+
+    // **여기가 이번에 좁힌 자리다.** stdout 꼬리 8KB는 모델의 **최종 답변 본문**이다.
+    // 결제 기능을 만드는 프로젝트라면 그 안에 'rate limit'·429·payment·503이 얼마든
+    // 들어 있다. 예전에는 꼬리 전체를 FAILURE_KINDS로 훑어서 그런 답변이 곧
+    // "토큰 사용량 한도"가 됐고, 있지도 않았던 한도 기록이 24시간 떴다.
+    const ANSWER = [
+      '결제 API를 정리했습니다.',
+      '- 429(rate limit)를 만나면 지수 백오프로 재시도합니다',
+      '- payment 실패는 billing 로그에 남깁니다',
+      '- 503 service unavailable은 큐로 되돌립니다',
+      'quota 초과 시 too many requests를 그대로 전달합니다.',
+      '완료했습니다.',
+    ].join('\n')
+    eq('답변 본문에 든 한도 이야기는 사유가 아니다', U.failureFromOutput(ANSWER), 'null')
+    eq('한 줄짜리 답변도 마찬가지', U.failureFromOutput('rate limit 처리를 429로 바꿨습니다.'), 'null')
+    // 반대로 **CLI가 낸 줄은 그대로 받는다.** 좁히다가 진짜 실패를 놓치면 그게 더 나쁘다.
+    for (const [name, line] of [
+      ['API Error 접두', 'API Error: 429 {"type":"error","error":{"type":"rate_limit_error"}}'],
+      ['Error 접두', 'Error: 503 service unavailable'],
+      ['한도 안내 문구', "You've hit your session limit · resets 2:50am (Asia/Seoul)"],
+    ]) {
+      eq(`${name}는 stdout에서도 사유로 인정한다`, U.failureFromOutput(`앞줄\n${line}\n뒷줄`) !== null, 'true')
+    }
+    // stderr는 CLI가 직접 낸 것이라 줄을 가리지 않는다(그 자리에 답변 본문이 올 수 없다).
+    const fromErr = U.failureFromOutput('rate limit exceeded', { trusted: true })
+    eq('stderr는 접두 없이도 받는다', fromErr && fromErr.label, '토큰 사용량 한도')
+    eq('그때 출처는 stderr다', fromErr && fromErr.source, 'stderr')
+
+    // 리셋 시각이 **다음 줄**에 오는 경우. 보여 줄 문구는 한 줄로 좁히되 시각은 놓치지 않는다.
+    const wrapped = ["API Error: You've hit your session limit", 'resets 2:50am (Asia/Seoul)'].join('\n')
+    const w2 = U.failureFromOutput(wrapped, { trusted: true })
+    eq('문구는 걸린 줄만', w2 && w2.message, "API Error: You've hit your session limit")
+    eq('시각은 다음 줄에서도 찾는다', w2 && w2.resetAt, '2:50am (Asia/Seoul)')
+
+    // 링버퍼 — 상한을 넘겨 쌓지 않는가. 긴 작업의 stdout은 MB 단위다.
+    const buf = U.makeTailBuffer(8 * 1024)
+    for (let i = 0; i < 2000; i++) buf.push('x'.repeat(100) + '\n')
+    eq('상한을 넘겨 쌓지 않는다', buf.text().length <= 8 * 1024, 'true')
+    buf.push("\nYou've hit your session limit · resets 2:50am (Asia/Seoul)\n")
+    eq('끝부분은 남는다', U.failureFromOutput(buf.text()).label, '토큰 사용량 한도')
+    eq('뒤에서 몇 줄만 뽑는다', buf.lines(2).length, '2')
+
+    // 답변 본문 → 사유 → 한도 기록으로 이어지는 **전체 길**이 막혀 있는가.
+    eq('답변 본문은 한도 기록까지 가지 못한다', U.limitHitFrom(U.failureFromOutput(ANSWER), Date.now()), 'null')
+    eq(
+      '접두가 붙은 stdout도 한도 기록으로는 남기지 않는다',
+      U.limitHitFrom(U.failureFromOutput("API Error: You've hit your session limit"), Date.now()),
+      'null',
+    )
+  }
+
+  // ── 19-12. 스캔 창 밖의 날 — **없는 숫자를 지어내지 않는가** ──────────────
+  //
+  // 훑는 파일은 mtime이 USAGE_SCAN_DAYS(8일) 안쪽인 것뿐인데 화면에는 USAGE_KEEP_DAYS
+  // (14일)를 내보낸다. 열지도 않은 날을 `newUsageDay()`(전부 0)로 채워 보내면 화면은
+  // 그 0을 실제 값으로 그리고 평균까지 낸다 — "평소의 2.4배" 같은 **없는 문장**이
+  // 거기서 나왔다. 그동안 검사는 `days.length === 14`만 봤기 때문에 이걸 못 잡았다.
+  //
+  // 여기서는 창 밖의 날을 **실제로 만들어서**(오래된 mtime) 그 칸이 null인지 본다.
+  {
+    const H = fs.mkdtempSync(path.join(os.tmpdir(), 'tv-usage-far-'))
+    const R = path.join(H, 'projects')
+    const P = path.join(R, 'C--dev-far')
+    fs.mkdirSync(P, { recursive: true })
+    // 날짜로 빼야 서머타임에도 안 밀린다(main.js와 같은 방식).
+    const dayBack = (n) => {
+      const d = new Date(NOW)
+      d.setHours(12, 0, 0, 0)
+      d.setDate(d.getDate() - n)
+      return d
+    }
+    const OUT_OF_WINDOW = USAGE_KEEP_DAYS_VALUE - 1 // 14칸 중 가장 오래된 쪽
+
+    const fresh = path.join(P, 'fresh.jsonl')
+    put(fresh, [rec(dayBack(0).getTime(), 120)])
+    const far = path.join(P, 'far.jsonl')
+    put(far, [rec(dayBack(OUT_OF_WINDOW).getTime(), 999)])
+    const farSec = dayBack(OUT_OF_WINDOW).getTime() / 1000
+    fs.utimesSync(far, farSec, farSec) // 그 뒤로 손대지 않은 파일이다
+
+    // 전제부터 확인한다 — 이 파일이 정말 안 열려야 이 검사가 뜻이 있다.
+    eq('창 밖 파일은 애초에 후보에 없다', U.usageFilesUnder(R, NOW, USAGE_SCAN_DAYS_VALUE).some((f) => f.path === far), 'false')
+
+    const st = U.newUsageState()
+    await U.refreshUsage(st, R, NOW)
+    const s = U.usageStatsSnapshot(st, NOW, { plan: null, limitHit: null })
+    const byDate = Object.fromEntries(s.days.map((d) => [d.date, d]))
+    const key = (n) => U.usageDayKey(dayBack(n))
+
+    const gone = byDate[key(OUT_OF_WINDOW)]
+    eq('창 밖의 날은 0이 아니라 null', `${gone.output}/${gone.cacheRead}/${gone.msgs}`, 'null/null/null')
+    eq('그 날은 partial:true로 "모른다"고 말한다', gone.partial, 'true')
+    eq('칸 이름은 창 안팎이 같다', Object.keys(gone).join(','), 'date,output,cacheRead,msgs,partial')
+
+    const today = byDate[key(0)]
+    eq('창 안쪽은 실제로 센 값', `${today.output}/${today.msgs}`, '120/1')
+    eq('창 안쪽은 partial:false', today.partial, 'false')
+    // **0과 null은 뜻이 다르다.** 창 안쪽인데 자료가 없는 날은 0이 맞다(안 썼다).
+    const idle = byDate[key(1)]
+    eq('창 안쪽의 빈 날은 0(=안 썼다)', `${idle.output}/${idle.partial}`, '0/false')
+
+    const nulls = s.days.filter((d) => d.output === null).length
+    eq('null인 칸 수 = 창 밖 날 수', nulls, String(USAGE_KEEP_DAYS_VALUE - Math.min(USAGE_SCAN_DAYS_VALUE, USAGE_KEEP_DAYS_VALUE)))
+    eq('그 칸은 전부 partial', s.days.filter((d) => d.partial).length, String(nulls))
+    eq('평균에 쓸 수 있는 칸만 숫자다', s.days.filter((d) => d.output !== null).length, String(USAGE_SCAN_DAYS_VALUE))
+    // 오늘·이번 주는 창 안쪽이라 그대로 믿을 수 있다. 이 부등호가 그 근거다 —
+    // 깨지면 주간 합계가 **말없이 덜 센 값**이 된다.
+    eq('주간 창이 스캔 창을 넘지 않는다', USAGE_WEEK_DAYS_VALUE <= USAGE_SCAN_DAYS_VALUE, 'true')
+    eq('스캔 창이 화면 창보다 짧다(그래서 partial이 필요하다)', USAGE_SCAN_DAYS_VALUE < USAGE_KEEP_DAYS_VALUE, 'true')
+    fs.rmSync(H, { recursive: true, force: true })
+  }
+
+  // ── 19-13. 재집계 리셋 중 — "오늘 0%"를 사실처럼 보여 주지 않는가 ─────────
+  //
+  // 파일이 줄거나 사라지면 처음부터 다시 센다(19-2). 그런데 그때 `days`만 비우고
+  // `ready`를 그대로 두면, 597MB를 다시 훑는 내내 `ready:true` + `today.output:0`이
+  // 나간다 — 화면에는 "오늘 0%"가 사실처럼 뜬다. 재스캔은 폴링 주기보다 훨씬 길다.
+  //
+  // 그래서 **재스캔이 끝나기 전의 상태를 그대로 본다**(앱도 정확히 그렇게 본다:
+  // getUsageStats는 refreshUsage를 기다리지 않고 곧바로 스냅샷을 만든다).
+  {
+    const H = fs.mkdtempSync(path.join(os.tmpdir(), 'tv-usage-reset-'))
+    const R = path.join(H, 'projects')
+    const P = path.join(R, 'C--dev-reset')
+    fs.mkdirSync(P, { recursive: true })
+    const a = path.join(P, 'a.jsonl')
+    const b = path.join(P, 'b.jsonl')
+    // 자릿수를 넉넉히 둔다 — "줄어들었다"는 판정은 바이트 수로 하므로, 뒤에서 두 번
+    // 더 줄이려면 처음이 길어야 한다.
+    put(a, [rec(NOW, 1000), rec(NOW, 2000)])
+    put(b, [rec(NOW, 300)])
+    const snap = (st, now) => U.usageStatsSnapshot(st, now, { plan: null, limitHit: null })
+
+    const st = U.newUsageState()
+    await U.refreshUsage(st, R, NOW)
+    eq('먼저 제대로 센다', `${st.ready}/${snap(st, NOW).today.output}`, 'true/3300')
+
+    // 세션이 지워지거나 압축되면 파일이 짧아진다 → 전체 재집계가 걸린다.
+    put(a, [rec(NOW, 5000)])
+    const running = U.refreshUsage(st, R, NOW + 1) // 일부러 기다리지 않는다
+    eq('리셋이 걸리면 ready가 내려간다', st.ready, 'false')
+    const mid = snap(st, NOW + 1)
+    eq('재집계 중에는 오늘을 0으로 내보내지 않는다', `${mid.ready}/${mid.today}/${mid.week}/${mid.days}`, 'false/null/null/null')
+    await running
+    eq('끝나면 다시 ready', st.ready, 'true')
+    eq('그리고 값은 다시 센 값이다', snap(st, NOW + 1).today.output, '5300')
+
+    // 재스캔이 **실패해도** ready가 true로 굳으면 안 된다. 빈 days + ready:true는
+    // 화면에 "오늘 0"이다.
+    put(a, [rec(NOW, 40)]) // 또 줄인다 → 다시 전체 재집계
+    const listed = U.usageFilesUnder(R, NOW + 2, USAGE_SCAN_DAYS_VALUE)
+    const doomed = listed[listed.length - 1].path // 이번 순서에서 가장 늦게 열릴 파일
+    const failing = U.refreshUsage(st, R, NOW + 2)
+    fs.unlinkSync(doomed) // 훑는 도중에 사라진다 — 앞 파일을 읽는 사이다
+    let threw = null
+    await failing.catch((e) => {
+      threw = e
+    })
+    eq('재스캔 실패를 삼키지 않는다', threw !== null, 'true')
+    eq('실패했으면 ready가 서지 않는다', st.ready, 'false')
+    eq('그때도 오늘을 0으로 내보내지 않는다', snap(st, NOW + 2).today, 'null')
+    // 다음 집계에서 회복한다(영영 ready:false로 굳지도 않는다).
+    await U.refreshUsage(st, R, NOW + 3)
+    eq('다음 집계에서 회복한다', st.ready, 'true')
+    eq('회복한 값도 다시 센 값', snap(st, NOW + 3).today.output, '40')
+    fs.rmSync(H, { recursive: true, force: true })
+  }
+
+  // ── 19-14. 창 밖으로 나간 파일 정리 ───────────────────────────────────────
+  //
+  // `state.files`는 지우는 길이 `clear()`뿐이라 창 밖 파일도 계속 쌓였다. 그러면
+  // 30초마다 그 전부에 `existsSync`(메인 프로세스 동기 I/O)를 걸고, 그중 하나가
+  // 지워지는 순간 **전체 재집계**가 돈다. 나이를 먹어 후보에서 빠지는 것과 지워지는
+  // 것은 다른 사건이다.
+  {
+    const H = fs.mkdtempSync(path.join(os.tmpdir(), 'tv-usage-prune-'))
+    const R = path.join(H, 'projects')
+    const P = path.join(R, 'C--dev-prune')
+    fs.mkdirSync(P, { recursive: true })
+    const keep = path.join(P, 'keep.jsonl')
+    const aging = path.join(P, 'aging.jsonl')
+    const back = (n) => {
+      const d = new Date(NOW)
+      d.setHours(12, 0, 0, 0)
+      d.setDate(d.getDate() - n)
+      return d
+    }
+    const OLD = USAGE_SCAN_DAYS_VALUE + 1 // 곧 창 밖으로 나갈 날
+    put(keep, [rec(NOW, 70)])
+    put(aging, [rec(back(OLD).getTime(), 900)])
+    const inWindow = (NOW - (USAGE_SCAN_DAYS_VALUE - 1) * 86400_000) / 1000
+    fs.utimesSync(aging, inWindow, inWindow) // 아직은 창 안쪽이다
+
+    const st = U.newUsageState()
+    await U.refreshUsage(st, R, NOW)
+    eq('창 안쪽이면 목록에 든다', st.files.has(aging), 'true')
+    const oldKey = U.usageDayKey(back(OLD))
+    eq('그 파일 몫도 실제로 세어 뒀다', st.days.has(oldKey), 'true')
+
+    // 하루가 지나 mtime이 창 밖으로 나간다(손댄 적은 없다).
+    const outWindow = (NOW - (USAGE_SCAN_DAYS_VALUE + 1) * 86400_000) / 1000
+    fs.utimesSync(aging, outWindow, outWindow)
+    await U.refreshUsage(st, R, NOW)
+    eq('창 밖으로 나가면 목록에서 지운다', st.files.has(aging), 'false')
+    // **여기가 판별점이다.** 전체 재집계가 돌았다면 days가 비워졌을 것이고, 그 파일은
+    // 이제 안 열리므로 저 날짜 몫은 사라졌을 것이다. 남아 있다 = 리셋이 안 돌았다.
+    eq('나이를 먹었다고 전체 재집계가 돌지는 않는다', st.days.has(oldKey), 'true')
+    eq('창 안쪽 파일은 그대로 남는다', st.files.has(keep), 'true')
+    eq('오늘 값도 흔들리지 않는다', st.days.get(U.usageDayKey(NOW)).output, '70')
+
+    // 반대로 **지워진 파일**은 여전히 전체 재집계 사유다(그 몫이 남으면 없는 사용량이다).
+    fs.unlinkSync(keep)
+    put(path.join(P, 'new.jsonl'), [rec(NOW, 3)])
+    await U.refreshUsage(st, R, NOW)
+    eq('지워진 파일은 그대로 두지 않는다', st.days.get(U.usageDayKey(NOW)).output, '3')
+    fs.rmSync(H, { recursive: true, force: true })
+  }
+
+  // ── 19-11. 배선 — 함수가 맞아도 이어져 있지 않으면 아무 일도 안 일어난다 ──
+  {
+    const mainSrc = fs.readFileSync(path.join(ROOT, 'main.js'), 'utf8').replace(/\r\n/g, '\n')
+    const preSrc = fs.readFileSync(path.join(ROOT, 'preload.js'), 'utf8')
+    eq('stdout을 더는 버리지 않는다', /stdio: \['pipe', 'pipe', 'pipe'\]/.test(mainSrc), 'true')
+    eq('stdout을 링버퍼로 받는다', /child\.stdout\?\.on\('data', \(b\) => outTail\.push\(b\)\)/.test(mainSrc), 'true')
+    eq('그 출력이 사유 판별로 넘어간다', /failureFor\(dir, sid, startedAt, code, output\)/.test(mainSrc), 'true')
+    // **stdout과 stderr를 합쳐 넘기지 않는다.** 합치면 받는 쪽이 믿는 정도를 가릴 수 없다.
+    eq(
+      '두 갈래를 구분해서 넘긴다',
+      /const output = \{ stdout: outTail\.text\(\), stderr: errLines\.join\('\\n'\) \}/.test(mainSrc),
+      'true',
+    )
+    eq('알림 쪽도 같은 모양으로 넘긴다', /notifyDone\(dir, failureFor\(dir, sid, startedAt, code, \{ stdout:/.test(mainSrc), 'true')
+    eq('한도에 걸린 사실을 남긴다', /lastLimitHit = limitHitFrom\(why, Date\.now\(\)\)/.test(mainSrc), 'true')
+    eq('그 기록은 출처를 가려서 남긴다', /why\.source !== 'stderr' && why\.source !== 'session'/.test(mainSrc), 'true')
+    // 창 밖의 날은 0이 아니라 null로 나간다(1번 결함의 배선).
+    eq('모르는 날은 null로 내보낸다', /output: null, cacheRead: null, msgs: null, partial: true/.test(mainSrc), 'true')
+    // 리셋은 "아직 모른다"다(2번 결함의 배선).
+    eq('리셋이 걸리면 ready를 내린다', /state\.days\.clear\(\)\s*\n[^\n]*\n[^\n]*\n[^\n]*\n\s*state\.ready = false/.test(mainSrc), 'true')
+    // 파이프도 실패한다 — 핸들러가 없으면 그 자리에서 예외가 되어 finishExit이 안 불린다(14번).
+    eq("stdout에 error 핸들러가 있다", /child\.stdout\?\.on\('error'/.test(mainSrc), 'true')
+    eq("stderr에 error 핸들러가 있다", /child\.stderr\?\.on\('error'/.test(mainSrc), 'true')
+    // 집계 쪽도 같다. readline은 입력의 오류를 자기 쪽에서 다시 내는데, 그걸 안 받으면
+    // **메인 프로세스가 죽는다**(19-13의 재스캔 실패 검사가 실제로 그 길을 밟는다).
+    eq("readline 오류도 받는다", /rl\.on\('error', fail\)/.test(mainSrc), 'true')
+    // 지연 실행이 앱 종료를 붙들지 않게 한다(15번).
+    eq(
+      '출력 대기 타이머도 unref한다',
+      /const t = setTimeout\(\(\) => finishExit\(code\), OUT_FLUSH_MS\)\n\s*t\.unref\?\.\(\)/.test(mainSrc),
+      'true',
+    )
+    // 첫 집계 시작점은 한 곳뿐이어야 한다. main의 3초 지연 호출은 화면이 이미 시작한
+    // 뒤에 도착해서 아무것도 미루지 못했다 — 주석만 사실과 반대였다(6번).
+    eq('main이 지연 호출로 집계를 또 시작하지 않는다', /setTimeout\([\s\S]{0,40}getUsageStats\(\)/.test(mainSrc), 'false')
+    eq("main이 usage:stats를 받는다", mainSrc.includes("ipcMain.handle('usage:stats'"), 'true')
+    eq('preload가 getUsageStats를 노출한다', /getUsageStats:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('usage:stats'\)/.test(preSrc), 'true')
+    // 플랜은 이미 있는 parseAuthStatus 경로에서만 온다. 새로 만들면 두 벌이 어긋난다.
+    eq('플랜은 기존 인증 확인에서 가져온다', /plan: envCache\?\.value\?\.claude\?\.subscriptionType/.test(mainSrc), 'true')
+    // **분모가 되돌아오지 않는가.** 예산은 걷어냈다 — 우리가 세는 기간·대상이 Claude가
+    // 세는 것과 달라서, 어떤 분모를 붙여도 그 퍼센트는 한도와 무관한 숫자가 된다.
+    // 남아 있던 죽은 코드가 다시 배선되는 것까지 여기서 막는다.
+    eq('예산 IPC가 없다', mainSrc.includes("ipcMain.handle('usage:budget'"), 'false')
+    eq('preload가 예산을 노출하지 않는다', /setUsageBudget|usage:budget/.test(preSrc), 'false')
+    eq('예산 코드가 남아 있지 않다', /budget|Budget|BUDGET/.test(mainSrc), 'false')
+    eq('설정에 예산을 저장하지 않는다', /usageBudget/.test(mainSrc), 'false')
+    // **구독 한도를 지어낸 상수가 없어야 한다.** 있으면 그 숫자가 곧 거짓말이 된다.
+    eq('플랜별 한도를 하드코딩하지 않았다', /(max|pro|plan)\w*\s*[:=]\s*\d{6,}/i.test(mainSrc), 'false')
+    // 30초 간격 캐시가 실제로 걸려 있는가(없으면 화면이 물을 때마다 597MB를 읽는다).
+    eq('집계 간격 가드가 있다', /now - usageStats\.at >= USAGE_REFRESH_MS/.test(mainSrc), 'true')
+    eq('겹쳐 돌지 않는다', /!usageStats\.running &&/.test(mainSrc), 'true')
+    eq('통째로 읽지 않는다', /createReadStream\(file, \{ start: from, end: size - 1/.test(mainSrc), 'true')
+  }
+
+  fs.rmSync(HOME, { recursive: true, force: true })
+}
+
+// ── 20. 대화 갈아타기 · 대화 하나의 무게 ───────────────────────────────────
+//
+// 세션 id는 프로젝트마다 한 번 만들면 영구 고정이었고, 세션 파일이 있으면 언제나
+// `--resume`이었다 — **대화를 갈아탈 방법이 코드에 없었다.** 그런데 대화는 길어질수록
+// 매 턴 앞 내용을 전부 다시 읽는다(실측: 198턴째에 첫 턴의 14배). 여기서 보는 것들은
+// 전부 "틀려도 조용한" 자리다:
+//
+//   갈아타기  새 id가 들어가는가 · **옛 id가 기록에 남는가** · 옛 세션 파일이 살아 있는가
+//   거절      실행 중에 갈아타면 돌고 있는 claude와 기록이 두 갈래로 갈린다
+//   메모      인수인계 메모가 **첫 지시에 한 번만** 붙는가(계속 붙으면 매 턴 값이 된다)
+//   무게      기록이 없으면 0이 아니라 null인가 · 0으로 나누지 않는가 · 두 번 세지 않는가
+function sessionChecks() {
+  console.log('\n대화 갈아타기 · 대화 무게')
+  const mainSrc = fs.readFileSync(path.join(ROOT, 'main.js'), 'utf8').replace(/\r\n/g, '\n')
+  const preSrc = fs.readFileSync(path.join(ROOT, 'preload.js'), 'utf8').replace(/\r\n/g, '\n')
+
+  /** main.js의 한 줄짜리 const를 그대로. 검사가 값을 지어내면 앱이 바뀌어도 초록불이다. */
+  const oneLine = (name) => {
+    const m = new RegExp(`^const ${name} = .*$`, 'm').exec(mainSrc)
+    if (!m) throw new Error(`main.js에서 상수 ${name}을 찾지 못했습니다`)
+    return m[0]
+  }
+  /** 여러 줄짜리 선언을 통째로. */
+  const block = (head, end = '\n}\n') => {
+    const i = mainSrc.indexOf(head)
+    if (i < 0) throw new Error(`main.js에서 ${head}를 찾지 못했습니다`)
+    return mainSrc.slice(i, mainSrc.indexOf(end, i) + end.length)
+  }
+
+  // **검사하는 함수는 원본 그대로다.** 가짜를 끼우는 곳은 electron·설정·회사 자리뿐이고,
+  // 그 자리는 이 검사가 보려는 것이 아니다.
+  const S = loadFrom(
+    'main.js',
+    [
+      'sessionPath',
+      'usageFiles',
+      'readUsage',
+      'sessionIdIfAny',
+      'companyBusy',
+      'startNewSession',
+      'takeHandoff',
+      'handoffBlock',
+      'promptFor',
+      'sessionCostFrom',
+      'sessionCost',
+    ],
+    [
+      "const fs = require('fs')",
+      "const path = require('path')",
+      "const crypto = require('crypto')",
+      'const app = { getPath: () => global.__home }',
+      'const companies = (global.__companies = new Map())',
+      'global.__cfg = {}',
+      'function loadConfig() { return JSON.parse(JSON.stringify(global.__cfg)) }',
+      'function saveConfig(c) { global.__cfg = JSON.parse(JSON.stringify(c)) }',
+      // 프롬프트 조각은 **자리만** 필요하다(무엇이 어느 순서로 붙는지를 본다).
+      "const BOUNDARY = '[경계]\\n\\n'",
+      "const HANDOFF = '[역할]'",
+      "const DELIVERABLE = '[결과]'",
+      "function rosterLine() { return '[명단]' }",
+      oneLine('SESSION_HISTORY_KEEP'),
+      oneLine('HANDOFF_MAX'),
+      oneLine('SESSION_HEAVY_READ'),
+      oneLine('SESSION_HEAVY_GROWTH'),
+      oneLine('usageState'),
+      oneLine('newTally'),
+      block('const addTally = '),
+      '',
+    ].join('\n'),
+  )
+
+  const HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'tv-session-'))
+  global.__home = HOME
+  const dir = path.join(HOME, 'work', 'demo')
+  const cfg = () => global.__cfg
+  /** 세션 기록 한 줄. `cache_read_input_tokens`가 이 검사의 주인공이다. */
+  const turn = (read) =>
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      message: { usage: { input_tokens: 3, output_tokens: 5, cache_read_input_tokens: read, cache_creation_input_tokens: 1 } },
+    })
+  const putSession = (id, reads) => {
+    const p = S.sessionPath(dir, id)
+    fs.mkdirSync(path.dirname(p), { recursive: true })
+    fs.writeFileSync(p, reads.map((r) => turn(r) + '\n').join(''), 'utf8')
+    return p
+  }
+
+  // ── 20-1. 기록이 없으면 0이 아니라 null ──────────────────────────────────
+  eq('세션이 없으면 id를 지어내지 않는다', S.sessionIdIfAny(dir), 'null')
+  eq('기록이 없으면 대화 무게는 null', S.sessionCost(dir), 'null')
+
+  // ── 20-2. 갈아타기 — 새 id가 들어가고 옛 id가 기록에 남는가 ──────────────
+  const first = S.startNewSession(dir, {})
+  eq('처음 갈아타기도 성공한다', first.ok, 'true')
+  eq('설정에 새 id가 들어간다', cfg().sessions[dir], first.id)
+  eq('옛 id가 없으면 기록도 안 만든다', (cfg().sessionHistory?.[dir] ?? []).length, 0)
+
+  // 옛 세션에 실제 기록을 만들어 둔다. **갈아탄 뒤에도 살아 있어야 한다.**
+  const oldFile = putSession(first.id, [20_000, 50_000])
+  const second = S.startNewSession(dir, { handoff: '  결론: 로그인까지 됨. 다음은 결제.  ' })
+  eq('갈아타면 id가 바뀐다', second.ok && second.id !== first.id, 'true')
+  eq('설정의 세션이 새 id로 바뀐다', cfg().sessions[dir], second.id)
+  // 기록이 통째로 없을 수도 있다. **던지지 말고 틀렸다고 적어야** 뒤 검사가 계속 돈다.
+  const past = () => cfg().sessionHistory?.[dir] ?? []
+  eq('옛 id가 기록에 남는다', past()[0]?.id ?? null, first.id)
+  eq('언제 갈아탔는지도 남는다', typeof (past()[0]?.at ?? null), 'string')
+  eq('옛 세션 파일은 그대로 있다', fs.existsSync(oldFile), 'true')
+  eq('옛 기록의 내용도 그대로다', fs.readFileSync(oldFile, 'utf8').split('\n').filter(Boolean).length, 2)
+  eq('메모는 앞뒤 공백을 털어 저장한다', cfg().sessionHandoff[dir], '결론: 로그인까지 됨. 다음은 결제.')
+
+  // 기록은 최근 몇 개만 남긴다(무한히 불어나면 설정 파일이 곧 쓰레기통이 된다).
+  const keep = Number(/^const SESSION_HISTORY_KEEP = (\d+)/m.exec(mainSrc)[1])
+  for (let i = 0; i < keep + 3; i++) S.startNewSession(dir, {})
+  eq(`기록은 ${keep}개까지만 쌓인다`, past().length, keep)
+  eq('가장 최근 것이 맨 앞이다', (past()[0]?.id ?? null) !== (past()[1]?.id ?? null), 'true')
+
+  // ── 20-3. 실행 중이면 거절 ───────────────────────────────────────────────
+  const before = cfg().sessions[dir]
+  global.__companies.set(dir, { dir, child: { pid: 1 } })
+  const denied = S.startNewSession(dir, { handoff: '이건 저장되면 안 된다' })
+  eq('실행 중이면 갈아타지 않는다', denied.ok, 'false')
+  eq('이유를 돌려준다', denied.reason, '실행 중입니다')
+  eq('거절했으면 세션도 그대로다', cfg().sessions[dir], before)
+  eq('거절했으면 메모도 저장하지 않는다', /저장되면 안 된다/.test(JSON.stringify(cfg())), 'false')
+  global.__companies.delete(dir)
+
+  // ── 20-4. 인수인계 메모는 첫 지시에 한 번만 ──────────────────────────────
+  const memo = '결론 3줄: A는 끝났고 B가 남았다.'
+  S.startNewSession(dir, { handoff: memo })
+  const p1 = S.promptFor({ agent: 'lead', text: '결제 붙여줘' }, dir)
+  eq('첫 지시에 메모가 붙는다', p1.includes(memo), 'true')
+  eq('메모는 경계 뒤에 온다', p1.indexOf('[경계]') < p1.indexOf(memo), 'true')
+  eq('메모는 지시 앞에 온다', p1.indexOf(memo) < p1.indexOf('지시: 결제 붙여줘'), 'true')
+  eq('메모를 지시로 오해하지 말라고 못 박는다', /지시가 아니다/.test(p1), 'true')
+  const p2 = S.promptFor({ agent: 'lead', text: '이어서 해줘' }, dir)
+  eq('두 번째 지시에는 안 붙는다', p2.includes(memo), 'false')
+  eq('메모는 쓰고 나면 설정에서 지워진다', cfg().sessionHandoff?.[dir] ?? null, 'null')
+  eq('메모가 없으면 아무것도 안 붙인다', S.handoffBlock(dir), '')
+  // 메모가 없는 지시도 멀쩡해야 한다(빈 문자열을 넣고 조용히 망가뜨리지 않는가).
+  eq('메모 없는 지시도 그대로 만들어진다', p2.startsWith('[경계]') && p2.includes('[결과]'), 'true')
+  // 문자열이 아닌 값은 없는 것으로 본다 — 외부에서 오는 값이다.
+  S.startNewSession(dir, { handoff: { evil: 1 } })
+  eq('문자열이 아닌 메모는 버린다', cfg().sessionHandoff?.[dir] ?? null, 'null')
+  const long = 'x'.repeat(99_999)
+  S.startNewSession(dir, { handoff: long })
+  const cap = Number(/^const HANDOFF_MAX = (\d+)/m.exec(mainSrc)[1])
+  eq('메모 길이는 잘라 둔다', cfg().sessionHandoff[dir].length, cap)
+  S.takeHandoff(dir) // 뒤 검사에 끼지 않게 비운다
+
+  // ── 20-5. 대화 무게 ──────────────────────────────────────────────────────
+  const sid = cfg().sessions[dir]
+  const file = putSession(sid, [20_000, 100_000, 290_000])
+  const cost = S.sessionCost(dir)
+  eq('턴 수를 센다', cost.turns, 3)
+  eq('첫 턴의 캐시 읽기', cost.firstRead, 20_000)
+  eq('마지막 턴의 캐시 읽기', cost.lastRead, 290_000)
+  eq('몇 배가 됐는지', cost.growth, 14.5)
+  eq('파일 크기도 준다', cost.sizeBytes, fs.statSync(file).size)
+  eq('실측 기준을 넘으면 heavy', cost.heavy, 'true')
+
+  // **증분이 진짜인가.** 두 번 물어도 두 배가 되지 않고, 덧붙인 만큼만 늘어야 한다.
+  eq('다시 물어도 두 배가 되지 않는다', S.sessionCost(dir).turns, 3)
+  fs.appendFileSync(file, turn(300_000) + '\n', 'utf8')
+  const grown = S.sessionCost(dir)
+  eq('덧붙인 만큼만 늘어난다', grown.turns, 4)
+  eq('첫 턴은 그대로다', grown.firstRead, 20_000)
+  eq('마지막 턴만 바뀐다', grown.lastRead, 300_000)
+
+  // ── 20-6. 0으로 나누지 않는가 ────────────────────────────────────────────
+  const fresh = S.startNewSession(dir, {})
+  putSession(fresh.id, [0, 0])
+  const zero = S.sessionCost(dir)
+  eq('첫 턴이 0이면 firstRead는 null', zero.firstRead, 'null')
+  eq('첫 턴이 0이면 growth도 null', zero.growth, 'null')
+  eq('그래도 턴 수는 센다', zero.turns, 2)
+  eq('가벼운 대화는 heavy가 아니다', zero.heavy, 'false')
+  // 갈아탄 직후, 아직 아무 기록도 없는 대화.
+  const blank = S.startNewSession(dir, {})
+  eq('갈아탄 직후에는 무게가 null', S.sessionCost(dir), 'null')
+  eq('그래도 옛 대화 기록은 남아 있다', fs.existsSync(S.sessionPath(dir, fresh.id)), 'true')
+  eq('갈아탄 id가 설정에 있다', cfg().sessions[dir], blank.id)
+
+  // 순수 계산만 따로 — 화면이 그리는 값이라 경계에서 틀리면 그대로 보인다.
+  eq('턴이 없으면 null', S.sessionCostFrom({ turns: 0 }), 'null')
+  eq('아무것도 없으면 null', S.sessionCostFrom(null), 'null')
+  const heavyRead = Number(/^const SESSION_HEAVY_READ = ([\d_]+)/m.exec(mainSrc)[1].replace(/_/g, ''))
+  const heavyGrow = Number(/^const SESSION_HEAVY_GROWTH = (\d+)/m.exec(mainSrc)[1])
+  eq(
+    `캐시 읽기 ${heavyRead}부터 heavy`,
+    `${S.sessionCostFrom({ turns: 9, firstRead: heavyRead, lastRead: heavyRead - 1 }).heavy}/` +
+      `${S.sessionCostFrom({ turns: 9, firstRead: heavyRead, lastRead: heavyRead }).heavy}`,
+    'false/true',
+  )
+  eq(
+    `배수 ${heavyGrow}부터 heavy`,
+    `${S.sessionCostFrom({ turns: 9, firstRead: 1000, lastRead: 1000 * heavyGrow - 100 }).heavy}/` +
+      `${S.sessionCostFrom({ turns: 9, firstRead: 1000, lastRead: 1000 * heavyGrow }).heavy}`,
+    'false/true',
+  )
+
+  // ── 20-7. 소스에 못 박아 두는 것들 ───────────────────────────────────────
+  // **옛 세션 파일을 지우지 않는가.** 이 앱은 되돌릴 수 없는 것을 만들지 않는다.
+  const swapSrc = block('function startNewSession(')
+  eq('갈아타기가 파일을 지우지 않는다', /unlink|rmSync|rmdir|rm -rf/.test(swapSrc), 'false')
+  eq('세션 기록 폴더를 건드리지 않는다', /sessionPath|projects/.test(swapSrc), 'false')
+  // **한도 실패에 자동 재시도를 붙이지 않는가.** 같은 지시를 바로 다시 보내면 또
+  // 걸리고 비용만 두 배가 된다. 대기열에 지시를 넣는 곳은 사람이 보낸 것 하나뿐이어야 한다.
+  const enqueues = mainSrc.match(/appendJsonl\(path\.join\([^)]*COMMANDS_NAME/g) ?? []
+  eq('대기열에 지시를 넣는 곳은 한 군데뿐이다', enqueues.length, 1)
+  // 실패를 처리하는 자리(finishExit부터 끝까지)에 **같은 지시를 다시 태우는 길**이
+  // 생기지 않는가. 한도로 실패한 지시를 곧바로 다시 보내면 또 걸리고 비용만 두 배다.
+  const runSrc = block('function runCommand(')
+  const failSrc = runSrc.slice(runSrc.indexOf('const finishExit'))
+  eq('실패 처리에서 다시 실행하지 않는다', /runCommand\(|pumpQueue\(|appendJsonl\(path\.join\(claudeDir/.test(failSrc), 'false')
+  // 계약(프론트에 같은 것을 줬다).
+  eq('main이 session:cost를 받는다', mainSrc.includes("ipcMain.handle('session:cost'"), 'true')
+  eq('main이 session:new를 받는다', mainSrc.includes("ipcMain.handle('session:new'"), 'true')
+  eq('preload가 getSessionCost를 노출한다', /getSessionCost:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('session:cost'\)/.test(preSrc), 'true')
+  eq('preload가 startNewSession을 노출한다', /startNewSession:\s*\(opts\)\s*=>\s*ipcRenderer\.invoke\('session:new'/.test(preSrc), 'true')
+  // 무게를 재려고 기록을 따로 훑지 않는가(그러면 재는 일 자체가 비용이 된다).
+  const costSrc = block('function sessionCost(')
+  eq('무게는 이미 훑어 둔 것에서 꺼낸다', /readUsage\(dir\)/.test(costSrc), 'true')
+  eq('무게를 재려고 파일을 새로 읽지 않는다', /readFileSync|createReadStream|readdirSync/.test(costSrc), 'false')
+
+  fs.rmSync(HOME, { recursive: true, force: true })
+  delete global.__home
+  delete global.__companies
+  delete global.__cfg
+}
+
+// main.js가 정한 값을 그대로 쓴다(검사가 지어낸 값으로 돌면 의미가 없다).
+const usageConst = (name) =>
+  Number(
+    new RegExp(`^const ${name} = ([\\d_]+)`, 'm').exec(
+      fs.readFileSync(path.join(ROOT, 'main.js'), 'utf8').replace(/\r\n/g, '\n'),
+    )?.[1],
+  )
+const USAGE_SCAN_DAYS_VALUE = usageConst('USAGE_SCAN_DAYS')
+const USAGE_KEEP_DAYS_VALUE = usageConst('USAGE_KEEP_DAYS')
+const USAGE_WEEK_DAYS_VALUE = usageConst('USAGE_WEEK_DAYS')
+
 // ── 정리 ───────────────────────────────────────────────────────────────────
 // 계정 검사는 비동기(명령 실행·감시 흐름)라 끝난 뒤에 정리한다.
 statusContractChecks()
@@ -2432,6 +3324,10 @@ accountChecks()
   .catch((e) => bad('설치 검사가 던졌다', (e && e.stack) || (e && e.message)))
   .then(() => ipcContractChecks())
   .catch((e) => bad('IPC 계약 검사가 던졌다', (e && e.stack) || (e && e.message)))
+  .then(() => usageChecks())
+  .catch((e) => bad('사용량 검사가 던졌다', (e && e.stack) || (e && e.message)))
+  .then(() => sessionChecks())
+  .catch((e) => bad('대화 갈아타기 검사가 던졌다', (e && e.stack) || (e && e.message)))
   .then(() => {
     fs.rmSync(LAB, { recursive: true, force: true })
     if (failed) {

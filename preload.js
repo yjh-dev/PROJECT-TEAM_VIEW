@@ -51,6 +51,19 @@ contextBridge.exposeInMainWorld('teamView', {
   revealFile: (p) => ipcRenderer.invoke('file:reveal', p),
   openLog: () => ipcRenderer.invoke('log:open'),
   setChatWidth: (px) => ipcRenderer.invoke('ui:chat-width', px),
+  // 계정 전체 사용량. **첫 집계 전에는 `ready:false`**로 오고 나머지는 null이다 —
+  // 597MB를 훑는 동안 화면을 세우지 않으려고 그렇게 만들었다. 잠시 뒤 다시 물으면 된다.
+  // **분모(한도·예산)는 오지 않는다.** 구독의 실제 한도는 어디에서도 얻을 수 없고,
+  // 우리가 세는 기간·대상도 Claude가 세는 것과 다르다. 센 값만 그대로 그린다 —
+  // 퍼센트나 게이지로 바꾸는 순간 없는 한도를 그리게 된다.
+  getUsageStats: () => ipcRenderer.invoke('usage:stats'),
+  // 지금 보고 있는 프로젝트의 **대화 하나**가 얼마나 무거운지.
+  // `{ turns, firstRead, lastRead, growth, heavy, sizeBytes }` 또는 **null**(기록 없음).
+  // firstRead가 0이면 firstRead·growth는 null로 온다 — 0을 지어내지 않는다.
+  getSessionCost: () => ipcRenderer.invoke('session:cost'),
+  // 대화를 새로 시작한다. `handoff`(선택)를 주면 **새 대화의 첫 지시 앞에 한 번만** 붙는다.
+  // `{ ok: true, id }` 또는 `{ ok: false, reason }`. 옛 세션 기록은 지우지 않는다.
+  startNewSession: (opts) => ipcRenderer.invoke('session:new', opts ?? {}),
   vitals: (v) => ipcRenderer.invoke('ui:vitals', v),
   reportError: (info) => ipcRenderer.invoke('ui:error', info),
   gitInit: (dir) => ipcRenderer.invoke('git:init', dir),

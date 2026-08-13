@@ -1603,6 +1603,400 @@ canvas {
   color: var(--muted);
 }
 
+/* ---------- 상단 사용량 ----------
+   상단 바는 좁다. 요약은 **한 줄 안에서 끝나야 한다** — 두 줄이 되면 바가 두 줄이 되고
+   그 여파로 탭이 뭉개진다(실측으로 이미 한 번). 그래서 요약은 짧은 숫자 하나뿐이고,
+   나머지는 눌러서 펴는 쪽으로 보낸다.
+
+   **여기에 막대가 없다.** 채워지는 막대는 그 자체로 "한도에 가까워지는 중"이라는 말이라,
+   견줄 한도가 없는 화면에서는 어떤 눈금을 써도 거짓말이 된다. 실제로 앱이 지어낸
+   눈금으로 "일간 90%"를 그린 적이 있고, 같은 시각 Claude의 실제 세션은 55%였다. */
+#usage-btn {
+  position: relative; /* .sr-only의 기준점 — 없으면 엉뚱한 곳에서 폭을 먹는다 */
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 10px;
+  font-size: 12px;
+  line-height: 1.35;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums; /* 15초마다 다시 그려도 폭이 튀지 않게 */
+}
+
+#usage-btn[hidden] {
+  display: none;
+}
+
+/* 아직 다 못 셌을 때는 숫자를 적지 않는다 — 0으로 그리면 "안 썼다"는 거짓말이 된다.
+   **여기서 --muted를 쓰면 안 된다.** 버튼 바탕(#2b3346)은 본문보다 밝아서 대비가
+   3.98:1까지 떨어진다(AA 기준 4.5). 한 단계 밝은 회색으로 5.66:1을 맞춘다. */
+#usage-btn.pending #usage-sum {
+  color: #a4aec4;
+}
+
+/* 한도에 걸린 적이 있으면 눌러 보게 만든다(☰의 점과 같은 뜻·같은 옷). */
+#usage-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #e0af68;
+}
+
+#usage-dot[hidden] {
+  display: none;
+}
+
+#usage-pop {
+  position: fixed;
+  z-index: 60; /* ☰ 메뉴와 같은 층 — 둘이 동시에 열리지 않는다 */
+  width: 340px;
+  max-width: calc(100vw - 16px);
+  max-height: 82vh;
+  overflow: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+  font-size: 13px;
+}
+
+#usage-pop header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+}
+
+#usage-pop h4 {
+  margin: 0;
+  flex: 1 1 auto;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+#usage-pop h5 {
+  margin: 0 0 8px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+#usage-pop section {
+  padding: 12px 14px;
+  border-top: 1px solid var(--line);
+}
+
+/* 플랜은 작게. 이건 '얼마나 썼나'가 아니라 배경 정보다. */
+#usage-plan {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: #2b3346;
+  font-size: 11px;
+  color: var(--text);
+}
+
+#usage-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  font-size: 15px;
+  line-height: 1;
+}
+
+/* 한도가 아니라는 안내 · 집계 중 · 한도에 걸린 기록. 셋 다 "이 숫자를 그대로 믿지 마라"를
+   말하는 줄이라 ☰의 경고 줄(#conn-note)과 같은 옷을 입힌다.
+   **안내 줄에는 조건을 걸지 않는다** — 숨겨지는 경우가 하나라도 생기면, 하필 그때
+   사람이 이 숫자를 한도로 읽는다. */
+#usage-disclaim,
+#usage-state,
+#usage-limit {
+  margin: 12px 14px;
+  padding: 8px 10px;
+  background: rgba(224, 175, 104, 0.12);
+  border-radius: 5px;
+  color: #e0af68;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* 숫자표 — **합계를 내지 않는다.** 캐시 읽기까지 더한 수는 겁만 주고 실제와 어긋난다
+   (실측: 출력 134만 / 캐시 읽기 2.99억). 퍼센트도 없다. 센 값 그대로다. */
+#usage-now table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+#usage-now th {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  text-align: right;
+  padding: 0 0 6px;
+}
+
+#usage-now th:first-child {
+  text-align: left;
+}
+
+#usage-now td {
+  padding: 4px 0;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+}
+
+#usage-now td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  padding-left: 10px;
+}
+
+/* 이 한 줄이 이 화면에서 제일 중요하다(캐시 읽기가 출력의 수백 배다). 본문 색으로
+   또렷하게 두고, 뜻풀이는 그 아래 흐린 글씨로 붙인다. */
+#usage-cache {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+#usage-cache-note,
+#usage-trend-note {
+  margin: 8px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+/* 스파크라인 — 기둥 14개. 오늘이 평소보다 많은지만 보이면 된다.
+   외부 차트 라이브러리는 쓰지 않는다(이 앱은 런타임 의존성이 0개다).
+   **기준선이 없다** — 그을 만한 선(예산·한도)이 애초에 없었다. */
+#usage-spark {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 38px;
+}
+
+#usage-spark > .usage-day {
+  flex: 1 1 0;
+  min-width: 0;
+  border-radius: 2px 2px 0 0;
+  background: #3a4459;
+}
+
+#usage-spark > .usage-day.today {
+  background: #7aa2f7;
+}
+
+/* 기록을 다 보지 못한 날. **0 높이 막대로 그리면 "안 썼다"가 된다** — 앱은 오래된
+   파일을 아예 열지 않으므로 그 날은 안 쓴 것이 아니라 모르는 것이다. 그래서 자리는
+   그대로 두되 빗금으로 비운다(막대가 아니라 '빈칸'으로 읽혀야 한다). */
+#usage-spark > .usage-day.unknown {
+  align-self: stretch;
+  background: repeating-linear-gradient(-45deg, #2b3244 0 3px, transparent 3px 6px);
+  border: 1px dashed #4a5468;
+  border-radius: 2px;
+}
+
+/* 못 본 구간과 본 구간의 경계. 이 선이 없으면 빈칸이 그냥 바닥으로 읽힌다. */
+#usage-spark > .usage-edge {
+  flex: 0 0 0;
+  align-self: stretch;
+  border-left: 1px dashed #6b7690;
+}
+
+/* ---------- 지금 대화가 얼마나 무거운가 ----------
+   이 화면에서 **사용자가 지금 바꿀 수 있는 것은 이것 하나다**(위의 숫자는 이미 쓴 값이다).
+   그래서 한 줄은 본문 색으로 또렷하게 두고, 무거울 때만 상자째 색을 입혀 눈에 띄게 한다. */
+#usage-ses {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+#usage-ses-note {
+  margin: 8px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+#usage-ses-new {
+  margin-top: 10px;
+  padding: 7px 12px;
+  font-size: 12px;
+}
+
+#usage-ses-new:disabled {
+  /* 지금 못 하는 것은 감추지 않고 죽인다. 너무 흐리면 무슨 버튼이었는지도 못 읽는다. */
+  opacity: 0.62;
+  cursor: default;
+}
+
+/* 무거운 대화. 한도 안내(#usage-disclaim)와 같은 옷 — "이건 그냥 지나칠 값이 아니다"를
+   말하는 자리라 색을 같이 쓴다. 배경이 밝아지므로 안쪽 글자 색도 같이 올린다. */
+#usage-ses-sec.heavy {
+  background: rgba(224, 175, 104, 0.12);
+}
+
+#usage-ses-sec.heavy #usage-ses {
+  color: #e0af68;
+}
+
+#usage-ses-sec.heavy #usage-ses-note {
+  /* --muted(#8791a6)는 이 배경 위에서 4.5:1에 못 미친다. 한 단계 밝은 회색으로 올린다. */
+  color: #a4aec4;
+}
+
+/* 눌러야 할 때만 눈에 띄는 옷을 입는다(마법사의 wz-primary와 같은 규칙·같은 색). */
+.ses-primary {
+  background: #4a90d9;
+  border-color: #4a90d9;
+  color: #0d1420;
+  font-weight: 600;
+}
+
+.ses-primary:hover {
+  background: #63a3e4;
+}
+
+/* **[hidden]은 무엇에도 지지 않아야 한다.** 위에서 display를 준 것이 여럿이라
+   (display를 준 요소에는 [hidden]이 안 먹는다 — 이미 세 번 났다) 맨 뒤에서 되받는다. */
+#usage-pop[hidden],
+#usage-pop [hidden],
+#usage-pop p[hidden],
+#usage-pop span[hidden] {
+  display: none;
+}
+
+/* ---------- 새 대화로 갈아탈지 묻는 창 ----------
+   맥락이 끊기는 일이라 **묻지 않고 하지 않는다.** 화면 전체를 덮되 뒤가 비쳐 보이게 둔다
+   (지금 어느 프로젝트를 보고 있었는지가 그대로 보이는 편이 덜 무섭다). */
+#ses-confirm {
+  position: fixed;
+  inset: 0;
+  z-index: 95; /* 사용량(60)·팀원 패널(61)·마법사(90)보다 위 — 물음이 가려지면 안 된다 */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(8, 10, 15, 0.78);
+}
+
+#ses-box {
+  width: min(560px, 100%);
+  max-height: 100%;
+  overflow: auto;
+  padding: 18px 20px 20px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.55);
+}
+
+#ses-box h4 {
+  margin: 0 0 10px;
+  font-size: 16px;
+}
+
+#ses-why {
+  margin: 0 0 10px;
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+/* 무엇이 끊기고 무엇이 남는지. **여기가 이 창의 본론이다** — 특히 "옛 기록은 지워지지
+   않는다"를 읽어야 사람이 마음 놓고 누른다. */
+#ses-facts {
+  margin: 0 0 14px;
+  padding-left: 20px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+#ses-facts li {
+  margin-bottom: 5px;
+}
+
+.ses-label {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.ses-label span {
+  font-weight: 400;
+  color: var(--muted);
+}
+
+#ses-hint {
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+#ses-handoff {
+  display: block;
+  width: 100%;
+  padding: 9px 11px;
+  background: #11141c;
+  color: var(--text);
+  border: 1px solid #39435a;
+  border-radius: 6px;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+/* 앱이 거절한 이유를 그대로 적는 자리. 실패는 눈에 띄어야 한다. */
+#ses-err {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  background: rgba(255, 107, 129, 0.12);
+  border-radius: 5px;
+  color: #ff8fa3;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.ses-acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+#ses-box button:disabled {
+  opacity: 0.62;
+  cursor: default;
+}
+
+/* **[hidden]은 무엇에도 지지 않아야 한다.** 위의 display 규칙들보다 뒤에 둔다. */
+#ses-confirm[hidden],
+#ses-confirm [hidden] {
+  display: none;
+}
+
 /* ---------- 팀원 관리 ----------
    고용·해고는 자주 하는 일이 아니고, 사무실 화면과 상단 바는 이미 꽉 차 있다.
    그래서 ☰ 안에 요약 한 줄만 두고 실제 조작은 팝오버에서 한다.

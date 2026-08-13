@@ -14,8 +14,10 @@
 //   - 죽은 버튼    프로젝트가 없는데 취소·복사·칩이 전부 눌렸다
 const { app, BrowserWindow } = require('electron')
 const path = require('path')
+const fs = require('fs')
 
 const RENDERER = path.join(__dirname, '..', 'renderer')
+const MAIN_JS = path.join(__dirname, '..', 'main.js')
 const S = process.env.SCENARIO || 'normal'
 const W = Number(process.env.WIN_W || 1820)
 const H = Number(process.env.WIN_H || 1120)
@@ -72,6 +74,13 @@ app.whenReady().then(async () => {
     await win.webContents.executeJavaScript(OPEN_MENU)
     await new Promise((r) => setTimeout(r, 600))
   }
+  // 사용량은 상단 요약 한 줄과 눌러서 펴는 화면으로 나뉜다. 펴지 않으면 숫자표·
+  // 캐시 배수·추이·한도 아님 안내가 통째로 검사에서 빠진다.
+  // 지금 대화의 무게와 [새 대화 시작]도 이 화면 안에 있다 — 같은 길로 연다.
+  if (S.startsWith('usage') || S.startsWith('session')) {
+    await win.webContents.executeJavaScript(OPEN_USAGE)
+    await new Promise((r) => setTimeout(r, 700))
+  }
 
   const click = async (id) => {
     await win.webContents.executeJavaScript(
@@ -123,6 +132,50 @@ app.whenReady().then(async () => {
   } catch (err) {
     out.마법사흐름 = ['마법사 흐름 검사 실패: ' + (err?.message ?? err)]
   }
+
+  // 사용량은 **모양만 재서는 아무것도 못 잡는다.** 제일 나쁜 결함은 화면이 멀쩡히 잘
+  // 그려진 채로 없는 숫자를 지어내는 것이다(집계 중인데 0, 분모가 없는데 퍼센트).
+  // 그래서 앱이 준 원본과 화면의 글자를 직접 맞대 본다.
+  // **어느 갈래에서든** 상단 숫자가 있어야 할 자리에 있는가. 사용량 흐름 검사는
+  // `usage-*` 갈래에서만 도는데, 정작 "그 자리가 통째로 사라졌다"는 사고는 다른 갈래에서
+  // 났다 — 스텁이 새 PC(empty·missing)에 `null`을 주며 "여기는 없는 게 맞다"고
+  // 우겼고, 아무도 그것을 재지 않았다. 앱은 기록이 없어도 객체를 준다.
+  try {
+    out.사용량자리 = await usagePresence(win)
+  } catch (err) {
+    out.사용량자리 = ['사용량 자리 확인 실패: ' + (err?.message ?? err)]
+  }
+
+  try {
+    const probes = await runUsageProbes(win)
+    if (probes.found.length) out.사용량 = probes.found
+    if (probes.ran.length) out.흐름 = [out.흐름, ...probes.ran].filter(Boolean).join(' · ')
+    if (probes.notes.length) out.알림 = [out.알림, ...probes.notes].filter(Boolean).join(' / ')
+  } catch (err) {
+    out.사용량 = ['사용량 흐름 검사 실패: ' + (err?.message ?? err)]
+  }
+
+  // 새 대화로 갈아타기도 **눌러 봐야** 드러난다(확인 없이 바뀌는지, 메모가 실려 가는지,
+  // 거절당했을 때 이유가 화면에 오는지). 사용량 검사 다음에 돌린다 — 여기서 확인 창을
+  // 띄우므로 앞의 측정과 섞이면 안 된다.
+  try {
+    const probes = await runSessionProbes(win)
+    if (probes.shots.length) {
+      // 문자열(흐름·알림)은 merge에 넣으면 **글자 단위로 쪼개진다.** 잠깐 빼 두고 합친다.
+      const flow = out.흐름
+      const note = out.알림
+      delete out.흐름
+      delete out.알림
+      out = [out, ...probes.shots].reduce(merge)
+      if (flow) out.흐름 = flow
+      if (note) out.알림 = note
+    }
+    if (probes.found.length) out.대화갈아타기 = probes.found
+    if (probes.ran.length) out.흐름 = [out.흐름, ...probes.ran].filter(Boolean).join(' · ')
+    if (probes.notes.length) out.알림 = [out.알림, ...probes.notes].filter(Boolean).join(' / ')
+  } catch (err) {
+    out.대화갈아타기 = ['새 대화 흐름 검사 실패: ' + (err?.message ?? err)]
+  }
   clearTimeout(bail)
 
   out.손닿는크기 = out.손닿는크기.filter((i) => !HIT_EXEMPT.has(i.요소))
@@ -137,6 +190,14 @@ app.whenReady().then(async () => {
 // 연결 줄이 화면에서 사라진다.
 const OPEN_MENU = `(() => {
   document.getElementById('menu').click()
+  return true
+})()`
+
+// 상단 사용량을 눌러 편다. **감춰져 있으면 누르지 않는다** — 아래 흐름 검사가
+// "떠야 하는데 안 떴다"로 잡아야 하고, 여기서 억지로 열면 그 결함이 가려진다.
+const OPEN_USAGE = `(() => {
+  const g = document.getElementById('usage-btn')
+  if (g && !g.hidden) g.click()
   return true
 })()`
 
@@ -437,6 +498,836 @@ const AFTER_REOPEN = `(() => {
   return { open: !document.getElementById('wizard').hidden, pane: pane ? pane.dataset.pane : null, rows }
 })()`
 
+// ---------------------------------------------------------------------------
+// 사용량 흐름 검사 — **모양이 아니라 내용을 본다**
+//
+// 이 화면에서 제일 나쁜 결함은 레이아웃이 무너지는 것이 아니라, 멀쩡히 잘 그려진 채로
+// **없는 숫자를 지어내는 것**이다. 실제로 그렇게 됐었다 — 앱이 실측 평균에서 뽑은 눈금
+// (하루 1.5M)을 분모로 세워 "일간 90%"를 그렸는데, 같은 시각 Claude의 실제 화면은 세션
+// 55% · 주간 44%였다. 기간도(달력 하루 vs 5시간 롤링) 분모도 세는 대상도 달랐다.
+//
+// 그래서 분모를 통째로 걷어냈고, 이 검사도 "퍼센트가 맞는가"에서 **"퍼센트가 없는가"**로
+// 바뀌었다. 여기서 보는 것:
+//   - 화면 어디에도 **퍼센트 기호가 없는가** (분모 없는 %는 전부 한도로 읽힌다)
+//   - **"이 숫자는 한도가 아니다"가 실제로 그려지는가** · 진짜 한도를 어디서 보는지 적혔는가
+//   - 표의 숫자가 **앱이 준 값에서 나온 것인가** (지어낸 숫자인가)
+//   - 집계가 안 끝났는데 0을 채워 넣지 않는가
+//   - 캐시 읽기가 출력의 몇 배인지 적혀 있는가 — 이 화면이 남은 이유가 그 숫자다
+//   - 한도에 걸린 기록의 리셋 시각이 실제로 화면에 있는가
+//   - 큰 숫자를 자리수 그대로 쏟아 놓지 않는가
+async function runUsageProbes(win) {
+  const found = [] // 잡은 것(하나라도 있으면 검사 실패)
+  const ran = [] // 실제로 해 본 것
+  const notes = [] // 이 갈래에서는 확인하지 못한 것
+  if (!S.startsWith('usage')) return { found, ran, notes }
+  const js = (code) => win.webContents.executeJavaScript(code)
+
+  // 앱이 실제로 준 값. **화면의 숫자는 전부 여기서 나와야 한다.**
+  // 통로가 없는 갈래(usage-none)도 있으므로 없는 함수를 부르지 않는다.
+  const st = await js(
+    `(async () => { const f = window.teamView && window.teamView.getUsageStats
+       if (typeof f !== 'function') return { __noBridge: true }
+       try { return await f() } catch (e) { return { __threw: String(e && e.message) } } })()`,
+  )
+  const seen = await js(READ_USAGE)
+
+  // **상단 숫자가 숨는 유일한 실제 경로.** 앱의 getUsageStats는 기록을 하나도 못 봐도
+  // 객체를 준다(ready:false) — 그러니 "값이 없어서 숨었다"는 통로가 없을 때뿐이다.
+  // 이 갈래가 없으면 숨김 경로는 검사에서 통째로 빠진다(전에는 스텁이 지어낸 null을
+  // 새 PC라고 부르며 그 자리를 채우고 있었다 — 프로덕션에는 없는 상태였다).
+  if (st && st.__noBridge) {
+    ran.push('사용량 통로 없음 확인')
+    if (seen.btnShown) found.push('사용량 통로가 없는데 상단에 숫자가 떠 있다 — 누르면 빈 상자가 열린다')
+    if (seen.popShown) found.push('사용량 통로가 없는데 자세히 보기가 열려 있다')
+    return { found, ran, notes }
+  }
+  ran.push('사용량 화면 대조')
+  if (st && st.__threw) {
+    found.push(`앱이 사용량을 묻자 예외를 던졌다: ${st.__threw}`)
+    return { found, ran, notes }
+  }
+
+  if (!st) {
+    found.push('이 갈래에는 사용량이 있어야 하는데 앱이 아무것도 주지 않았다')
+    return { found, ran, notes }
+  }
+  // 화면을 보기 전에 **스텁부터 의심한다.** 스텁이 지어낸 모양 위에서 도는 검사는
+  // 초록불이어도 아무것도 지켜 주지 못한다(이 저장소에서 두 번 그랬다).
+  {
+    const shape = usageShapeProblems(st)
+    found.push(...shape.found)
+    notes.push(...shape.notes)
+  }
+
+  if (!seen.btnShown) {
+    found.push('앱이 사용량을 줬는데 상단에 숫자가 뜨지 않았다')
+    return { found, ran, notes }
+  }
+  if (!seen.popShown) {
+    found.push('상단 숫자를 눌렀는데 자세히 보기가 열리지 않았다')
+    return { found, ran, notes }
+  }
+
+  const all = [seen.popText, seen.sum, seen.tip].join(' ')
+
+  // 1) **퍼센트가 하나도 없는가.** 이 화면에는 분모가 없다. 분모 없는 퍼센트는 사람이
+  //    전부 한도로 읽는다 — 실제로 "일간 90%"를 보고 한도 임박으로 읽었다.
+  //    (안내 문구까지 % 없이 쓰는 이유가 이것이다. 예외를 하나 두면 규칙이 무너진다.)
+  const pct = all.match(/[^\s]{0,12}%/)
+  if (pct) {
+    found.push(`사용량 화면에 퍼센트가 적혔다: "${pct[0]}" — 견줄 분모가 없어서 전부 한도로 읽힌다`)
+  }
+  // 1-1) 걷어낸 개념이 화면에 남아 있지 않은가. 문구만 남고 값이 사라지는 쪽이
+  //      더 나쁘다("예산의"만 남으면 무엇의 예산인지도 알 수 없다).
+  const ghost = all.match(/예산|제안치|한도의|이번 주/)
+  if (ghost) {
+    found.push(`걷어낸 말이 화면에 남아 있다: "${ghost[0]}" — 분모(예산·제안치)는 이제 없고, 주간은 '최근 7일'이다`)
+  }
+
+  // 2) **"이 숫자는 한도가 아니다"가 실제로 그려지는가.**
+  //    이 줄이 없으면 나머지가 아무리 정확해도 화면 전체가 한도로 읽힌다. 그리고
+  //    아니라고만 말하면 사용자는 갈 곳이 없다 — 어디서 봐야 하는지까지 있어야 한다.
+  if (!seen.disclaimShown) {
+    found.push('"이 숫자는 한도가 아니다"라는 안내가 화면에 없다 — 숫자만 있으면 누구나 한도로 읽는다')
+  } else {
+    if (!/한도/.test(seen.disclaim)) {
+      found.push(`안내 줄이 한도와 다르다는 말을 하지 않는다: "${seen.disclaim}"`)
+    }
+    if (!/Claude 설정|설정 →/.test(seen.disclaim)) {
+      found.push('안내 줄에 진짜 한도를 어디서 보는지가 없다 — 아니라고만 하면 갈 곳이 없다')
+    }
+  }
+
+  // 3) 기록을 아직 못 봤다 — **여기서 나오는 숫자는 전부 지어낸 것이다.**
+  //    (앱은 이때도 객체를 준다. `ready:false`면 today/week/days가 전부 null이다.)
+  if (st.ready === false) {
+    if (!/집계/.test(all)) found.push('아직 집계 중인데 화면이 그렇다고 말하지 않는다')
+    if (!seen.stateShown) found.push('집계 중이라는 줄이 화면에 없다')
+    const madeUp = seen.now.rows.flatMap((r) => r.cells).filter((c) => c && c !== '—')
+    if (madeUp.length) {
+      found.push(`집계가 안 끝났는데 표에 "${madeUp[0]}"가 적혔다 — 지어낸 숫자다(모르는 칸은 0이 아니라 빈칸이다)`)
+    }
+    // days가 null인데 기둥을 그리면 **없는 날을 지어낸 것**이다(6에서 수도 대조한다).
+    if (st.days === null && seen.days > 0) {
+      found.push(`앱이 일별 기록을 주지 않았는데(days:null) 화면에 기둥 ${seen.days}개가 서 있다`)
+    }
+    // "쌓인 기록이 없다"는 **모른다가 아니라 안 썼다**는 말이다. 아직 못 센 것을
+    // 그렇게 적으면 사용자는 자기가 안 썼다고 믿는다.
+    if (/기록이 없|안 썼|사용이 없/.test(seen.trend)) {
+      found.push(`덜 센 상태인데 추이 설명이 "${seen.trend}"다 — 모르는 것을 없다고 적었다`)
+    }
+  }
+
+  // 4) **표의 숫자가 앱이 준 값 그대로인가.** 퍼센트가 사라진 뒤로 이 화면의 전부가
+  //    이 표다. 한 칸이라도 다른 데서 나온 숫자면 화면 전체를 믿을 수 없다.
+  const cols = [
+    ['오늘', st.ready ? st.today : null],
+    ['최근 7일', st.ready ? st.week : null],
+  ]
+  const ROWS = [
+    ['출력', 'output', false],
+    ['캐시 읽기', 'cacheRead', false],
+    ['응답', 'msgs', true],
+  ]
+  cols.forEach(([head], i) => {
+    if (seen.now.heads[i] !== head) {
+      found.push(`${i + 1}번째 칸 제목이 '${seen.now.heads[i] ?? '없음'}'다. 여기는 '${head}'이다 — 기간 이름이 곧 계약이다`)
+    }
+  })
+  if (seen.now.rows.length !== ROWS.length) {
+    found.push(`표가 ${seen.now.rows.length}줄이다 — 출력·캐시 읽기·응답 세 줄이어야 한다`)
+  } else {
+    ROWS.forEach(([label, key, isCount], i) => {
+      const row = seen.now.rows[i]
+      if (row.head !== label) found.push(`${i + 1}번째 줄이 '${row.head}'다. 여기는 '${label}' 줄이다`)
+      cols.forEach(([head, src], j) => {
+        const v = src && typeof src[key] === 'number' && Number.isFinite(src[key]) ? src[key] : null
+        const want = v === null ? '—' : isCount ? `${v.toLocaleString('ko-KR')}건` : fmtTokensLike(v)
+        const shown = row.cells[j]
+        if (shown !== want) found.push(`${head}의 ${label} 칸이 "${shown}"다 — 앱이 준 값은 "${want}"다`)
+      })
+    })
+  }
+
+  // 5) 플랜 — 앱이 준 것만 적고, 안 준 것은 지어내지 않는다
+  if (st.plan && !seen.planShown) found.push(`앱이 플랜(${st.plan})을 줬는데 화면에 없다`)
+  if (!st.plan && seen.planShown) found.push(`앱이 플랜을 주지 않았는데 화면에 "${seen.plan}"가 떠 있다`)
+
+  // 6) 한도에 걸린 기록 — **리셋 시각이 실제로 화면에 있어야** 언제 다시 되는지 안다
+  if (st.limitHit) {
+    if (!seen.limitShown) found.push('한도에 걸린 기록이 있는데 화면에 그 줄이 없다')
+    const d = st.limitHit.resetAt ? new Date(st.limitHit.resetAt) : null
+    if (d && !Number.isNaN(d.getTime())) {
+      const mm = String(d.getMinutes()).padStart(2, '0')
+      const h12 = String(d.getHours() % 12 || 12).padStart(2, '0')
+      const h24 = String(d.getHours()).padStart(2, '0')
+      if (!all.includes(`${h12}:${mm}`) && !all.includes(`${h24}:${mm}`)) {
+        found.push(`한도가 풀리는 시각(${h24}:${mm})이 화면에 없다 — 언제 다시 되는지 알 길이 없다`)
+      }
+    }
+  } else if (seen.limitShown) {
+    found.push('한도에 걸린 기록이 없는데 그 줄이 떠 있다')
+  }
+
+  // 7) 최근 14일 추이 — 앱이 준 날 수와 기둥 수가 같은가
+  const list = st.ready && Array.isArray(st.days) ? st.days : []
+  const dayCount = list.length
+  if (seen.days !== dayCount) {
+    found.push(`앱이 준 일별 기록은 ${dayCount}일인데 화면 기둥은 ${seen.days}개다`)
+  }
+
+  // 7-1) **기록을 다 보지 못한 날(partial)을 0으로 그리지 않는가.**
+  //
+  //  앱은 오래된 파일을 아예 열지 않는다. 그 범위의 날은 "안 썼다(0)"가 아니라
+  //  "모른다(null)"인데, 바닥에 붙은 막대로 그리면 사용자는 그 주에 논 것으로 읽는다.
+  //  기둥 수만 세는 검사로는 절대 안 잡힌다 — 수는 똑같고 높이만 0이기 때문이다.
+  const unknownIdx = list.map((d, i) => (dayIsUnknown(d) ? i : -1)).filter((i) => i >= 0)
+  const knownVals = list.filter((d) => !dayIsUnknown(d)).map((d) => d.output)
+  if (unknownIdx.length && seen.cols.length === dayCount) {
+    const drawn = unknownIdx.filter((i) => !seen.cols[i].unknown)
+    if (drawn.length) {
+      found.push(
+        `기록을 못 본 날 ${drawn.length}칸(${unknownIdx.length}칸 중)을 아는 날처럼 그렸다 — 빈칸이어야 할 자리가 "안 썼다"로 읽힌다`,
+      )
+    }
+    const flat = unknownIdx.filter((i) => seen.cols[i].unknown && seen.cols[i].h <= 3)
+    if (flat.length) found.push(`못 본 날 ${flat.length}칸이 바닥에 붙어 있다 — 0 높이 막대는 "안 썼다"와 구별되지 않는다`)
+    const mute = unknownIdx.filter((i) => !/모르|보지 못/.test(seen.cols[i].title))
+    if (mute.length) found.push(`못 본 날 ${mute.length}칸에 그 사실을 알리는 설명이 없다`)
+    // 안 쓴 날(0)까지 빈칸으로 그리면 반대쪽 거짓말이 된다 — 0은 어엿한 정보다.
+    const zeroIdx = list.map((d, i) => (!dayIsUnknown(d) && d.output === 0 ? i : -1)).filter((i) => i >= 0)
+    const blanked = zeroIdx.filter((i) => seen.cols[i].unknown)
+    if (blanked.length) found.push(`실제로 안 쓴 날 ${blanked.length}칸을 "모른다"로 그렸다 — 0은 아는 값이다`)
+    if (!seen.edges) {
+      found.push('기록을 다 본 구간과 아닌 구간의 경계 표시가 차트에 없다 — 빈칸이 그냥 바닥으로 읽힌다')
+    }
+  }
+
+  // 7-2) **가짜 0이 평균에 섞였는가.** 못 본 날을 0으로 세면 평균이 내려가고
+  //      "오늘은 평소의 2.4배"처럼 틀린 문장이 나온다(사용자가 실제로 본 문장이다).
+  if (knownVals.length > 1 && unknownIdx.length) {
+    const past = knownVals.slice(0, -1)
+    const sum = past.reduce((a, b) => a + b, 0)
+    const wantAvg = fmtTokensLike(Math.round(sum / past.length))
+    const fakeAvg = fmtTokensLike(Math.round(sum / (past.length + unknownIdx.length)))
+    if (wantAvg !== fakeAvg && seen.trend.includes(fakeAvg)) {
+      found.push(`평균에 못 본 날을 0으로 넣었다 — 화면 "${fakeAvg}" / 아는 날만 세면 "${wantAvg}"`)
+    }
+    const m = seen.trend.match(/(\d+)\s*일 평균/)
+    if (m && Number(m[1]) !== past.length) {
+      found.push(`평균을 낸 날 수가 다르다 (화면 ${m[1]}일 / 실제로 기록을 본 지난 날 ${past.length}일)`)
+    }
+    if (!m && seen.trend) notes.push(`추이 설명에서 평균을 낸 날 수를 읽지 못했다: "${seen.trend}"`)
+  }
+
+  // 8) **캐시 읽기가 출력의 몇 배인가.** 퍼센트를 걷어낸 뒤 이 화면이 남은 이유가
+  //    이 숫자다 — Claude 화면에는 없고, 사용량을 줄이는 데 쓸모 있는 것은 이것뿐이다
+  //    (실측: 출력 1.34M에 캐시 읽기 298.74M = 223배).
+  //    **툴팁이 아니라 펼친 화면에서** 본다. 마우스를 올려 본 사람만 아는 정보는 없는 것과 같다.
+  const times = cacheTimesOf(st.ready ? st.today : null)
+  if (times !== null) {
+    if (!new RegExp(`${times.toLocaleString('ko-KR')}\\s*배`).test(seen.cache)) {
+      found.push(`캐시 읽기가 출력의 몇 배인지(${times}배) 펼친 화면에 없다 — "왜 이렇게 많이 썼지"의 답이 여기 있다`)
+    }
+    if (!/다시 읽|재사용/.test(seen.cacheNote)) {
+      found.push('캐시 읽기가 무엇인지(대화가 길어 매 턴 앞의 내용을 다시 읽는 양) 설명이 없다 — 숫자만으로는 줄일 방법을 모른다')
+    }
+  } else if (st.ready && st.today) {
+    // 출력이 0인 날(자정 직후)에는 **배수를 낼 수 없다.** 0으로 나눈 값을 적으면 안 된다.
+    const fake = seen.cache.match(/[\d,]+\s*배|Infinity|NaN/)
+    if (fake) found.push(`오늘 출력이 없는데 화면이 "${fake[0]}"라고 적었다 — 0으로는 나눌 수 없다`)
+  }
+
+  // 9) 큰 숫자를 자리수 그대로 쏟지 않는가 (좁은 상자에서 제일 먼저 무너지는 자리)
+  const raw = st.today && typeof st.today.cacheRead === 'number' ? String(st.today.cacheRead) : ''
+  if (raw.length >= 7 && all.includes(raw)) {
+    found.push(`큰 숫자를 자리수 그대로 적었다 (${raw}) — 축약해야 한다`)
+  }
+
+  // (누를 것이 없어 '눌러 본 흐름'은 이 화면에 없다. 사용자가 정하는 값이 하나도 없기
+  //  때문이고, 그것이 이 화면의 설계다 — 앱이 모르는 것을 사용자에게 정하게 하지 않는다.)
+  return { found, ran, notes }
+}
+
+// ---------------------------------------------------------------------------
+// 새 대화로 갈아타기 — **누른 뒤에야 드러나는 것들**
+//
+// 이 기능이 없던 동안 대화는 프로젝트마다 영구 고정이었고, 길어질수록 매 턴 앞 내용을
+// 전부 다시 읽어 **같은 질문이 점점 비싸졌다**(실측: 198턴째에 첫 턴의 14배). 그래서
+// 화면이 무게를 보여 주고 갈아탈 길을 준다. 여기서 보는 것:
+//
+//   - 화면의 숫자가 **앱이 준 값에서 나온 것인가** (지어낸 숫자인가)
+//   - 기록이 없으면(null) **0으로 그리지 않는가** — 0은 "안 썼다"는 거짓말이다
+//   - 첫 턴 값이 없으면 배수를 **적지 않는가** — 0으로 나눈 NaN·Infinity가 새어 나오는지
+//   - 퍼센트가 없는가 (이 화면의 규칙 — 분모 없는 퍼센트는 전부 한도로 읽힌다)
+//   - **확인 없이 갈아타지 않는가.** 누르자마자 바뀌면 맥락이 말없이 끊긴다
+//   - 확인 창이 **무엇이 끊기고 무엇이 남는지** 말하는가 (옛 기록 파일은 지워지지 않는다)
+//   - **인수인계 메모가 실제로 실려 가는가.** 이게 안 실리면 갈아타기는 그냥 맥락 삭제다
+//   - 앱이 거절하면(`{ok:false, reason}`) **그 이유가 화면에 그대로 오는가**
+//   - 갈아탄 뒤 화면이 **옛 무게를 그대로 들고 있지 않은가**
+async function runSessionProbes(win) {
+  const found = []
+  const ran = []
+  const notes = []
+  const shots = []
+  if (!S.startsWith('session')) return { found, ran, notes, shots }
+  const js = (code) => win.webContents.executeJavaScript(code)
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms))
+
+  // 앱이 실제로 준 값. **화면의 숫자는 전부 여기서 나와야 한다.**
+  // (null과 '통로 없음'은 다른 것이라 감싸서 받는다.)
+  const got = await js(
+    `(async () => { const f = window.teamView && window.teamView.getSessionCost
+       if (typeof f !== 'function') return { __noBridge: true }
+       try { return { v: await f() } } catch (e) { return { __threw: String(e && e.message) } } })()`,
+  )
+  if (got.__noBridge) {
+    found.push('이 갈래에는 대화 무게 통로가 있어야 하는데 없다')
+    return { found, ran, notes, shots }
+  }
+  if (got.__threw) {
+    found.push(`앱이 대화 무게를 묻자 예외를 던졌다: ${got.__threw}`)
+    return { found, ran, notes, shots }
+  }
+  ran.push('새 대화 화면 대조')
+
+  const cost = got.v ?? null
+  // 화면을 보기 전에 **스텁부터 의심한다.** 스텁이 지어낸 모양 위에서 도는 검사는
+  // 초록불이어도 아무것도 지켜 주지 못한다(이 저장소에서 두 번 났다).
+  {
+    const shape = sessionShapeProblems(cost)
+    found.push(...shape.found)
+    notes.push(...shape.notes)
+  }
+
+  // 검사 전용 통로가 화면 코드로 새지 않았는가. 새면 실물에는 없는 것 위에 화면이 선다.
+  found.push(...spyLeakProblems())
+
+  let seen = await js(READ_SESSION)
+  if (!seen.secShown) {
+    found.push('앱이 대화 무게 통로를 주는데 그 자리가 화면에 없다')
+    return { found, ran, notes, shots }
+  }
+
+  const all = [seen.line, seen.note, seen.btnTitle].join(' ')
+  // 1) 이 화면의 규칙 — **퍼센트를 쓰지 않는다.** 예외를 하나 두면 규칙이 무너진다.
+  const pct = all.match(/[^\s]{0,12}%/)
+  if (pct) found.push(`대화 무게에 퍼센트가 적혔다: "${pct[0]}" — 견줄 분모가 없어서 한도로 읽힌다`)
+  // 2) 셈이 새어 나오지 않았는가(0으로 나눈 값·빈 값이 글자로 그대로 뜨는 자리다)
+  const junk = all.match(/NaN|Infinity|undefined|\[object/)
+  if (junk) found.push(`대화 무게에 셈이 그대로 새어 나왔다: "${junk[0]}"`)
+
+  if (!cost) {
+    // 3) **기록이 없다.** 여기서 숫자가 보이면 전부 지어낸 것이다.
+    if (!/기록이 없/.test(seen.line)) {
+      found.push(`기록이 없는데 화면이 "${seen.line}"라고 적었다 — "아직 기록이 없습니다"여야 한다`)
+    }
+    if (/\d/.test(seen.line)) found.push(`기록이 없는데 화면에 숫자가 적혔다: "${seen.line}"`)
+    if (!seen.btnShown) found.push('[새 대화 시작]이 사라졌다 — 지금 못 하는 것은 감추지 않고 죽인다')
+    if (seen.btnShown && !seen.btnDisabled) {
+      found.push('시작할 대화가 없는데 [새 대화 시작]이 눌린다 — 눌러도 아무 일이 없는 버튼이 된다')
+    }
+    // 왜 못 누르는지가 **누르기 전에** 적혀 있어야 한다(툴팁만으로는 마우스를 올린 사람만 안다).
+    if (!seen.note) found.push('버튼이 죽어 있는데 왜 안 되는지가 화면에 없다')
+    // 눌러도 아무 일이 없어야 한다 — 죽은 버튼이 실제로 죽었는지 확인한다.
+    const dead = await js(CLICK_SES_NEW)
+    if (dead.dlgShown) found.push('죽어 있어야 할 [새 대화 시작]을 눌렀더니 확인 창이 열렸다')
+    const calls = await js(SPY_CALLS)
+    if (calls.length) found.push('시작할 대화가 없는데 앱에 갈아타기를 시켰다')
+    return { found, ran, notes, shots }
+  }
+
+  // 4) **화면의 숫자가 앱이 준 값 그대로인가.**
+  const turns = typeof cost.turns === 'number' ? cost.turns : null
+  const last = typeof cost.lastRead === 'number' ? cost.lastRead : null
+  if (turns !== null && !seen.line.includes(`${turns.toLocaleString('ko-KR')}개`)) {
+    found.push(`응답 수가 화면에 없다 (앱 ${turns}개 / 화면 "${seen.line}")`)
+  }
+  if (last !== null && !seen.line.includes(fmtTokensLike(last))) {
+    found.push(`매 턴 다시 읽는 양이 화면에 없다 (앱 ${fmtTokensLike(last)} / 화면 "${seen.line}")`)
+  }
+  // 5) **배수는 낼 수 있을 때만 적는다.** 첫 턴 값이 없으면(0으로 나눌 수 없으면) 없어야 한다.
+  const growth = typeof cost.growth === 'number' && Number.isFinite(cost.growth) ? cost.growth : null
+  const shownTimes = seen.line.match(/([\d,.]+)\s*배/)
+  if (growth === null && shownTimes) {
+    found.push(`첫 턴 값이 없어 배수를 낼 수 없는데 화면이 "${shownTimes[0]}"라고 적었다 — 0으로는 나눌 수 없다`)
+  }
+  if (growth !== null) {
+    const want = growth >= 10 ? Math.round(growth).toLocaleString('ko-KR') : growth.toFixed(1)
+    if (!shownTimes) found.push(`처음의 몇 배인지(${want}배)가 화면에 없다 — 이 줄이 갈아탈 이유다`)
+    else if (shownTimes[1] !== want) found.push(`배수가 앱이 준 값과 다르다 (화면 ${shownTimes[1]} / 앱 ${want})`)
+  }
+  // 6) **무거우면 눈에 띄어야 한다.** 흐린 한 줄로 두면 정작 갈아타야 할 사람이 못 본다.
+  if (cost.heavy) {
+    if (seen.secBg === seen.plainBg && seen.lineColor === seen.plainColor) {
+      found.push('무거운 대화인데 다른 줄과 똑같이 그려졌다 — 눈에 띄지 않으면 아무도 안 본다')
+    }
+    if (!/새 대화/.test(all)) found.push('무거운 대화인데 "새 대화를 시작하면 줄어든다"는 안내가 없다')
+  }
+  if (!seen.btnShown || seen.btnDisabled) {
+    found.push('시작할 대화가 있는데 [새 대화 시작]을 누를 수 없다')
+    return { found, ran, notes, shots }
+  }
+
+  // 7) **확인 없이 갈아타지 않는가.** 이 한 걸음이 없으면 맥락이 말없이 끊긴다.
+  const opened = await js(CLICK_SES_NEW)
+  if (!opened.dlgShown) {
+    found.push('[새 대화 시작]을 눌렀는데 확인 창이 뜨지 않았다')
+    const calls = await js(SPY_CALLS)
+    if (calls.length) found.push('묻지도 않고 대화를 갈아탔다 — 맥락이 끊기는 일은 확인을 받아야 한다')
+    return { found, ran, notes, shots }
+  }
+  const before = await js(SPY_CALLS)
+  if (before.length) found.push('확인 창을 띄우면서 앱에 갈아타기를 먼저 시켰다 — 물어보나 마나가 된다')
+  ran.push('새 대화 확인 창')
+
+  const dlg = await js(READ_SESSION)
+  // 무엇이 끊기고 **무엇이 남는지.** 특히 옛 기록이 지워지지 않는다는 말이 없으면
+  // 사람은 이 버튼을 영영 안 누른다(지워질까 봐).
+  // **"지워지지 않는다"는 말 그 자체**를 본다. '그대로 남는 것' 같은 제목만으로는
+  // 무엇이 남는지 알 수 없고, 실제로 그 제목이 검사를 통과시켜 버린 적이 있다.
+  if (!/지워지지 않|지우지 않/.test(dlg.dlgText)) {
+    found.push('확인 창이 "옛 대화 기록은 지워지지 않는다"를 말하지 않는다 — 그러면 아무도 누르지 않는다')
+  }
+  // 여기도 **말 그 자체**를 본다('끊기는 것'이라는 제목만으로는 무엇이 끊기는지 모른다).
+  if (!/기억하지 못|이어지지 않/.test(dlg.dlgText)) {
+    found.push('확인 창이 무엇이 끊기는지(새 대화는 앞의 내용을 기억하지 못한다) 말하지 않는다')
+  }
+  if (!dlg.memoShown) found.push('확인 창에 인수인계 메모를 적을 칸이 없다 — 이게 없으면 갈아타기는 맥락 삭제일 뿐이다')
+  if (!/선택|안 적어도/.test(dlg.dlgText)) found.push('인수인계 메모가 안 적어도 되는 것인지 화면이 말하지 않는다')
+  // 왜 요약만 넘기는지 — 이 한 줄이 이 기능의 취지다(맥락을 통째로 끌고 가지 않는다).
+  if (!/요약/.test(dlg.dlgText)) {
+    found.push('메모가 무엇을 하는 것인지(맥락 대신 요약만 넘긴다) 확인 창에 없다')
+  }
+  // 확인 창이 떠 있는 지금을 잰다(잘림·대비·손닿는 크기 — 좁은 창에서 제일 먼저 무너진다).
+  shots.push(await js(SCRIPT))
+
+  // 8) **[그만두기]가 진짜 그만두는가.** 창만 닫고 갈아타 버리면 최악이다.
+  await js(`document.getElementById('ses-cancel').click(); true`)
+  await wait(300)
+  const off = await js(READ_SESSION)
+  if (off.dlgShown) found.push('[그만두기]를 눌렀는데 확인 창이 닫히지 않았다')
+  if ((await js(SPY_CALLS)).length) found.push('[그만두기]를 눌렀는데 대화를 갈아탔다')
+  ran.push('그만두기')
+  const again = await js(CLICK_SES_NEW)
+  if (!again.dlgShown) {
+    found.push('그만둔 뒤 [새 대화 시작]을 다시 눌렀는데 확인 창이 열리지 않았다')
+    return { found, ran, notes, shots }
+  }
+
+  // 9) 앱이 거절하는 갈래인가. **화면이 짐작하지 않고 앱의 답을 그대로 보이는지**를 본다.
+  //    (거절 조건은 main.js와 같다 — 활성 프로젝트가 돌고 있으면 갈아타지 않는다.)
+  const busy = await js(ACTIVE_BUSY)
+  const memo = '결제 화면을 만들던 중. 카드사 응답은 흉내(mock)로 두기로 했다.'
+  await js(typeMemo(memo))
+
+  if (busy) {
+    await js(`document.getElementById('ses-go').click(); true`)
+    await wait(700)
+    const after = await js(READ_SESSION)
+    const calls = await js(SPY_CALLS)
+    if (!calls.length) found.push('[새 대화 시작]을 눌렀는데 앱에 아무것도 시키지 않았다')
+    if (!after.dlgShown) found.push('거절당했는데 확인 창이 닫혔다 — 적어 둔 메모까지 사라진다')
+    if (!after.errShown) found.push('앱이 거절했는데 이유가 화면에 없다 — 왜 안 됐는지 알 길이 없다')
+    else {
+      const reasons = mainReasons()
+      if (reasons.length && !reasons.some((r) => after.err.includes(r))) {
+        found.push(`거절 이유가 앱이 주는 말과 다르다 (화면 "${after.err}" / 앱 ${reasons.map((r) => `"${r}"`).join(' · ')})`)
+      }
+    }
+    if (after.memo !== memo) found.push('거절당했더니 적어 둔 인수인계 메모가 사라졌다')
+    if (after.lineRaw !== seen.lineRaw) {
+      found.push(`갈아타지 못했는데 무게 줄이 바뀌었다 (전 "${seen.lineRaw}" / 후 "${after.lineRaw}")`)
+    }
+    ran.push('시작 거절 이유 표시')
+    return { found, ran, notes, shots }
+  }
+
+  // 10) **인수인계 메모가 실제로 실려 가는가.** 이게 안 실리면 새 대화는 아무것도 모른 채
+  //    시작하고, 사용자는 같은 설명을 처음부터 다시 하게 된다(그러면 갈아탄 보람이 없다).
+  await js(`document.getElementById('ses-go').click(); true`)
+  await wait(900)
+  const calls = await js(SPY_CALLS)
+  if (!calls.length) {
+    found.push('확인 창에서 [새 대화 시작]을 눌렀는데 앱에 아무것도 시키지 않았다')
+    return { found, ran, notes, shots }
+  }
+  if (calls.length > 1) found.push(`한 번 눌렀는데 갈아타기를 ${calls.length}번 시켰다`)
+  const arg = calls[0]
+  if (!arg || typeof arg !== 'object') {
+    found.push(`앱에 넘긴 값이 { handoff } 꼴이 아니다: ${JSON.stringify(arg)}`)
+  } else if (arg.handoff !== memo) {
+    found.push(`적은 인수인계 메모가 앱에 그대로 가지 않았다 (넘긴 것 ${JSON.stringify(arg.handoff)})`)
+  }
+  ran.push('인수인계 메모 전달')
+
+  const done = await js(READ_SESSION)
+  if (done.dlgShown) found.push('갈아탔는데 확인 창이 그대로 떠 있다')
+  // 갈아탄 뒤에는 기록이 없다(앱도 그때 null을 준다). 옛 무게를 그대로 들고 있으면
+  // 사용자는 갈아타기가 안 먹은 줄 안다.
+  if (done.lineRaw === seen.lineRaw) {
+    found.push(`갈아탔는데 무게 줄이 옛것 그대로다: "${done.lineRaw}"`)
+  }
+  return { found, ran, notes, shots }
+}
+
+/**
+ * **검사 스텁이 프로덕션에 없는 모양을 지어내지 않았는가**(사용량과 같은 이유다).
+ *
+ * main.js `sessionCostFrom`에서 필드 이름과 heavy 기준을 그대로 떼어 와 맞대 본다.
+ * 읽어 내지 못하면 실패로 치지 않고 알림만 남긴다 — 검사가 자기 자신을 속이지 않게.
+ */
+function sessionShapeProblems(cost) {
+  const out = { found: [], notes: [] }
+  if (!cost) return out
+  let src
+  try {
+    src = fs.readFileSync(MAIN_JS, 'utf8').replace(/\r\n/g, '\n')
+  } catch {
+    out.notes.push('main.js를 읽지 못해 스텁이 계약대로인지는 대조하지 못했다')
+    return out
+  }
+  const at = src.indexOf('turns: f.turns')
+  const open = at < 0 ? -1 : src.lastIndexOf('{', at)
+  const close = open < 0 ? -1 : src.indexOf('}', open)
+  if (close < 0) {
+    out.notes.push('main.js에서 대화 무게 필드를 읽지 못해 대조하지 못했다')
+  } else {
+    const want = src
+      .slice(open + 1, close)
+      .replace(/^[ \t]*\/\/.*$/gm, '')
+      .split(',')
+      .map((p) => (p.split(':')[0] || '').trim())
+      .filter((k) => /^[A-Za-z_$][\w$]*$/.test(k))
+    const got = Object.keys(cost)
+    const invented = got.filter((k) => !want.includes(k))
+    const missing = want.filter((k) => !got.includes(k))
+    if (invented.length) out.found.push(`스텁이 대화 무게에 앱에 없는 필드를 실었다: ${invented.join(', ')}`)
+    if (missing.length) out.found.push(`스텁이 대화 무게에서 앱의 필드를 빠뜨렸다: ${missing.join(', ')}`)
+  }
+  // 값도 앱이 낼 수 있는 것이어야 한다. 배수와 heavy는 계산으로 나오는 값이라
+  // 스텁이 아무 숫자나 적어 두면 화면 대조가 통째로 헛돈다.
+  const first = cost.firstRead
+  const last = cost.lastRead
+  if (first === 0) out.found.push('스텁의 firstRead가 0이다 — 앱은 잴 수 없는 값을 0이 아니라 null로 준다')
+  const wantGrowth = first && typeof last === 'number' ? Math.round((last / first) * 10) / 10 : null
+  if ((cost.growth ?? null) !== wantGrowth) {
+    out.found.push(`스텁의 growth가 앱의 셈과 다르다 (스텁 ${cost.growth} / 셈 ${wantGrowth})`)
+  }
+  const readAt = mainNumber(src, 'SESSION_HEAVY_READ')
+  const growAt = mainNumber(src, 'SESSION_HEAVY_GROWTH')
+  if (readAt === null || growAt === null) {
+    out.notes.push('main.js에서 heavy 기준을 읽지 못해 스텁의 heavy는 대조하지 못했다')
+  } else {
+    const wantHeavy = (last ?? 0) >= readAt || (wantGrowth !== null && wantGrowth >= growAt)
+    if (Boolean(cost.heavy) !== wantHeavy) {
+      out.found.push(`스텁의 heavy가 앱의 기준과 다르다 (스텁 ${cost.heavy} / 기준으로는 ${wantHeavy})`)
+    }
+  }
+  return out
+}
+
+/** main.js의 상수 하나. 못 읽으면 null — 지어내지 않는다. */
+function mainNumber(src, name) {
+  const m = new RegExp(`^const ${name} = ([\\d_]+)`, 'm').exec(src)
+  return m ? Number(m[1].replace(/_/g, '')) : null
+}
+
+/** 앱이 갈아타기를 거절할 때 쓰는 말. 화면이 다른 말을 지어내지 않았는지 대조한다. */
+function mainReasons() {
+  try {
+    const src = fs.readFileSync(MAIN_JS, 'utf8').replace(/\r\n/g, '\n')
+    const at = src.indexOf('function startNewSession(')
+    if (at < 0) return []
+    const body = src.slice(at, at + 2000)
+    return [...body.matchAll(/reason:\s*'([^']+)'/g)].map((m) => m[1])
+  } catch {
+    return []
+  }
+}
+
+/**
+ * **검사 전용 통로가 화면 코드로 새지 않았는가.**
+ *
+ * 스텁은 "무엇을 들려 보냈는지"를 `__uiStubSpy`로 내준다. 그것을 렌더러가 쓰기 시작하면
+ * 실물에는 없는 통로 위에 화면이 서게 된다 — 스텁만 `firstRunDone`을 실어 마법사가 죽은
+ * 배선 위에 서 있던 사고와 같은 모양이다.
+ */
+function spyLeakProblems() {
+  const out = []
+  const dir = path.join(__dirname, '..', 'renderer')
+  try {
+    for (const f of fs.readdirSync(dir)) {
+      if (!/\.(js|html|css)$/.test(f)) continue
+      if (fs.readFileSync(path.join(dir, f), 'utf8').includes('__uiStubSpy')) {
+        out.push(`renderer/${f}가 검사 전용 통로(__uiStubSpy)를 쓰고 있다 — 실물에는 없는 통로다`)
+      }
+    }
+  } catch {
+    // 읽지 못했으면 잡을 것도 없다. 여기서 검사를 세우지는 않는다.
+  }
+  return out
+}
+
+/** 스텁이 받아 둔 갈아타기 요청. 문자열로 오므로 되돌려 읽는다. */
+const SPY_CALLS = `(() => {
+  const s = window.__uiStubSpy
+  if (!s || typeof s.newSessionCalls !== 'function') return []
+  return s.newSessionCalls().map((t) => { try { return JSON.parse(t) } catch { return t } })
+})()`
+
+/** 지금 보고 있는 회사가 돌고 있는가. 앱이 갈아타기를 거절하는 조건과 같은 값이다. */
+const ACTIVE_BUSY = `(async () => {
+  const r = await window.teamView.listProjects()
+  const list = (r && r.projects) || []
+  const p = list.find((x) => x.dir === (r && r.activeDir)) || list[0]
+  return Boolean(p && p.company === 'busy')
+})()`
+
+const CLICK_SES_NEW = `(() => {
+  const b = document.getElementById('usage-ses-new')
+  const d = document.getElementById('ses-confirm')
+  b.click()
+  const s = getComputedStyle(d)
+  return { dlgShown: !d.hidden && s.display !== 'none' && d.getBoundingClientRect().width > 0 }
+})()`
+
+const typeMemo = (memo) => `(() => {
+  const ta = document.getElementById('ses-handoff')
+  ta.value = ${JSON.stringify(memo)}
+  ta.dispatchEvent(new Event('input', { bubbles: true }))
+  return ta.value
+})()`
+
+/** 화면에서 읽어 오는 것. **보이는 글자만** 모은다(감춘 줄의 글이 섞이면 판정이 뒤집힌다). */
+const READ_SESSION = `(() => {
+  const vis = (e) => {
+    if (!e) return false
+    const s = getComputedStyle(e)
+    if (s.display === 'none' || s.visibility === 'hidden' || Number(s.opacity) === 0) return false
+    const r = e.getBoundingClientRect()
+    return r.width > 0 && r.height > 0
+  }
+  const visText = (root) => {
+    if (!root) return ''
+    let s = ''
+    for (const n of root.childNodes) {
+      if (n.nodeType === 3) { s += ' ' + n.textContent; continue }
+      if (n.nodeType !== 1 || !vis(n)) continue
+      s += ' ' + visText(n)
+    }
+    return s.replace(/\\s+/g, ' ').trim()
+  }
+  const sec = document.getElementById('usage-ses-sec')
+  const line = document.getElementById('usage-ses')
+  const btn = document.getElementById('usage-ses-new')
+  const dlg = document.getElementById('ses-confirm')
+  const err = document.getElementById('ses-err')
+  const ta = document.getElementById('ses-handoff')
+  // 무거운 대화가 **다른 줄과 다르게 보이는지**는 색으로 잰다(클래스 이름이 아니라).
+  const plainSec = document.getElementById('usage-cache-sec')
+  const plainLine = document.getElementById('usage-cache')
+  return {
+    secShown: vis(sec),
+    secBg: sec ? getComputedStyle(sec).backgroundColor : '',
+    plainBg: plainSec ? getComputedStyle(plainSec).backgroundColor : '',
+    lineColor: line ? getComputedStyle(line).color : '',
+    plainColor: plainLine ? getComputedStyle(plainLine).color : '',
+    line: visText(line),
+    // 확인 창이 떠 있는 동안에는 사용량 화면이 자리를 내주므로 보이는 글자가 비어 있다.
+    // '갈아탄 뒤 옛 무게가 그대로인가'는 **보이든 말든 적힌 글자**로 견줘야 한다.
+    lineRaw: line ? (line.textContent || '').trim() : '',
+    note: visText(document.getElementById('usage-ses-note')),
+    btnShown: vis(btn),
+    btnDisabled: btn ? btn.disabled : null,
+    btnTitle: (btn && btn.title) || '',
+    dlgShown: vis(dlg),
+    dlgText: visText(dlg),
+    errShown: vis(err),
+    err: visText(err),
+    memoShown: vis(ta),
+    memo: ta ? ta.value : null,
+  }
+})()`
+
+/**
+ * 상단 사용량이 **있어야 할 자리에 있는가.** 모든 갈래에서 한 번씩 본다.
+ *
+ * 규칙은 단순하다: 통로(`getUsageStats`)가 있으면 앱은 **어떤 경우에도 객체를 준다**
+ * (기록을 하나도 못 봤으면 `ready:false`). 그러니 숫자는 떠 있어야 하고, 통로가
+ * 없을 때만 자리를 비운다. 이 한 줄이 없어서, 스텁이 새 PC에 `null`을 주며 지어낸
+ * "사용량이 안 뜨는 상태"를 검사 전체가 몇 달 동안 지켜 주고 있었다.
+ */
+async function usagePresence(win) {
+  const r = await win.webContents.executeJavaScript(`(async () => {
+    const f = window.teamView && window.teamView.getUsageStats
+    const bridge = typeof f === 'function'
+    let obj = false
+    if (bridge) { try { obj = Boolean(await f()) } catch { obj = false } }
+    const g = document.getElementById('usage-btn')
+    const s = g && getComputedStyle(g)
+    const shown = Boolean(g && s.display !== 'none' && s.visibility !== 'hidden' && g.getBoundingClientRect().width > 0)
+    return { bridge, obj, shown }
+  })()`)
+  const out = []
+  // **통로가 있으면 답은 반드시 객체다.** 프로덕션 getUsageStats는 기록을 하나도 못
+  // 봐도 `ready:false`인 객체를 돌려준다 — null은 앱이 낼 수 없는 답이고, 그 자리를
+  // 검사 스텁이 지어내면 "새 PC에는 사용량이 없다"는 없는 화면을 검사가 지키게 된다.
+  if (r.bridge && !r.obj) {
+    out.push('통로는 있는데 사용량이 null이다 — 앱은 어떤 경우에도 객체를 준다(기록이 없으면 ready:false)')
+  }
+  if (r.bridge && r.obj && !r.shown) {
+    out.push('앱이 사용량을 주는데 상단 숫자가 이 갈래에서 사라졌다 — 기록이 없어도 앱은 값을 준다')
+  }
+  if (!r.bridge && r.shown) out.push('사용량 통로가 없는데 상단에 숫자가 떠 있다')
+  return out
+}
+
+/** 그 날의 값을 **모르는가**. `partial`이거나 output이 null이면 모르는 날이다.
+ *  0은 모르는 것이 아니라 "안 썼다"는 아는 값이다 — 둘을 같게 보면 검사가 거짓말한다. */
+function dayIsUnknown(d) {
+  return !d || d.partial === true || typeof d.output !== 'number'
+}
+
+/**
+ * **검사 스텁이 프로덕션에 없는 모양을 지어내지 않았는가.**
+ *
+ * 이 저장소가 이미 두 번 당했다. 스텁만 `firstRunDone`을 실어 마법사가 죽은 배선 위에
+ * 서 있었고, 스텁만 `null`을 돌려줘 "새 PC에는 사용량이 안 뜬다"는 **도달 불가능한
+ * 동작**을 검사가 지켜 주고 있었다. 화면 검사는 스텁이 준 값만 보므로, 스텁이 거짓말을
+ * 하면 이 파일의 다른 검사들이 전부 초록불인 채로 실물만 깨진다.
+ *
+ * 그래서 main.js에서 **필드 이름을 그대로 떼어** 스텁 응답과 맞대 본다. 읽어 내지
+ * 못하면 실패로 치지 않고 알림만 남긴다(검사가 자기 자신을 속이지 않게).
+ * 예산이 계약에서 빠진 것도 여기서 지켜진다 — 스텁이 `budget`을 되살리면 앱에 없는
+ * 필드로 잡힌다.
+ */
+function usageShapeProblems(st) {
+  const out = { found: [], notes: [] }
+  let src
+  try {
+    src = fs.readFileSync(MAIN_JS, 'utf8').replace(/\r\n/g, '\n')
+  } catch {
+    out.notes.push('main.js를 읽지 못해 스텁이 계약대로인지는 대조하지 못했다')
+    return out
+  }
+  /** `from`이 가리키는 객체 리터럴의 키들. `back`이면 앵커 **앞쪽**에서 여는 괄호를 찾는다
+   *  (여러 줄 객체는 앵커가 그 안에 있기 때문이다). 주석 줄은 이름 규칙에서 걸러진다. */
+  const keysIn = (from, back) => {
+    const at = src.indexOf(from)
+    if (at < 0) return null
+    const open = back ? src.lastIndexOf('{', at) : src.indexOf('{', at)
+    const close = src.indexOf('}', open)
+    if (open < 0 || close < 0) return null
+    const keys = src
+      .slice(open + 1, close)
+      .replace(/^[ \t]*\/\/.*$/gm, '') // 주석을 먼저 지운다 — 그 안의 쉼표가 다음 키를 삼킨다
+      .split(',')
+      .map((p) => (p.split(':')[0] || '').trim())
+      .filter((k) => /^[A-Za-z_$][\w$]*$/.test(k))
+    return keys.length ? { keys } : null
+  }
+  const cmp = (want, got, where) => {
+    if (!want) {
+      out.notes.push(`main.js에서 ${where} 필드를 읽지 못해 대조하지 못했다`)
+      return
+    }
+    const invented = got.filter((k) => !want.keys.includes(k))
+    const missing = want.keys.filter((k) => !got.includes(k))
+    if (invented.length) out.found.push(`스텁이 ${where}에 앱에 없는 필드를 실었다: ${invented.join(', ')}`)
+    if (missing.length) out.found.push(`스텁이 ${where}에서 앱의 필드를 빠뜨렸다: ${missing.join(', ')}`)
+  }
+  // 최상위는 늘 있다. 날짜 칸은 ready:true인 갈래에서만 볼 수 있다.
+  cmp(keysIn('return { ready: false, plan, today: null'), Object.keys(st), '사용량 최상위')
+  if (Array.isArray(st.days) && st.days.length) {
+    cmp(keysIn('if (!covered.has(date)) return {'), Object.keys(st.days[0]), '못 본 날')
+    cmp(keysIn('return { date, output: d.output'), Object.keys(st.days[st.days.length - 1]), '아는 날')
+  }
+  return out
+}
+
+/** renderer/app.js의 `fmtTokens`와 같은 셈. 화면에 적힌 숫자를 되짚어 보려면 필요하다.
+ *  (형식이 어긋나면 이 검사가 시끄럽게 틀린다 — 조용히 통과하는 것보다 낫다.) */
+function fmtTokensLike(n) {
+  const v = Math.max(0, Math.round(n || 0))
+  if (v < 10_000) return v.toLocaleString('ko-KR')
+  if (v < 100_000_000) return `${(v / 10_000).toFixed(v < 100_000 ? 1 : 0)}만`
+  return `${(v / 100_000_000).toFixed(2)}억`
+}
+
+/** 캐시 읽기가 출력의 몇 배인가. **출력이 0이면 배수는 없다** — 화면과 같은 셈이다. */
+function cacheTimesOf(b) {
+  if (!b) return null
+  const read = b.cacheRead
+  const out = b.output
+  if (typeof read !== 'number' || typeof out !== 'number' || !Number.isFinite(read) || !Number.isFinite(out)) return null
+  if (out <= 0) return null
+  return Math.round(read / out)
+}
+
+/**
+ * 화면에서 읽어 오는 것. **보이는 글자만 모은다** — textContent를 그대로 쓰면 감춘
+ * 줄(집계 중 안내 등)의 글까지 섞여 "떠 있다"와 "숨겨져 있다"를 구별할 수 없다.
+ */
+const READ_USAGE = `(() => {
+  const vis = (e) => {
+    if (!e) return false
+    const s = getComputedStyle(e)
+    if (s.display === 'none' || s.visibility === 'hidden' || Number(s.opacity) === 0) return false
+    const r = e.getBoundingClientRect()
+    return r.width > 0 && r.height > 0
+  }
+  const visText = (root) => {
+    if (!root) return ''
+    let s = ''
+    for (const n of root.childNodes) {
+      if (n.nodeType === 3) { s += ' ' + n.textContent; continue }
+      if (n.nodeType !== 1 || !vis(n)) continue
+      s += ' ' + visText(n)
+    }
+    return s.replace(/\\s+/g, ' ').trim()
+  }
+  const g = document.getElementById('usage-btn')
+  const pop = document.getElementById('usage-pop')
+  const spark = document.getElementById('usage-spark')
+  // 차트 칸을 **하나하나** 본다. 개수만 세면 "못 본 날을 0으로 그렸다"가 안 잡힌다 —
+  // 기둥 수는 똑같고 높이만 바닥에 붙기 때문이다.
+  const cols = [...(spark ? spark.querySelectorAll('.usage-day') : [])].map((c) => ({
+    unknown: c.classList.contains('unknown'),
+    h: Math.round(c.getBoundingClientRect().height),
+    title: c.title || '',
+  }))
+  // 숫자표. 첫 줄은 기간 이름(오늘 / 최근 7일), 나머지는 항목별 한 줄이다.
+  const trs = [...document.querySelectorAll('#usage-now tr')]
+  const heads = trs.length ? [...trs[0].querySelectorAll('th')].slice(1).map(visText) : []
+  const rows = trs.slice(1).map((tr) => {
+    const tds = [...tr.querySelectorAll('td')]
+    return { head: visText(tds[0]), cells: tds.slice(1).map(visText) }
+  })
+  const disclaim = document.getElementById('usage-disclaim')
+  return {
+    btnShown: vis(g),
+    sum: visText(document.getElementById('usage-sum')),
+    tip: (g && g.title) || '',
+    popShown: vis(pop),
+    popText: visText(pop),
+    plan: visText(document.getElementById('usage-plan')),
+    planShown: vis(document.getElementById('usage-plan')),
+    stateShown: vis(document.getElementById('usage-state')),
+    disclaimShown: vis(disclaim),
+    disclaim: visText(disclaim),
+    limitShown: vis(document.getElementById('usage-limit')),
+    now: { heads, rows },
+    cache: visText(document.getElementById('usage-cache')),
+    cacheNote: visText(document.getElementById('usage-cache-note')),
+    days: cols.length,
+    cols,
+    edges: spark ? spark.querySelectorAll('.usage-edge').length : 0,
+    sparkLabel: (spark && spark.getAttribute('aria-label')) || '',
+    trend: visText(document.getElementById('usage-trend-note')),
+  }
+})()`
+
 // 페이지 안에서 도는 검사. 문자열이라 여기 백틱을 쓰면 안 된다(한 번 깨뜨렸다).
 const SCRIPT = `(() => {
   const out = { 잘림: [], 줄바꿈: [], 손닿는크기: [], 접근이름없음: [], 겹침: [], 대비: [], 죽은버튼: [], 숨김실패: [], 가로넘침: [], 가림: [] }
@@ -552,7 +1443,7 @@ const SCRIPT = `(() => {
   //     한 장을 재는 방식으로는 안 잡힌다 — **칠하는 순서**를 봐야 한다.
   //     #overlay가 pointer-events:none이라 hit-test에 안 잡히므로 재는 동안만 켠다.
   //     (pointer-events는 칠하는 순서를 바꾸지 않으므로 이 방법은 정직하다.)
-  const COVERS = ['#wizard', '#welcome', '#menu-pop', '#team-pop', '#need', '#env']
+  const COVERS = ['#wizard', '#ses-confirm', '#welcome', '#menu-pop', '#team-pop', '#usage-pop', '#need', '#env']
   const ovl = document.getElementById('overlay')
   const tags = [...document.querySelectorAll('#overlay .tag, #overlay .bubble')].filter(vis)
   if (ovl && tags.length) {

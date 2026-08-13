@@ -2085,6 +2085,9 @@ function toggleMenu(show) {
   // 둘이 겹치면 뒤에 있는 것을 읽을 수 없다. ☰를 열면 팀원 패널은 자리를 비운다
   // (팀원 패널은 ☰ 안에서 열리므로 반대 방향은 서로를 부르는 길이다).
   toggleTeamPop(false)
+  // 사용량 화면도 같은 이유로 자리를 내준다. ☰ 버튼은 바깥 클릭을 멈춰 세우므로
+  // (stopPropagation) 사용량 쪽 바깥 클릭 감시로는 이 경우가 닫히지 않는다.
+  toggleUsagePop(false)
   fillUsage()
   refreshTeam() // 요약 줄은 메뉴를 여는 순간이 가장 정확해야 한다
   // 지난번에 띄운 소식(오류·시간 초과)을 다음에 열 때까지 들고 있지 않는다.
@@ -2121,6 +2124,608 @@ function refreshMenuDot() {
   menuDot.hidden = !need
   menuBtn.title = need ? '설정·상태·기록 — 손볼 것이 있습니다' : '설정·상태·기록'
 }
+
+// ---------------------------------------------------------------------------
+// 상단 사용량 — 얼마나 남았나가 아니라 **무엇이 토큰을 먹었나**
+//
+// 여기에는 한때 게이지가 있었다. 실측 평균에서 임의로 뽑은 눈금(하루 1.5M / 주간 20M)을
+// 분모로 세우고 '예산의 N%'라고 적었는데, 실제 Claude 화면과 맞대 보니 **재는 것 자체가
+// 달랐다**:
+//   기간   Claude는 5시간 롤링 세션 + 목요일 리셋 주간, 우리는 달력 하루 + 최근 7일
+//   분모   Claude는 진짜 플랜 한도, 우리는 우리가 만들어 낸 눈금
+//   대상   같은 날 실측이 출력 1.34M / 캐시 읽기 298.74M(223배)인데 우리는 출력만 셌다
+// 그래서 세션 55%인 계정에 "일간 90%"가 떴다. 누가 봐도 한도 임박으로 읽힌다.
+//
+// 한도가 아닌 것을 한도처럼 보이게 만드는 것 — 이 앱이 하지 않기로 한 그것이다.
+// 그래서 분모를 통째로 버렸다. 앱은 **센 값만** 주고(main.js에도 예산이 없다), 화면은
+// 그 값을 숫자로 적는다. **퍼센트는 쓰지 않는다** — 분모 없는 퍼센트는 전부 한도로 읽힌다.
+//
+// 대신 Claude 화면에 **없는** 것을 준다: 캐시 읽기가 출력의 몇 배인가. 사용량을 줄이는
+// 데 실제로 쓸모 있는 숫자는 그것 하나다(대화가 길수록 매 턴 다시 읽는 양이 불어난다).
+//
+// 값이 없으면(ready:false이거나 null) **0으로 그리지 않는다.** 0은 "안 썼다"는 거짓말이고,
+// 그 거짓말이 제일 비싸다.
+const usageBtnEl = document.getElementById('usage-btn')
+const usageSumEl = document.getElementById('usage-sum')
+const usageDotEl = document.getElementById('usage-dot')
+const usagePopEl = document.getElementById('usage-pop')
+const usagePlanEl = document.getElementById('usage-plan')
+const usageStateEl = document.getElementById('usage-state')
+const usageLimitEl = document.getElementById('usage-limit')
+const usageNowEl = document.getElementById('usage-now')
+const usageCacheEl = document.getElementById('usage-cache')
+const usageCacheNoteEl = document.getElementById('usage-cache-note')
+const usageSparkEl = document.getElementById('usage-spark')
+const usageTrendNoteEl = document.getElementById('usage-trend-note')
+
+// 사용량은 따로 묻는다. 상태(300ms)에 얹으면 그 주기로 디스크를 뒤지게 된다.
+const USAGE_POLL_MS = 15_000
+
+// 표에 세울 줄. **합계를 내지 않는다** — 캐시 읽기까지 더한 수는 겁만 주고 실제와 어긋난다.
+const USAGE_NOW_ROWS = [
+  ['output', '출력', '팀이 새로 써 낸 양'],
+  ['cacheRead', '캐시 읽기', '앞의 대화를 매 턴 다시 읽어 들인 양 — 새로 보낸 것이 아닙니다'],
+  ['msgs', '응답', '팀이 답한 횟수'],
+]
+
+let usageStats = null // 마지막으로 받은 getUsageStats 결과 (못 받았으면 null)
+
+/** 숫자인가. null·undefined·NaN은 **0이 아니라 '모른다'**이다. */
+function num(v) {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null
+}
+
+/** 건수는 토큰이 아니다 — 만·억으로 줄이지 않고 자리수 그대로 적는다(1,114건). */
+function fmtCount(n) {
+  const v = num(n)
+  return v === null ? '—' : Math.max(0, Math.round(v)).toLocaleString('ko-KR')
+}
+
+/** 남이 준 시각 문자열을 사람이 읽는 꼴로. 못 읽으면 null — 지어내지 않는다. */
+function fmtWhen(iso) {
+  if (!iso) return null
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return null
+  return d.toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+}
+
+/** 'max' → 'Max'. 플랜 이름은 앱이 준 글자를 그대로 쓴다(사전에서 지어내지 않는다). */
+function planLabel(plan) {
+  const s = String(plan)
+  return s.charAt(0).toUpperCase() + s.slice(1)
+}
+
+/** 캐시 읽기가 출력의 몇 배인가. 출력이 0이면 **배수는 없다**(나눌 수 없다). */
+function cacheTimes(b) {
+  const read = num(b?.cacheRead)
+  const out = num(b?.output)
+  if (read === null || out === null || out <= 0) return null
+  return Math.round(read / out)
+}
+
+/**
+ * 사용량을 다시 읽는다. **없는 통로여도 화면이 죽지 않는다** — preload가 화면보다 낡을
+ * 수 있다(설치본을 덮어쓰다 만 경우). 값이 없으면 자리 자체를 비운다 — 빈 상자는
+ * 정보가 아니라 잡음이다.
+ */
+async function refreshUsageStats() {
+  const fn = window.teamView?.getUsageStats
+  if (typeof fn !== 'function') {
+    usageStats = null
+    renderUsageBtn()
+    return
+  }
+  try {
+    const res = await fn()
+    usageStats = res && typeof res === 'object' ? res : null
+  } catch (err) {
+    // 삼키지는 않되 상단 바에 오류를 띄우지도 않는다 — 사용량은 곁다리 정보라,
+    // 못 읽었으면 자리를 비우는 편이 조용하고 정직하다.
+    usageStats = null
+    console.warn('[사용량] 읽지 못했습니다:', err?.message ?? err)
+  }
+  renderUsageBtn()
+}
+
+/** 상단 요약 한 줄. **막대도 퍼센트도 없다** — 오늘 쓴 양을 숫자로만 적는다. */
+function renderUsageBtn() {
+  const u = usageStats
+  // 앱은 어떤 경우에도 사용량 객체를 준다(기록을 못 봤으면 `ready:false`). 그러니
+  // 여기가 비는 것은 **통로가 없거나 못 읽었을 때뿐**이고, 그때는 자리를 비운다.
+  usageBtnEl.hidden = !u
+  if (!u) {
+    if (!usagePopEl.hidden) toggleUsagePop(false)
+    return
+  }
+  const out = u.ready ? num(u.today?.output) : null
+  usageBtnEl.classList.toggle('pending', out === null)
+  usageSumEl.textContent = out === null ? '집계 중' : `오늘 출력 ${fmtTokens(out)}`
+  usageDotEl.hidden = !u.limitHit
+  usageBtnEl.title = usageTitle(u)
+  if (!usagePopEl.hidden) fillUsagePop()
+}
+
+/** 눌러 보기 전에 알아야 할 것을 툴팁에 담는다. **여기에도 한도라고 쓰지 않는다.** */
+function usageTitle(u) {
+  if (!u.ready) return '사용 기록을 아직 다 보지 못했습니다(집계 중) — 덜 센 숫자는 실제보다 적게 보여 비워 둡니다'
+  const parts = []
+  const out = num(u.today?.output)
+  const read = num(u.today?.cacheRead)
+  parts.push(out === null ? '오늘 얼마나 썼는지 아직 알 수 없습니다' : `오늘 출력 ${fmtTokens(out)}`)
+  if (read !== null) parts.push(`캐시 읽기 ${fmtTokens(read)}`)
+  parts.push('이 컴퓨터에 남은 기록을 세어 더한 값입니다 — 남은 한도가 아닙니다. 눌러서 자세히 보세요')
+  if (u.limitHit) parts.push('전에 한도에 걸려 멈춘 기록이 있습니다')
+  return parts.join(' · ')
+}
+
+/** 펼친 화면 전체. 여는 순간과 15초마다 다시 그린다. */
+function fillUsagePop() {
+  const u = usageStats
+  if (!u) return
+
+  usagePlanEl.hidden = !u.plan
+  usagePlanEl.textContent = u.plan ? planLabel(u.plan) : ''
+
+  usageStateEl.hidden = Boolean(u.ready)
+  usageStateEl.textContent =
+    '사용 기록을 아직 다 보지 못했습니다(집계 중). 덜 센 숫자를 보여 주면 실제보다 적게 보이므로 비워 둡니다.'
+
+  const limit = limitText(u.limitHit)
+  usageLimitEl.hidden = !limit
+  usageLimitEl.textContent = limit
+
+  fillUsageNow(u)
+  fillUsageCache(u)
+  fillUsageSpark(u)
+}
+
+/**
+ * 얼마나 썼나 — **센 값 그대로**. 기간 이름을 정확히 적는다:
+ * '오늘'은 달력 하루이고 '최근 7일'은 굴러가는 7일 합계다. Claude의 5시간 세션이나
+ * 목요일 리셋 주간과는 다른 기간이라, 같은 이름을 쓰면 같은 것으로 읽힌다.
+ */
+function fillUsageNow(u) {
+  usageNowEl.replaceChildren()
+  const cols = [
+    ['오늘', u.ready ? u.today : null, '달력으로 오늘 하루(자정~자정) 동안의 합계입니다'],
+    ['최근 7일', u.ready ? u.week : null, '오늘을 포함해 굴러가는 7일 합계입니다 — 정해진 요일에 리셋되지 않습니다'],
+  ]
+
+  const table = document.createElement('table')
+  const head = document.createElement('tr')
+  head.append(document.createElement('th'))
+  for (const [label, , why] of cols) {
+    const th = document.createElement('th')
+    th.textContent = label
+    th.title = why
+    head.append(th)
+  }
+  table.append(head)
+
+  for (const [key, label, why] of USAGE_NOW_ROWS) {
+    const tr = document.createElement('tr')
+    const name = document.createElement('td')
+    name.textContent = label
+    name.title = why
+    tr.append(name)
+    for (const [, src] of cols) {
+      const td = document.createElement('td')
+      td.className = 'num'
+      const v = num(src?.[key])
+      // 모르는 값은 0이 아니라 '—'다. 0을 적으면 "안 썼다"가 된다.
+      td.textContent = v === null ? '—' : key === 'msgs' ? `${fmtCount(v)}건` : fmtTokens(v)
+      tr.append(td)
+    }
+    table.append(tr)
+  }
+  usageNowEl.append(table)
+}
+
+/**
+ * 무엇이 토큰을 먹었나. **Claude 화면에 없는 숫자이고, 줄이는 데 유일하게 쓸모 있다.**
+ * 실측에서 오늘 캐시 읽기가 출력의 223배였다 — "왜 이렇게 많이 썼지"의 답이 거기 있다.
+ */
+function fillUsageCache(u) {
+  const b = u.ready ? u.today : null
+  const read = num(b?.cacheRead)
+  const times = cacheTimes(b)
+
+  if (read === null) {
+    usageCacheEl.hidden = true
+    usageCacheEl.textContent = ''
+    usageCacheNoteEl.textContent = '아직 세는 중입니다 — 다 세면 무엇이 토큰을 먹었는지 여기에 나옵니다.'
+    return
+  }
+  usageCacheEl.hidden = false
+  if (times !== null) {
+    usageCacheEl.textContent =
+      `캐시 읽기 ${fmtTokens(read)} — 오늘 새로 써 낸 출력(${fmtTokens(b.output)})의 ${times.toLocaleString('ko-KR')}배`
+  } else if (read > 0) {
+    usageCacheEl.textContent = `캐시 읽기 ${fmtTokens(read)} — 오늘 새로 써 낸 출력이 없어 견줄 수가 없습니다`
+  } else {
+    usageCacheEl.textContent = '오늘 오간 것이 아직 없습니다'
+  }
+  usageCacheNoteEl.textContent =
+    read > 0
+      ? '캐시 읽기는 대화가 길어질수록 매 턴 앞의 내용을 다시 읽어 들이는 양입니다. 새로 써 낸 양(출력)과는 성격이 다르지만, 실제로 오간 토큰의 대부분이 여기입니다. 줄이려면 대화를 새로 시작하거나 지시를 짧게 끊으세요.'
+      : '대화를 시작하면 무엇이 토큰을 먹었는지 여기에 나옵니다.'
+}
+
+/** 한도에 걸렸던 기록. **없는 시각은 지어내지 않는다** — 못 읽으면 그 부분만 뺀다. */
+function limitText(hit) {
+  if (!hit) return ''
+  const at = fmtWhen(hit.at)
+  const reset = fmtWhen(hit.resetAt)
+  const head = at ? `${at}에 사용 한도에 걸려 멈춘 적이 있습니다` : '사용 한도에 걸려 멈춘 적이 있습니다'
+  if (!reset) return `${head}. 언제 풀리는지는 앱이 알지 못합니다.`
+  const done = new Date(hit.resetAt).getTime() <= Date.now()
+  return `${head} — ${reset}에 ${done ? '풀렸습니다' : '풀립니다'}.`
+}
+
+/** 그 날의 출력을 **아는가**. `partial`이거나 값이 null이면 모르는 날이다.
+ *  0은 아는 날이다 — "안 썼다"는 어엿한 정보다. */
+function dayKnown(d) {
+  return Boolean(d) && d.partial !== true && num(d.output) !== null
+}
+
+/**
+ * 최근 14일 추이. **오늘이 평소보다 많은지만 알면 된다** — 눈금과 숫자를 다 그리면
+ * 좁은 팝오버에서 아무것도 안 읽힌다. 외부 차트 라이브러리는 쓰지 않는다.
+ *
+ * 이 차트의 규칙 하나: **0과 '모른다'를 같게 그리지 않는다.** 앱은 오래된 파일을 아예
+ * 열지 않으므로 창 밖의 날은 안 쓴 것이 아니라 못 본 것이고(`partial`), 그 자리를 바닥
+ * 막대로 그리면 "그 주에 놀았다"는 거짓 그림이 된다. 평균에도 넣지 않는다 — 가짜 0이
+ * 섞이면 "평소의 2.4배" 같은 틀린 문장이 나온다.
+ *
+ * 기둥의 높이는 **그 기간에서 가장 많은 날**에 맞춘다. 견줄 분모(예산·한도)는 없다 —
+ * 있는 척하려고 그은 선이 이 화면의 이전 판을 망쳤다.
+ */
+function fillUsageSpark(u) {
+  usageSparkEl.replaceChildren()
+  const days = u.ready && Array.isArray(u.days) ? u.days : []
+  const known = days.filter(dayKnown)
+  if (!days.length || !known.length) {
+    usageSparkEl.removeAttribute('aria-label')
+    usageTrendNoteEl.textContent = u.ready
+      ? days.length
+        ? '최근 기록을 아직 다 보지 못해 추이를 그릴 수 없습니다.'
+        : '아직 쌓인 기록이 없습니다.'
+      : '집계 중입니다 — 다 세면 여기에 추이가 나옵니다.'
+    return
+  }
+
+  const vals = known.map((d) => num(d.output))
+  const max = Math.max(...vals, 1)
+
+  // 못 본 구간과 본 구간의 경계. **여기부터 기록을 다 보았다**는 표시가 없으면
+  // 빈칸이 그저 "안 썼다"로 읽힌다.
+  const firstKnown = days.findIndex(dayKnown)
+  const unknownCount = days.length - known.length
+  days.forEach((d, i) => {
+    if (i === firstKnown && firstKnown > 0) {
+      const edge = document.createElement('span')
+      edge.className = 'usage-edge'
+      edge.title = '여기부터는 기록을 다 보았습니다. 왼쪽은 앱이 열어 보지 않은 범위입니다.'
+      edge.setAttribute('aria-hidden', 'true')
+      usageSparkEl.append(edge)
+    }
+    const col = document.createElement('span')
+    col.className = 'usage-day'
+    if (!dayKnown(d)) {
+      // 빈칸(빗금)이다. 0 높이 막대로 그리면 "안 썼다"가 된다.
+      col.classList.add('unknown')
+      col.title = `${d?.date ?? ''} 기록을 다 보지 못한 날입니다 — 얼마나 썼는지 알 수 없습니다`
+      usageSparkEl.append(col)
+      return
+    }
+    const v = num(d.output)
+    if (i === days.length - 1) col.classList.add('today')
+    col.style.height = `${Math.max(2, (v / max) * 100)}%`
+    const msgs = num(d.msgs)
+    col.title = `${d.date ?? ''} 출력 ${fmtTokens(v)}${msgs === null ? '' : ` · ${fmtCount(msgs)}건`}`
+    usageSparkEl.append(col)
+  })
+
+  const lastDay = days[days.length - 1]
+  const today = dayKnown(lastDay) ? num(lastDay.output) : null
+  const past = vals.slice(0, today === null ? vals.length : -1)
+  const unknownWord = unknownCount ? `, ${unknownCount}일은 기록을 다 보지 못해 비움` : ''
+  usageSparkEl.setAttribute(
+    'aria-label',
+    `최근 ${days.length}일 출력 토큰 — 가장 많은 날 ${fmtTokens(Math.max(...vals))}` +
+      (today === null ? '' : `, 오늘 ${fmtTokens(today)}`) +
+      unknownWord,
+  )
+
+  const tail = unknownCount
+    ? ` 앞의 ${unknownCount}일은 앱이 열어 보지 않은 범위라 비워 뒀습니다 — 안 쓴 것이 아니라 모르는 것입니다.`
+    : ''
+  if (today === null) {
+    usageTrendNoteEl.textContent = `오늘 얼마나 썼는지는 아직 알 수 없습니다.${tail}`
+    return
+  }
+  const avg = past.length ? past.reduce((a, b) => a + b, 0) / past.length : null
+  if (avg === null || avg <= 0) {
+    usageTrendNoteEl.textContent = `오늘 ${fmtTokens(today)} — 견줄 지난 기록이 아직 없습니다.${tail}`
+    return
+  }
+  const ratio = today / avg
+  const how = ratio >= 1.15 ? `평소의 ${ratio.toFixed(1)}배입니다` : ratio <= 0.85 ? '평소보다 적습니다' : '평소와 비슷합니다'
+  // 평균은 **아는 날만** 센다. 그래서 "지난 13일"이 아니라 실제로 본 날 수를 적는다.
+  usageTrendNoteEl.textContent =
+    `오늘 ${fmtTokens(today)} · 기록을 본 지난 ${past.length}일 평균 ${fmtTokens(Math.round(avg))} — ${how}.${tail}`
+}
+
+function toggleUsagePop(show) {
+  const next = show ?? usagePopEl.hidden
+  // 볼 것이 없으면 열지 않는다 — 빈 상자가 뜨면 고장으로 보인다.
+  usagePopEl.hidden = !next || !usageStats
+  usageBtnEl.setAttribute('aria-expanded', String(!usagePopEl.hidden))
+  if (usagePopEl.hidden) return
+  // 겹치면 뒤에 있는 것을 읽을 수 없다. 둘 다 자리를 내준다.
+  toggleMenu(false)
+  toggleTeamPop(false)
+  fillUsagePop()
+  placeUsagePop()
+  refreshUsageStats() // 여는 순간이 가장 정확해야 한다
+  refreshSessionCost() // 지금 대화의 무게도 같은 순간의 것이어야 한다
+}
+
+/** 단추 오른쪽 끝에 맞춰 아래로. 화면 밖으로 나가지 않게 민다(☰와 같은 규칙). */
+function placeUsagePop() {
+  const r = usageBtnEl.getBoundingClientRect()
+  usagePopEl.style.top = `${Math.round(r.bottom + 6)}px`
+  const w = usagePopEl.offsetWidth || 340
+  usagePopEl.style.left = `${Math.round(Math.max(8, Math.min(r.right - w, window.innerWidth - w - 8)))}px`
+}
+
+usageBtnEl.addEventListener('click', (e) => {
+  e.stopPropagation() // 바깥 클릭으로 곧바로 닫히지 않게
+  toggleUsagePop()
+})
+
+document.getElementById('usage-close').addEventListener('click', () => {
+  toggleUsagePop(false)
+  usageBtnEl.focus()
+})
+
+document.addEventListener('click', (e) => {
+  if (!usagePopEl.hidden && !usagePopEl.contains(e.target)) toggleUsagePop(false)
+})
+
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || usagePopEl.hidden) return
+  toggleUsagePop(false)
+  usageBtnEl.focus()
+})
+
+refreshUsageStats()
+setInterval(() => {
+  refreshUsageStats()
+  // 대화 무게는 펼친 화면 안에서만 보인다. 닫혀 있는데 15초마다 물으면
+  // 아무도 안 보는 숫자 때문에 앱이 기록을 계속 뒤지게 된다.
+  if (!usagePopEl.hidden) refreshSessionCost()
+}, USAGE_POLL_MS)
+
+// ---------------------------------------------------------------------------
+// 지금 대화가 얼마나 무거운가 · 새 대화로 갈아타기
+//
+// 프로젝트마다 대화(세션)가 **영구 고정**이었다. 갈아탈 길이 코드에 아예 없었고, 대화는
+// 길어질수록 매 턴 앞 내용을 전부 다시 읽는다 — 즉 **같은 질문이 점점 비싸진다.**
+// 실측(이 PC의 실제 세션):
+//
+//     insta-filter  198턴 · 첫 턴 0.02M → 마지막 턴 0.29M (14배)
+//     shop           71턴 · 0.02M → 0.23M (11배)
+//     같은 날 계정 전체: 출력 1.34M vs 캐시 읽기 298.74M
+//
+// 그래서 화면이 두 가지를 한다. **지금 대화가 얼마나 무거운지 보여 주고**, 무거우면
+// **새로 시작할 길을 준다.** 위의 숫자들(오늘·최근 7일)은 이미 쓴 값이라 손쓸 수 없지만
+// 이것 하나는 사용자가 지금 바꿀 수 있는 것이다.
+//
+// 규칙은 이 화면의 나머지와 같다:
+//   · **퍼센트를 쓰지 않는다.** 분모 없는 퍼센트는 전부 한도로 읽힌다 — 배수(14배)로 적는다.
+//   · **없는 숫자를 지어내지 않는다.** 기록이 없으면(null) 0으로 그리지 않고 없다고 적고,
+//     첫 턴 값이 없으면(firstRead null) 배수 자체를 적지 않는다(0으로 나눌 수 없다).
+//   · **묻지 않고 갈아타지 않는다.** 맥락이 끊기는 일이라 무엇이 끊기고 무엇이 남는지
+//     먼저 보여 준다. 특히 옛 대화 기록 파일은 앱이 그대로 보관한다 — 그 사실을 모르면
+//     아무도 이 버튼을 누르지 않는다.
+//
+// 앱이 주는 것(계약): { turns, firstRead, lastRead, growth, heavy, sizeBytes } | null
+//   firstRead·lastRead·growth는 **null일 수 있다**(첫 턴이 0이면 잴 수 없다).
+//   기록이 하나도 없으면 값 자체가 null이다.
+const sesSecEl = document.getElementById('usage-ses-sec')
+const sesLineEl = document.getElementById('usage-ses')
+const sesNoteEl = document.getElementById('usage-ses-note')
+const sesNewEl = document.getElementById('usage-ses-new')
+const sesConfirmEl = document.getElementById('ses-confirm')
+const sesWhyEl = document.getElementById('ses-why')
+const sesHandoffEl = document.getElementById('ses-handoff')
+const sesErrEl = document.getElementById('ses-err')
+const sesGoEl = document.getElementById('ses-go')
+const sesCancelEl = document.getElementById('ses-cancel')
+
+let sessionCost = null // 마지막으로 받은 getSessionCost 결과 (기록이 없으면 null)
+let sessionKnown = false // 한 번이라도 물어서 답을 받았는가 (통로가 없으면 영영 false)
+let sessionSwitching = false // 갈아타는 중 — 두 번 누르면 세션이 두 번 갈린다
+
+/** 파일 크기. "기록은 지워지지 않는다"는 말에 무게를 싣는 숫자라 사람이 읽는 꼴로 적는다. */
+function fmtBytes(n) {
+  const v = num(n)
+  if (v === null || v < 0) return null
+  if (v < 1024) return `${Math.round(v)}B`
+  if (v < 1024 * 1024) return `${Math.round(v / 1024).toLocaleString('ko-KR')}KB`
+  return `${(v / (1024 * 1024)).toFixed(1)}MB`
+}
+
+/**
+ * 대화 무게를 다시 읽는다. **없는 통로여도 화면이 죽지 않는다**(사용량과 같은 규칙) —
+ * 못 읽었으면 자리를 통째로 비운다. 빈 상자는 정보가 아니라 잡음이다.
+ */
+async function refreshSessionCost() {
+  const fn = window.teamView?.getSessionCost
+  if (typeof fn !== 'function') {
+    sessionKnown = false
+    sessionCost = null
+    renderSession()
+    return
+  }
+  try {
+    const res = await fn()
+    // **null과 객체는 다른 뜻이다.** null은 "기록이 없다"이고, 여기서 0을 지어내면
+    // "안 썼다"가 된다. 객체가 아닌 것이 오면 모르는 것으로 본다.
+    sessionCost = res && typeof res === 'object' ? res : null
+    sessionKnown = true
+  } catch (err) {
+    sessionKnown = false
+    sessionCost = null
+    console.warn('[대화 무게] 읽지 못했습니다:', err?.message ?? err)
+  }
+  renderSession()
+}
+
+function renderSession() {
+  sesSecEl.hidden = !sessionKnown
+  if (!sessionKnown) return
+  const c = sessionCost
+  // 무거우면 **눈에 띄어야 한다.** 흐린 한 줄로 두면 정작 갈아타야 할 사람이 못 본다.
+  sesSecEl.classList.toggle('heavy', Boolean(c?.heavy))
+  sesNewEl.classList.toggle('ses-primary', Boolean(c?.heavy))
+  sesLineEl.textContent = sessionLine(c)
+  const note = sessionNote(c)
+  sesNoteEl.textContent = note
+  sesNoteEl.hidden = !note
+  // 지금 못 하는 것은 감추지 않고 죽인다 — 이유는 위의 한 줄(note)에 이미 적혀 있다.
+  const block = newSessionBlocker()
+  sesNewEl.disabled = Boolean(block)
+  sesNewEl.title = block || '이 프로젝트의 대화를 새로 시작합니다 — 누르면 무엇이 끊기고 무엇이 남는지 먼저 보여 드립니다'
+}
+
+/** 한 줄 요약. **모르는 값은 적지 않는다** — 빠진 자리에 0을 넣으면 거짓말이 된다. */
+function sessionLine(c) {
+  if (!c) return '아직 기록이 없습니다 — 이 프로젝트에서 오간 대화를 아직 보지 못했습니다.'
+  const parts = []
+  const turns = num(c.turns)
+  const last = num(c.lastRead)
+  if (turns !== null) parts.push(`응답 ${fmtCount(turns)}개`)
+  if (last !== null) parts.push(`질문 하나에 ${fmtTokens(last)}씩 다시 읽습니다${growthText(c)}`)
+  if (!parts.length) return '이 대화가 얼마나 무거운지는 아직 알 수 없습니다.'
+  return `이 대화: ${parts.join(' · ')}`
+}
+
+/**
+ * 처음의 몇 배인가. **첫 턴 값이 없으면 배수도 없다** — 0으로는 나눌 수 없고,
+ * 나눈 척하면 화면에 Infinity나 NaN이 그대로 뜬다. 퍼센트가 아니라 배수로 적는다.
+ */
+function growthText(c) {
+  const g = num(c.growth)
+  const first = num(c.firstRead)
+  if (g === null || g <= 0 || first === null || first <= 0) return ''
+  return ` (처음의 ${g >= 10 ? Math.round(g).toLocaleString('ko-KR') : g.toFixed(1)}배)`
+}
+
+/** 그 아래 한 줄. 지금 못 하는 이유가 있으면 **누르기 전에** 그것부터 적는다. */
+function sessionNote(c) {
+  const block = newSessionBlocker()
+  if (block) return block
+  if (c?.heavy) {
+    return '이 대화는 이미 무겁습니다 — 새 대화를 시작하면 다시 읽는 양이 처음 값으로 줄어듭니다. 옛 대화 기록은 지워지지 않습니다.'
+  }
+  return '대화가 길어지면 매 턴 앞 내용을 다시 읽어 같은 질문이 점점 비싸집니다. 그때 새로 시작하면 그 양이 처음으로 돌아갑니다.'
+}
+
+/**
+ * 지금 새로 시작할 수 없는 이유. **돌고 있는 작업은 여기서 막지 않는다** — 막을지는
+ * 앱이 정하고(거절하면 이유를 준다), 화면이 미리 짐작해서 막으면 앱과 다른 말을 하게 된다.
+ */
+function newSessionBlocker() {
+  if (!activeDir) return '붙인 프로젝트가 없어 시작할 대화가 없습니다.'
+  if (!sessionCost) return '아직 새로 시작할 대화가 없습니다 — 첫 지시를 보내면 여기에 무게가 나옵니다.'
+  if (sessionSwitching) return '새 대화를 시작하는 중입니다…'
+  return ''
+}
+
+/** 확인 창을 연다. **여는 것으로는 아무 일도 일어나지 않는다** — 고르는 것은 사람이다. */
+function openSesConfirm() {
+  if (sesNewEl.disabled) return
+  // 뒤에 겹쳐 두면 뒤엣것을 읽을 수 없다. 사용량 화면이 자리를 내준다(☰와 같은 규칙).
+  toggleUsagePop(false)
+  sesWhyEl.textContent = sesWhyText()
+  sesErrEl.textContent = ''
+  sesErrEl.hidden = true
+  sesGoEl.disabled = false
+  sesCancelEl.disabled = false
+  sesGoEl.textContent = '새 대화 시작'
+  sesConfirmEl.hidden = false
+  sesHandoffEl.focus()
+}
+
+function closeSesConfirm() {
+  if (sessionSwitching) return // 갈아타는 중에 닫으면 어디까지 됐는지 알 수 없다
+  sesConfirmEl.hidden = true
+  // 왔던 자리로 돌려놓는다 — 이 창은 사용량 화면 안에서 열렸다. 그냥 닫아 버리면
+  // 무엇을 보다가 눌렀는지 사라져서, 갈아탄 뒤의 무게(또는 거절)도 확인할 수 없다.
+  usageBtnEl.focus()
+  toggleUsagePop(true)
+}
+
+/** 무엇을 갈아타는지 · 지금이 얼마나 무거운지 · **기록은 그대로 남는지.** */
+function sesWhyText() {
+  const who = activeDir ? baseName(activeDir) : '이 프로젝트'
+  const now = sessionCost ? ` 지금 ${sessionLine(sessionCost).replace(/^이 대화: /, '')}.` : ''
+  const size = fmtBytes(sessionCost?.sizeBytes)
+  const keep = size ? ` 지금까지 쌓인 기록 ${size}는 지워지지 않고 그대로 남습니다.` : ''
+  return `${who}의 대화를 새로 시작합니다.${now}${keep}`
+}
+
+/**
+ * 실제로 갈아탄다. 여기까지 오는 길은 **확인 창의 [새 대화 시작] 하나뿐이다.**
+ *
+ * 거절당하면(`{ok:false, reason}`) 앱이 준 이유를 **그대로** 적고 창을 닫지 않는다 —
+ * 적어 둔 메모까지 사라지면 다시 쓰라는 말이 된다.
+ */
+async function startNewSession() {
+  if (sessionSwitching) return
+  const handoff = sesHandoffEl.value.trim()
+  sessionSwitching = true
+  sesGoEl.disabled = true
+  sesCancelEl.disabled = true
+  sesGoEl.textContent = '시작하는 중…'
+  sesErrEl.hidden = true
+
+  const res = await callBridge('startNewSession', { handoff })
+
+  sessionSwitching = false
+  sesGoEl.disabled = false
+  sesCancelEl.disabled = false
+  sesGoEl.textContent = '새 대화 시작'
+
+  if (!res?.ok) {
+    // 문구는 앱이 준 것을 그대로. 우리가 보태는 것은 "그래서 지금 어떻게 되는지"뿐이다.
+    const why = res?.reason || res?.error || '새 대화를 시작하지 못했습니다'
+    sesErrEl.textContent = `${why} — 지금 대화는 그대로입니다. 나중에 다시 눌러 보세요.`
+    sesErrEl.hidden = false
+    return
+  }
+
+  closeSesConfirm()
+  // 기록에는 **메모 내용을 적지 않는다** — 사람이 쓴 글이고 채팅 기록은 파일로 남는다.
+  addMsg('sys', '', handoff ? '— 새 대화를 시작했습니다 (인수인계 메모를 넘겼습니다) —' : '— 새 대화를 시작했습니다 —')
+  sesHandoffEl.value = ''
+  refreshSessionCost()
+}
+
+sesNewEl.addEventListener('click', openSesConfirm)
+sesCancelEl.addEventListener('click', closeSesConfirm)
+sesGoEl.addEventListener('click', startNewSession)
+
+// 이 창은 화면 맨 위에 뜬다. 안에서 누른 것이 **아래 화면의 '바깥 클릭' 감시에 닿으면**
+// 안 된다 — 확인 창을 닫으며 되돌려 놓은 사용량 화면이 그 클릭에 곧바로 다시 닫힌다.
+sesConfirmEl.addEventListener('click', (e) => e.stopPropagation())
+
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || sesConfirmEl.hidden) return
+  closeSesConfirm()
+})
 
 // ---------------------------------------------------------------------------
 // 팀원 관리 (고용·해고)

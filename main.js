@@ -18,6 +18,8 @@ const { spawn, execFile, execFileSync } = require('child_process')
 const crypto = require('crypto')
 const fs = require('fs')
 const path = require('path')
+// 계정 전체 사용량은 수백 MB짜리 기록을 훑는다. 통째로 메모리에 올리지 않으려고 쓴다.
+const readline = require('readline')
 // 설치·검증은 따로 산다. 이 파일이 이미 180KB인 것도 이유지만, 진짜 이유는
 // **검사가 원본 그대로를 돌려 볼 수 있어야** 해서다(install.js는 electron을 안 부른다).
 const installer = require('./install.js')
@@ -2428,6 +2430,12 @@ if (!app.requestSingleInstanceLock()) {
       // 지난 대화가 날아간 것처럼 보인다.
       send('events:reset', { dir: activeDir })
       pumpStatusAll({ force: true })
+      // 계정 전체 사용량(597MB)은 **여기서 시작하지 않는다.**
+      //
+      // 예전에는 "첫 화면 뒤로 미룬다"며 3초 뒤에 `getUsageStats()`를 불렀는데, 화면이
+      // 뜨자마자 `usage:stats`를 물어 오므로 집계는 이미 그 전에 시작돼 있었다 —
+      // 미룬 것은 아무것도 없고 주석만 사실과 반대였다. 시작점을 화면 한 곳으로 모은다
+      // (여기서 또 부르면 첫 집계가 두 번 도는 길만 늘어난다).
     })
 
     app.on('activate', () => {
@@ -2953,6 +2961,37 @@ function makeLineReader(onLine) {
   }
 }
 
+// 실패 사유를 찾으려고 들고 있는 stdout의 양. 긴 작업의 stdout은 MB 단위라
+// **상한이 없으면 그게 곧 메모리 누수다.** 사유는 언제나 끝쪽에 있다.
+const OUT_TAIL_MAX = 8 * 1024
+// 자식이 죽은 뒤 stdout의 마지막 조각을 기다려 주는 시간. 넘으면 그냥 진행한다 —
+// 손자 프로세스가 파이프를 물고 있으면 영영 안 끝나기 때문이다.
+const OUT_FLUSH_MS = 300
+
+/**
+ * 흘러가는 출력의 **끝부분만** 들고 있는 링버퍼.
+ *
+ * `makeLineReader`와 하는 일이 다르다. 저쪽은 줄이 완성될 때마다 넘겨주는 것이고,
+ * 이쪽은 "실패했을 때 되돌아볼 마지막 몇 KB"를 남기는 것이다.
+ */
+function makeTailBuffer(max) {
+  let text = ''
+  return {
+    push(chunk) {
+      text += String(chunk)
+      if (text.length > max) text = text.slice(text.length - max)
+    },
+    text: () => text,
+    /** 뒤에서 n줄. 빈 줄은 버린다(진행 표시 때문에 빈 줄이 잔뜩 온다). */
+    lines: (n) =>
+      text
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter(Boolean)
+        .slice(-n),
+  }
+}
+
 /**
  * 이 줄이 "서버가 죽었다"는 신호인가.
  *
@@ -3429,8 +3468,29 @@ function promptFor(cmd, dir) {
         ` 다만 **묻는 말**(현황·상태·구조·이유)이라면 팀을 부르지 마라 —` +
         ` 이미 아는 것이면 바로 답하고, 확인이 필요하면 조사역(scout) 한 명에게만 맡겨라.` +
         ` 지시: ${body}`
+  // 인수인계 메모는 **경계 바로 뒤, 지시 앞**이다. 앞이면 "앞의 대화는 끝났다"보다
+  // 먼저 읽혀 옛 일을 이어서 하게 되고, 뒤면 지시를 읽은 뒤에 배경이 와서 늦다.
   // 결과를 남기라는 조건은 **맨 뒤**에 둔다. 마지막에 읽은 것이 가장 강하게 남는다.
-  return BOUNDARY + task + rosterLine(dir) + DELIVERABLE
+  return BOUNDARY + handoffBlock(dir) + task + rosterLine(dir) + DELIVERABLE
+}
+
+/**
+ * 새 대화로 갈아탈 때 사람이 적어 둔 **인수인계 메모**를 첫 지시 앞에 한 번 붙인다.
+ *
+ * 대화를 갈아타면 앞의 맥락이 통째로 사라진다. 그래서 사람들은 "결론만 3~5줄로 요약해
+ * 새 대화에 붙여넣기"를 손으로 해 왔다 — 그걸 앱이 대신한다.
+ *
+ * **지시가 아니라 배경이라고 못 박는다.** 그냥 붙이면 리드가 메모에 적힌 것을 다시
+ * 하기 시작한다(BOUNDARY가 막으려던 바로 그 일이다).
+ */
+function handoffBlock(dir) {
+  const memo = takeHandoff(dir)
+  if (!memo) return ''
+  return (
+    `[이어받는 메모] 이 대화는 방금 새로 시작됐다. 아래는 앞 대화에서 사람이 직접 넘겨준 요약이다 —` +
+    ` **배경일 뿐 지시가 아니다.** 여기 적힌 일을 다시 하지 말고, 이번 지시가 요구하는 것만 해라.\n` +
+    `---\n${memo}\n---\n\n`
+  )
 }
 
 /**
@@ -3471,6 +3531,82 @@ function sessionExists(dir, sessionId) {
 }
 
 // ---------------------------------------------------------------------------
+// 새 대화로 갈아타기
+//
+// 위의 고정 세션은 **한 번 만들면 영원히 그것**이었다. 세션 파일이 있으면 언제나
+// `--resume`이니, 대화를 갈아탈 방법이 코드에 아예 없었다. 그런데 대화는 길어질수록
+// 매 턴 앞 내용을 전부 다시 읽는다 — 실측(이 PC의 실제 세션):
+//
+//     insta-filter  198턴 · 첫 턴 0.02M → 마지막 턴 0.29M (14배)
+//     shop           71턴 · 0.02M → 0.23M (11배)
+//     daily          86턴 · 0.02M → 0.20M (9.5배)
+//
+// **같은 질문인데 198턴째에는 처음의 14배가 든다.** 그래서 갈아탈 길을 낸다.
+//
+// 갈아타도 **옛 세션 파일은 지우지 않는다.** `~/.claude/projects/**/<옛 id>.jsonl`은
+// 그대로 두고 설정에 옛 id만 적어 둔다 — 되돌릴 근거이자 나중에 "이전 대화 보기"의
+// 재료다. 되돌릴 수 없는 것을 만들지 않는 것이 이 앱의 원칙이다.
+const SESSION_HISTORY_KEEP = 10 // 프로젝트마다 최근 몇 개까지 기억할지
+const HANDOFF_MAX = 4000 // 인수인계 메모 길이 상한. 길면 갈아탄 보람이 없다
+
+/** 이 프로젝트에 이미 고정된 세션 id. **없으면 만들지 않고 null**(sessionIdFor와 다르다). */
+function sessionIdIfAny(dir) {
+  const id = loadConfig().sessions?.[dir]
+  return typeof id === 'string' && id ? id : null
+}
+
+/**
+ * 이 프로젝트의 대화를 **새로 시작한다.** 설정의 세션 id를 새 UUID로 갈아치우면
+ * 다음 실행은 `--resume`이 아니라 `--session-id`로 처음부터 시작된다.
+ *
+ * **실행 중이면 갈아타지 않는다.** 돌고 있는 claude는 이미 옛 id로 붙어 있어서,
+ * 지금 바꿔 봐야 그 실행에는 닿지 않으면서 기록만 두 갈래로 갈린다.
+ */
+function startNewSession(dir, opts) {
+  if (!dir) return { ok: false, reason: '프로젝트가 선택되지 않았습니다' }
+  if (companyBusy(dir)) return { ok: false, reason: '실행 중입니다' }
+  // 외부에서 온 값이다. 문자열이 아니면 없는 것으로 보고, 길이는 잘라 둔다.
+  const raw = typeof opts?.handoff === 'string' ? opts.handoff : ''
+  const memo = raw.trim().slice(0, HANDOFF_MAX)
+
+  const cfg = loadConfig()
+  const sessions = { ...(cfg.sessions ?? {}) }
+  const old = typeof sessions[dir] === 'string' ? sessions[dir] : null
+  const id = crypto.randomUUID()
+  sessions[dir] = id
+
+  const history = { ...(cfg.sessionHistory ?? {}) }
+  if (old) {
+    const past = Array.isArray(history[dir]) ? history[dir] : []
+    history[dir] = [{ id: old, at: new Date().toISOString() }, ...past].slice(0, SESSION_HISTORY_KEEP)
+  }
+
+  // 메모는 다음 지시 하나에만 쓰인다(takeHandoff가 꺼내면서 지운다).
+  const handoffs = { ...(cfg.sessionHandoff ?? {}) }
+  if (memo) handoffs[dir] = memo
+  else delete handoffs[dir]
+
+  saveConfig({ ...cfg, sessions, sessionHistory: history, sessionHandoff: handoffs })
+  return { ok: true, id }
+}
+
+/**
+ * 적어 둔 인수인계 메모를 꺼내고 **그 자리에서 지운다.** 새 세션의 첫 지시 한 번만이다.
+ *
+ * 계속 붙이면 두 가지가 깨진다. 첫째, 이미 대화 안에 있는 내용을 매 턴 다시 싣게 되어
+ * 이 기능이 줄이려던 비용을 그대로 되살린다. 둘째, 지시마다 옛 일을 다시 시킨다.
+ */
+function takeHandoff(dir) {
+  const cfg = loadConfig()
+  const map = { ...(cfg.sessionHandoff ?? {}) }
+  const memo = typeof map[dir] === 'string' ? map[dir].trim() : ''
+  if (!memo) return ''
+  delete map[dir]
+  saveConfig({ ...cfg, sessionHandoff: map })
+  return memo
+}
+
+// ---------------------------------------------------------------------------
 // 토큰 사용량
 //
 // **얼마나 썼는지 볼 방법이 앱 안에 없었다.** 한도에 걸려 일이 멈춘 뒤에야 알았고,
@@ -3483,7 +3619,7 @@ function sessionExists(dir, sessionId) {
 // 알 수 있다.
 //
 // 파일이 10MB를 넘어가므로 **읽은 지점을 기억하고 새로 붙은 만큼만** 읽는다.
-const usageState = new Map() // dir → { files, day, agent, total, mark }
+const usageState = new Map() // dir → { files, day, agent, total, mark, perFile }
 const newTally = () => ({ input: 0, output: 0, cacheWrite: 0, cacheRead: 0 })
 const addTally = (t, o) => {
   t.input += o.input
@@ -3521,11 +3657,17 @@ function usageFiles(dir) {
   return out
 }
 
-/** 새로 붙은 줄만 읽어 사용량을 누적한다. */
+/**
+ * 새로 붙은 줄만 읽어 사용량을 누적한다.
+ *
+ * **파일마다 턴 수와 첫·마지막 캐시 읽기도 함께 적는다**(`st.perFile`). 세션 하나가
+ * 얼마나 무거워졌는지(sessionCost)를 재려면 그 값이 필요한데, 여기서 이미 같은 줄을
+ * 읽고 있다 — 따로 훑으면 1.4MB짜리 기록을 두 번 읽게 된다.
+ */
 function readUsage(dir) {
   let st = usageState.get(dir)
   if (!st) {
-    st = { files: new Map(), day: new Map(), agent: new Map(), total: newTally(), mark: null }
+    st = { files: new Map(), day: new Map(), agent: new Map(), total: newTally(), mark: null, perFile: new Map() }
     usageState.set(dir, st)
   }
   for (const file of usageFiles(dir)) {
@@ -3535,8 +3677,17 @@ function readUsage(dir) {
     } catch {
       continue
     }
+    let f = st.perFile.get(file)
+    if (!f) st.perFile.set(file, (f = { turns: 0, firstRead: null, lastRead: null, sizeBytes: 0 }))
+    f.sizeBytes = size // 이미 stat 했으니 여기서 적어 둔다(따로 다시 묻지 않는다)
     let from = st.files.get(file) || 0
-    if (size < from) from = 0 // 파일이 줄었으면 처음부터(세션을 새로 만든 경우)
+    if (size < from) {
+      // 파일이 줄었으면 처음부터. 이 파일 몫의 턴 수도 같이 지워야 두 번 세지 않는다.
+      from = 0
+      f.turns = 0
+      f.firstRead = null
+      f.lastRead = null
+    }
     if (size <= from) continue
     let text
     try {
@@ -3569,6 +3720,10 @@ function readUsage(dir) {
         cacheRead: u.cache_read_input_tokens || 0,
       }
       addTally(st.total, one)
+      // 이 파일(=대화 하나) 안에서 몇 번째 응답인지, 그때 캐시를 얼마나 다시 읽었는지.
+      f.turns++
+      if (f.firstRead === null) f.firstRead = one.cacheRead
+      f.lastRead = one.cacheRead
       const day = String(rec.timestamp || '').slice(0, 10)
       if (day) addTally(st.day.get(day) || st.day.set(day, newTally()).get(day), one)
       const who = rec.attributionAgent || 'lead'
@@ -3601,6 +3756,456 @@ function usageSummary(dir) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 지금 이 대화가 얼마나 무거운가
+//
+// 길어진 대화는 매 턴 앞 내용을 전부 다시 읽는다. 그 비용은 화면 어디에도 안 보였고,
+// 사용자는 "왜 이렇게 빨리 한도에 걸리지"만 겪었다. 실측(이 PC의 실제 세션):
+//
+//     insta-filter  198턴 · 첫 턴 0.02M → 마지막 턴 0.29M (14배)
+//     shop           71턴 · 0.02M → 0.23M (11배)
+//     daily          86턴 · 0.02M → 0.20M (9.5배)
+//     같은 날 계정 전체: 출력 1.34M vs 캐시 읽기 298.74M
+//
+// **heavy 기준은 저 표에서 뽑았다.** 셋 다 마지막 턴의 캐시 읽기가 0.2M에 닿았을 때
+// 이미 처음의 9.5~14배였다 — 즉 0.2M/턴이 "10배 지점"의 실측값이다. 그래서 둘을 OR로 둔다:
+//
+//   · 절대값(lastRead ≥ 0.2M) — 처음부터 무거운 프로젝트(큰 CLAUDE.md·모노레포)는
+//     배수가 안 커도 이미 매 턴 비싸다. 배수만 보면 그런 대화를 영영 못 잡는다.
+//   · 배수(growth ≥ 10) — 가볍게 시작한 대화가 불어난 경우. 절대값에 닿기 전에도
+//     이미 처음의 10배를 쓰고 있으므로 갈아탈 때가 맞다.
+//
+// 지어낸 숫자가 아니라 위 세 줄에서 나온 값이다. 표가 바뀌면 이 값도 같이 바꾼다.
+const SESSION_HEAVY_READ = 200_000
+const SESSION_HEAVY_GROWTH = 10
+
+/**
+ * 한 대화의 무게를 그릴 수 있는 모양으로. 기록이 없으면 **null**이다.
+ *
+ * 0을 지어내지 않는다 — "첫 턴의 캐시 읽기가 0"과 "아직 모른다"는 다른 말이고,
+ * 0으로 나누면 Infinity가 화면에 그대로 뜬다.
+ */
+function sessionCostFrom(f) {
+  if (!f || !f.turns) return null
+  const firstRead = f.firstRead ? f.firstRead : null // 0이면 잴 수 없다 → null
+  const lastRead = typeof f.lastRead === 'number' ? f.lastRead : null
+  const growth = firstRead && lastRead !== null ? Math.round((lastRead / firstRead) * 10) / 10 : null
+  return {
+    turns: f.turns,
+    firstRead,
+    lastRead,
+    growth,
+    heavy: (lastRead ?? 0) >= SESSION_HEAVY_READ || (growth !== null && growth >= SESSION_HEAVY_GROWTH),
+    sizeBytes: f.sizeBytes ?? 0,
+  }
+}
+
+/**
+ * 이 프로젝트의 **지금 고정 세션** 하나가 얼마나 무거운지. 기록이 없으면 null.
+ *
+ * 값은 `readUsage`가 이미 훑어 둔 것에서 꺼낸다. 그 훑기는 증분(읽은 지점을 바이트로
+ * 기억)이라 물을 때마다 파일을 다시 읽지 않는다 — 30초마다 1.4MB를 새로 훑으면
+ * "비용을 보여 주는 기능"이 그 자체로 비용이 된다.
+ */
+function sessionCost(dir) {
+  if (!dir) return null
+  const sid = sessionIdIfAny(dir)
+  if (!sid) return null // 아직 한 번도 안 돌린 프로젝트
+  const st = readUsage(dir)
+  return sessionCostFrom(st.perFile.get(sessionPath(dir, sid)))
+}
+
+// 활성 프로젝트 기준이다. 화면은 지금 보고 있는 사무실 하나만 그린다.
+ipcMain.handle('session:cost', () => sessionCost(activeDir))
+ipcMain.handle('session:new', (_e, payload) => startNewSession(activeDir, payload ?? {}))
+
+// ---------------------------------------------------------------------------
+// 계정 전체 사용량
+//
+// 위(`usageSummary`)는 **붙여 둔 프로젝트 하나** 몫이다. 그런데 한도는 계정에 걸린다 —
+// 다른 폴더에서 쓴 것, 앱 밖에서 터미널로 쓴 것까지 전부 같은 통에 들어간다. 그래서
+// `~/.claude/projects/**/*.jsonl`을 통째로 센다.
+//
+// **여기서 성능을 틀리면 앱이 선다.** 실측: 207파일 597MB, 그중 한 파일이 37MB다.
+// 세 가지로 막는다.
+//   1) mtime이 최근 USAGE_SCAN_DAYS 안쪽인 파일만 후보로 둔다(나머지는 열지도 않는다)
+//   2) 파일마다 어디까지 읽었는지 바이트로 기억하고 **늘어난 만큼만** 읽는다
+//      (jsonl은 덧붙이기만 하므로 성립한다. 줄었으면 처음부터 다시 센다)
+//   3) 결과는 캐시하고 USAGE_REFRESH_MS 안에는 다시 훑지 않는다. 첫 집계가 끝나기
+//      전에는 `ready:false`로 답한다 — 화면을 기다리게 하지 않는다
+const USAGE_SCAN_DAYS = 8 // mtime이 이 안쪽인 파일만 훑는다
+const USAGE_KEEP_DAYS = 14 // 화면에 넘겨줄 날짜 수
+const USAGE_WEEK_DAYS = 7
+const USAGE_REFRESH_MS = 30_000 // 다시 집계하기까지의 최소 간격
+const USAGE_WALK_DEPTH = 3 // projects/<프로젝트>/<세션>/subagents
+// **분모를 두지 않는다.** 한때 "예산"이라는 이름으로 실측 평균에서 뽑은 눈금
+// (하루 1.5M / 주간 20M)을 분모로 삼아 퍼센트를 그렸다. 실제 Claude 화면과 대조해 보니
+// 재는 것 자체가 달랐다 — Claude는 5시간 롤링 세션과 목요일 리셋 주간을 모델별로 나눠
+// 세는데 우리는 달력 하루와 최근 7일을 합산했고, 그마저 출력 토큰만 봤다(같은 날 실측:
+// 출력 1.34M, 캐시읽기 298.74M). 그렇게 나온 "일간 90%"는 세션 55%인 계정을 한도 임박
+// 으로 읽히게 만든다. 한도가 아닌 것을 한도처럼 그리지 않는다 — 그래서 여기는 **센 값만**
+// 내보내고, 분모는 어디에도 두지 않는다.
+
+const usageStats = newUsageState()
+let lastLimitHit = null // 마지막으로 한도에 걸린 순간 { at, resetAt }
+
+function newUsageState() {
+  return {
+    ready: false, // 첫 집계가 끝났는가
+    at: 0, // 마지막으로 집계를 시작한 시각
+    running: false, // 지금 훑는 중인가(겹쳐 돌면 두 배로 센다)
+    files: new Map(), // 경로 → { offset, size }
+    days: new Map(), // 'YYYY-MM-DD' → 하루치 합
+  }
+}
+
+function newUsageDay() {
+  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, msgs: 0 }
+}
+
+/**
+ * 'YYYY-MM-DD'. **로컬 날짜**다.
+ *
+ * 기록의 `timestamp`는 UTC다. 앞 10자를 그대로 쓰면 한국에서는 자정부터 아침 9시까지의
+ * 사용량이 어제로 들어간다 — 화면의 "오늘"은 로컬 자정 기준이므로 그대로 어긋난다.
+ */
+function usageDayKey(when) {
+  const d = new Date(when)
+  if (!Number.isFinite(d.getTime())) return null
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+/** 오늘까지 거슬러 올라간 날짜 키들(오래된 것부터). 날짜로 빼야 서머타임에도 안 밀린다. */
+function usageDayKeysBack(now, count) {
+  const out = []
+  for (let i = count - 1; i >= 0; i--) {
+    const d = new Date(now)
+    d.setHours(12, 0, 0, 0) // 정오에서 빼면 하루 경계에 걸리지 않는다
+    d.setDate(d.getDate() - i)
+    out.push(usageDayKey(d))
+  }
+  return out
+}
+
+/**
+ * 훑을 파일 목록. **mtime이 최근인 것만** 돌려준다.
+ *
+ * 뿌리를 인자로 받는 이유: 검사가 진짜 이 함수를 임시 폴더에 대고 돌려 볼 수 있어야
+ * 한다(복사본을 검사하면 검사가 거짓말을 한다).
+ */
+function usageFilesUnder(root, now, days) {
+  const cutoff = now - days * 86_400_000
+  const out = []
+  // **"없다"와 "못 봤다"를 가른다.** 폴더가 아직 없는 것(ENOENT)은 진짜로 쓴 적이 없다는
+  // 뜻이라 0이 사실이다. 그런데 권한이 없어서 못 읽은 것은 **얼마나 썼는지 모른다**는
+  // 뜻이다. 둘을 같이 취급하면 화면에 "오늘 0%"가 사실처럼 뜬다 — 이 앱이 하지 않기로
+  // 한 바로 그것이다. 그래서 ENOENT가 아닌 실패를 따로 들고 나가 ready를 세우지 않는다.
+  out.blind = false
+  const walk = (dir, depth) => {
+    let entries
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true })
+    } catch (err) {
+      if (err?.code !== 'ENOENT') out.blind = true
+      return
+    }
+    for (const e of entries) {
+      const p = path.join(dir, e.name)
+      if (e.isDirectory()) {
+        if (depth > 0) walk(p, depth - 1)
+        continue
+      }
+      if (!e.isFile() || !e.name.endsWith('.jsonl')) continue
+      let st
+      try {
+        st = fs.statSync(p)
+      } catch {
+        continue
+      }
+      if (st.mtimeMs < cutoff) continue
+      out.push({ path: p, size: st.size, mtimeMs: st.mtimeMs })
+    }
+  }
+  walk(root, USAGE_WALK_DEPTH)
+  return out
+}
+
+/**
+ * 한 줄을 집계에 보탠다. 셀 것이 없으면 false.
+ *
+ * 기록에는 사용량이 없는 줄(사용자 발화·도구 결과)이 훨씬 많고, 쓰는 중이라 끊긴 줄도
+ * 섞인다. **어느 쪽도 예외로 올리지 않는다** — 한 줄 때문에 집계 전체가 죽으면 안 된다.
+ */
+function addUsageLine(state, line) {
+  // 값싼 1차 거르기. 22,000줄을 매번 JSON.parse 할 이유가 없다.
+  if (!line.includes('"usage"')) return false
+  let rec
+  try {
+    rec = JSON.parse(line)
+  } catch {
+    return false // 깨진 줄·쓰다 만 줄은 건너뛴다
+  }
+  const u = rec && rec.message && rec.message.usage
+  if (!u || typeof u !== 'object') return false
+  const key = usageDayKey(rec.timestamp)
+  if (!key) return false // 시각을 모르면 어느 날에 넣을지도 모른다
+  const day = state.days.get(key) || state.days.set(key, newUsageDay()).get(key)
+  day.input += Number(u.input_tokens) || 0
+  day.output += Number(u.output_tokens) || 0
+  day.cacheRead += Number(u.cache_read_input_tokens) || 0
+  day.cacheWrite += Number(u.cache_creation_input_tokens) || 0
+  day.msgs += 1
+  return true
+}
+
+/**
+ * 그 지점까지의 마지막 바이트가 개행인가.
+ *
+ * 마지막 줄이 통째로 다 쓰였는지 가리는 데 쓴다. 파일 크기와 상관없이 1바이트만 읽는다.
+ */
+function endsWithNewline(file, size) {
+  if (size <= 0) return true
+  let fd = null
+  try {
+    fd = fs.openSync(file, 'r')
+    const b = Buffer.alloc(1)
+    fs.readSync(fd, b, 0, 1, size - 1)
+    return b[0] === 0x0a
+  } catch {
+    return false // 못 읽었으면 "덜 쓰인 것"으로 보수적으로 본다
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd)
+      } catch {
+        /* 이미 닫혔으면 그만 */
+      }
+    }
+  }
+}
+
+/**
+ * 파일 하나에서 **새로 붙은 부분만** 읽어 집계에 보탠다.
+ *
+ * - `size`는 밖에서 stat으로 본 값이고, 읽기도 딱 거기까지만 한다. 읽는 동안에도
+ *   파일은 계속 자라므로, 이래야 "어디까지 읽었는지"가 정확해진다.
+ * - 마지막 줄이 개행으로 끝나지 않으면 **아직 쓰는 중**이다. 그 줄은 세지 않고,
+ *   읽은 지점도 그 줄 앞으로 되돌려 둔다. 다음번에 온전해진 뒤 센다.
+ * - 줄 하나씩만 들고 있는다. 37MB짜리 파일도 메모리에 올리지 않는다.
+ */
+async function scanUsageFile(state, file, size) {
+  const prev = state.files.get(file)
+  const from = prev ? prev.offset : 0
+  if (size <= from) return 0
+  const complete = endsWithNewline(file, size)
+  let counted = 0
+  let consumed = size
+  await new Promise((resolve, reject) => {
+    // `from`은 언제나 개행 바로 다음이라 여기서 문자가 쪼개질 일은 없다.
+    const stream = fs.createReadStream(file, { start: from, end: size - 1, encoding: 'utf8' })
+    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity })
+    // 한 줄 늦게 센다 — 마지막 줄이 온전한지는 다 읽어 봐야 알 수 있다.
+    let held = null
+    let settled = false
+    rl.on('line', (line) => {
+      if (held !== null && addUsageLine(state, held)) counted++
+      held = line
+    })
+    // **스트림만 받으면 모자란다.** readline은 입력의 오류를 자기 쪽에서 **다시**
+    // 낸다. 그 'error'를 아무도 안 받으면 처리되지 않은 이벤트가 되어 **프로세스가
+    // 통째로 죽는다** — 메인 프로세스라 앱이 사라진다. 훑는 도중 세션 파일이
+    // 지워지기만 해도(ENOENT) 그 길로 간다.
+    const fail = (err) => {
+      if (settled) return
+      settled = true
+      rl.close()
+      stream.destroy()
+      reject(err)
+    }
+    stream.on('error', fail)
+    rl.on('error', fail)
+    rl.on('close', () => {
+      if (settled) return // 이미 실패로 끝났다
+      settled = true
+      if (held === null) return resolve()
+      if (complete) {
+        if (addUsageLine(state, held)) counted++
+      } else {
+        // 끝에 남은 조각에는 줄 끝 문자가 없다 — 그 길이만큼 물러선다.
+        consumed = size - Buffer.byteLength(held, 'utf8')
+      }
+      resolve()
+    })
+  })
+  state.files.set(file, { offset: consumed, size })
+  return counted
+}
+
+/** 오래된 날짜는 들고 있을 이유가 없다. 안 지우면 앱을 켜 둔 만큼 계속 늘어난다. */
+function pruneUsageDays(state, now) {
+  const oldest = usageDayKeysBack(now, USAGE_KEEP_DAYS)[0]
+  for (const k of [...state.days.keys()]) if (k < oldest) state.days.delete(k)
+}
+
+/**
+ * 계정 전체를 한 번 훑는다.
+ *
+ * **줄어들거나 사라진 파일이 있으면 처음부터 다시 센다.** 파일별로 되돌리려면 파일마다
+ * 얼마를 보탰는지 들고 있어야 하는데 그건 이 집계가 감당할 메모리가 아니다. 세션이
+ * 지워지거나 압축되는 일은 드물고, 그때 한 번 더 훑으면 그만이다. 되돌리지 않고
+ * 이어서 세면 **같은 줄을 두 번 센다** — 눈에 안 보이는 채로 숫자만 부푼다.
+ */
+async function refreshUsage(state, root, now) {
+  state.at = now // 실패해도 30초 안에 다시 달려들지 않게 먼저 찍는다
+  const files = usageFilesUnder(root, now, USAGE_SCAN_DAYS)
+  const candidates = new Set(files.map((f) => f.path))
+  const shrunk = files.some((f) => {
+    const p = state.files.get(f.path)
+    return p && f.size < p.size
+  })
+  // **"없어졌다"와 "창 밖으로 나이를 먹었다"는 다른 사건이다.** 후보에 없는 것을 전부
+  // 사라진 것으로 치면, 8일이 지나 후보에서 빠진 파일 하나 때문에 30초마다 전체
+  // 재집계가 돈다. 그리고 `existsSync`(동기 I/O)는 **후보에서 빠진 것에만** 건다 —
+  // 매번 전부 확인하면 파일이 늘어나는 만큼 메인 프로세스가 멈춘다.
+  const gone = [...state.files.keys()].some((p) => !candidates.has(p) && !fs.existsSync(p))
+  if (shrunk || gone) {
+    state.files.clear()
+    state.days.clear()
+    // **리셋은 "아직 모른다"이지 "안 썼다"가 아니다.** 여기서 ready를 내려 두지 않으면
+    // 재스캔이 끝날 때까지 `ready:true` + `today.output:0`이 나가고 화면에 "오늘 0%"가
+    // 사실처럼 뜬다(597MB 재스캔은 폴링 주기보다 한참 길다).
+    state.ready = false
+  }
+  // 한 파일이 안 읽힌다고 나머지를 버리지 않는다. 다만 **덜 센 채로 ready를 세우지도
+  // 않는다** — 덜 센 숫자를 사실로 내보내는 것이 이 화면에서 가장 나쁜 실패다.
+  let firstError = null
+  for (const f of files) {
+    try {
+      await scanUsageFile(state, f.path, f.size)
+    } catch (e) {
+      if (!firstError) firstError = e
+    }
+  }
+  pruneUsageDays(state, now)
+  // 창 밖으로 나간 파일의 오프셋은 들고 있어 봐야 계속 쌓이기만 한다. 그 파일이
+  // 나중에 다시 자라면 처음부터 다시 세는데, 그 몫은 전부 창 밖 날짜(화면에 null로
+  // 나가는 칸)라 보이는 숫자를 흔들지 않는다.
+  for (const p of [...state.files.keys()]) if (!candidates.has(p)) state.files.delete(p)
+  if (firstError) throw firstError // 실패한 집계를 ready로 굳히지 않는다
+  // 폴더를 **못 읽은** 경우도 마찬가지다. 폴더가 아직 없는 것은 진짜로 안 쓴 것이라
+  // 0이 맞지만, 권한이 없어 못 읽은 것은 얼마나 썼는지 모른다는 뜻이다. 모르는 것을
+  // 0으로 내보내면 "안 썼다"는 거짓말이 된다.
+  if (files.blind) {
+    state.ready = false
+    return state
+  }
+  state.ready = true
+  return state
+}
+
+/**
+ * 한도에 걸린 사실. **풀린 뒤에도 계속 띄우면 거짓말이 된다.**
+ */
+function currentLimitHit(hit, now) {
+  if (!hit) return null
+  const reset = hit.resetAt ? Date.parse(hit.resetAt) : NaN
+  if (Number.isFinite(reset) && reset <= now) return null
+  const at = Date.parse(hit.at)
+  if (Number.isFinite(at) && now - at > 86_400_000) return null // 하루가 지났으면 지난 일이다
+  return hit
+}
+
+/**
+ * 이 날짜를 **끝까지 다 셌다고 말할 수 있는가.**
+ *
+ * 훑는 파일은 mtime이 `USAGE_SCAN_DAYS` 안쪽인 것뿐이다. 그보다 오래된 날의 기록은
+ * 그 날 이후로 손대지 않은 파일에 들어 있을 수 있고, 그 파일은 **열지도 않는다.**
+ * 그러니 그 날에 대해 우리가 가진 숫자는 "덜 센 값"이지 "그만큼 썼다"가 아니다.
+ *
+ * 어느 날까지 안전한가: 파일의 mtime은 그 파일의 마지막 기록 시각보다 이르지 않다.
+ * 하루 D의 기록이 든 파일은 아무리 일러도 D의 끝(자정)에 mtime이 찍힌다. 그 자정이
+ * 컷오프(`now - USAGE_SCAN_DAYS일`)보다 뒤면 그 파일은 반드시 후보에 들어온다.
+ * `now`가 그 날의 끝일 때가 가장 빡빡한데, 그때도 **최근 USAGE_SCAN_DAYS개 날짜 키**는
+ * 조건을 만족한다. 그래서 그만큼만 "다 셌다"고 말한다.
+ */
+function usageCoveredDays(now) {
+  return new Set(usageDayKeysBack(now, Math.min(USAGE_SCAN_DAYS, USAGE_KEEP_DAYS)))
+}
+
+/** 화면에 보낼 모양. 첫 집계 전이면 `ready:false`에 나머지는 null이다. */
+function usageStatsSnapshot(state, now, extra) {
+  const plan = extra.plan ?? null
+  const limitHit = currentLimitHit(extra.limitHit, now)
+  if (!state.ready) return { ready: false, plan, today: null, week: null, days: null, limitHit }
+  const keys = usageDayKeysBack(now, USAGE_KEEP_DAYS)
+  const covered = usageCoveredDays(now)
+  const get = (k) => state.days.get(k) || newUsageDay()
+  // 오늘·이번 주는 스캔 창 안쪽이라 다 센 값이다(USAGE_WEEK_DAYS ≤ USAGE_SCAN_DAYS).
+  // 이 부등호가 깨지면 주간 합계가 조용히 덜 센 값이 된다 — 검사가 그것도 본다.
+  const sum = (list) => {
+    const t = newUsageDay()
+    for (const k of list) {
+      const d = get(k)
+      t.input += d.input
+      t.output += d.output
+      t.cacheRead += d.cacheRead
+      t.cacheWrite += d.cacheWrite
+      t.msgs += d.msgs
+    }
+    return t
+  }
+  return {
+    ready: true,
+    plan,
+    today: sum(keys.slice(-1)),
+    week: sum(keys.slice(-USAGE_WEEK_DAYS)),
+    // **0과 null은 다른 말이다.** 0은 "그 날 안 썼다"이고 null은 "모른다"다.
+    //
+    // 스캔 창(USAGE_SCAN_DAYS) 밖의 날은 그 기록이 든 파일을 열지도 않았으므로 우리가
+    // 아는 것이 없다. 예전에는 그런 날도 `newUsageDay()`(전부 0)로 채워 보냈다 —
+    // 화면은 그 0을 실제 값으로 그리고 평균까지 냈고, 그래서 "평소의 2.4배" 같은
+    // **없는 문장**이 나왔다. 모르는 칸은 null로 보내고 `partial: true`로 표시한다.
+    // (화면 계약: null이면 빈칸으로 그리고 평균·비교에서 제외한다.)
+    days: keys.map((date) => {
+      if (!covered.has(date)) return { date, output: null, cacheRead: null, msgs: null, partial: true }
+      const d = get(date)
+      return { date, output: d.output, cacheRead: d.cacheRead, msgs: d.msgs, partial: false }
+    }),
+    limitHit,
+  }
+}
+
+/** 기록이 사는 곳. 프로젝트를 붙이지 않아도 계정이 쓴 것은 전부 여기 쌓인다. */
+function claudeProjectsRoot() {
+  return path.join(app.getPath('home'), '.claude', 'projects')
+}
+
+/**
+ * 화면이 물어볼 때마다 597MB를 다시 읽지 않는다. **캐시를 즉시 돌려주고**, 오래됐으면
+ * 그때 배경에서 한 번 더 훑는다. 첫 집계가 끝나기 전에는 `ready:false`다.
+ */
+function getUsageStats() {
+  const now = Date.now()
+  if (!usageStats.running && now - usageStats.at >= USAGE_REFRESH_MS) {
+    usageStats.running = true
+    refreshUsage(usageStats, claudeProjectsRoot(), now)
+      .catch((e) => logRenderer(`사용량 집계 실패: ${e.message}`, '사용량'))
+      .finally(() => {
+        usageStats.running = false
+      })
+  }
+  // 플랜은 **이미 확인해 둔 것만** 쓴다. `checkEnv`는 MCP 헬스 체크까지 해서 몇 초씩
+  // 걸린다 — 여기서 기다리면 사용량 화면이 그만큼 늦게 뜬다. 아직 없으면 배경에서
+  // 채워 두고 이번에는 null로 답한다(모르는 것을 지어내지 않는다).
+  if (!envCache) checkEnv().catch(() => {})
+  return usageStatsSnapshot(usageStats, now, {
+    plan: envCache?.value?.claude?.subscriptionType ?? null,
+    limitHit: lastLimitHit,
+  })
+}
+
+ipcMain.handle('usage:stats', () => getUsageStats())
+
 // 자주 겪는 실패를 사람 말로 옮긴다. 원문은 영어로 오고, 무엇을 해야 하는지도 안 적혀 있다.
 //
 // `wait`는 **사용자가 손댈 것이 없는** 실패다. 기다리면 저절로 풀린다. 이걸 표시하지
@@ -3612,6 +4217,9 @@ const FAILURE_KINDS = [
     label: '토큰 사용량 한도',
     wait: true,
     hint: '한도가 풀린 뒤 같은 지시를 다시 보내면 됩니다.',
+    // 사용량 화면이 "언제 한도에 걸렸고 언제 풀리는가"를 이 표시로만 고른다.
+    // 서버 혼잡도 wait이지만 그건 한도가 아니다 — 둘을 섞으면 없는 한도를 그린다.
+    limit: true,
   },
   { re: /overloaded|\b529\b|service unavailable|\b503\b/i, label: '서버 혼잡', wait: true, hint: '잠시 뒤 다시 보내 보세요.' },
   { re: /credit|billing|payment/i, label: '결제·크레딧 문제', hint: 'Claude 계정의 결제 상태를 확인하세요.' },
@@ -3646,6 +4254,96 @@ function resetTimeFrom(message) {
   if (!m) return null
   const at = m[1].replace(/\s+/g, '').toLowerCase()
   return m[2] ? `${at} (${m[2]})` : at
+}
+
+/**
+ * 그 표준시가 지금 UTC와 몇 분 차이인가. 이름을 모르면 이 컴퓨터의 시간대로 본다.
+ *
+ * `Intl`에게 "그 지역의 벽시계"를 물어 UTC와 뺀다. 서머타임까지 이 방식이면 알아서
+ * 맞는다(지금 시각 기준이라 몇 시간 뒤 전환되는 경계에서는 한 시간 어긋날 수 있다).
+ */
+function tzOffsetMinutes(tz, at) {
+  const local = -new Date(at).getTimezoneOffset()
+  if (!tz) return local
+  try {
+    const f = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz,
+      hourCycle: 'h23',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    })
+    const p = {}
+    for (const part of f.formatToParts(new Date(at))) p[part.type] = part.value
+    const asUtc = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour, +p.minute, +p.second)
+    return Math.round((asUtc - Math.floor(at / 1000) * 1000) / 60000)
+  } catch {
+    // 모르는 이름(오타·옛 이름)이면 지어내지 말고 이 컴퓨터 시간대로 둔다.
+    return local
+  }
+}
+
+/** `2026-08-11T02:50:00+09:00` 모양으로. 오프셋을 붙여야 받는 쪽이 다시 해석할 수 있다. */
+function isoWithOffset(ms, offsetMin) {
+  const d = new Date(ms + offsetMin * 60_000)
+  const p = (n) => String(n).padStart(2, '0')
+  const abs = Math.abs(offsetMin)
+  return (
+    `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}` +
+    `T${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}` +
+    `${offsetMin < 0 ? '-' : '+'}${p(Math.floor(abs / 60))}:${p(abs % 60)}`
+  )
+}
+
+/**
+ * 한도가 풀리는 **절대 시각**. `resetTimeFrom`은 보여 줄 문구를 만들고, 이쪽은
+ * 계산할 수 있는 시각을 만든다(사용량 화면이 "몇 시간 남았나"를 그린다).
+ *
+ * 문구에는 벽시계 시각만 들어 있다("resets 2:50am (Asia/Seoul)"). 날짜는 없으므로
+ * **그 표준시의 오늘**에 얹고, 이미 지난 시각이면 다음 날로 본다 — 한도가 풀리는
+ * 때는 언제나 앞이다.
+ *
+ * 못 읽으면 null. **없는 시각을 지어내지 않는다.**
+ */
+function resetAtFrom(message, now) {
+  const m = /resets?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:\(([^)]{1,40})\))?/i.exec(String(message ?? ''))
+  if (!m) return null
+  let hour = Number(m[1])
+  const min = Number(m[2] || 0)
+  const ap = (m[3] || '').toLowerCase()
+  if (!Number.isFinite(hour) || hour > 23 || min > 59) return null
+  if (ap === 'pm' && hour < 12) hour += 12
+  if (ap === 'am' && hour === 12) hour = 0
+  // `(Asia/Seoul)` 같은 표준시 이름만 받는다. 괄호 안이 다른 말이면 무시한다.
+  const tz = m[4] && /^[A-Za-z]+\/[A-Za-z_+\-0-9/]+$/.test(m[4]) ? m[4] : null
+  const offset = tzOffsetMinutes(tz, now)
+  // 그 표준시의 벽시계로 오늘이 며칠인지. UTC 필드를 벽시계처럼 읽으려고 미리 더한다.
+  const wall = new Date(now + offset * 60_000)
+  let ms = Date.UTC(wall.getUTCFullYear(), wall.getUTCMonth(), wall.getUTCDate(), hour, min, 0) - offset * 60_000
+  if (ms <= now) ms += 86_400_000
+  return isoWithOffset(ms, offset)
+}
+
+/**
+ * 이 실패가 **사용량 한도**였다면 그 사실을 남길 모양으로 만든다. 아니면 null.
+ *
+ * 한도에 걸린 시각과 풀리는 시각은 실행이 끝나는 이 순간에만 알 수 있다 — 기록에서
+ * 나중에 다시 캐낼 수 없으므로 여기서 붙잡아 둔다.
+ */
+function limitHitFrom(why, now) {
+  const message = why && typeof why.message === 'string' ? why.message : ''
+  if (!message) return null
+  // **stdout에서 주운 사유로는 남기지 않는다.** stdout 꼬리는 모델의 최종 답변 본문이라
+  // "rate limit"·"429"가 얼마든 섞인다(결제 기능을 만드는 프로젝트라면 흔하다).
+  // 그걸 받으면 **있지도 않았던 "한도에 걸렸던 기록"이 24시간 동안 사용량 화면에 뜬다.**
+  // CLI가 직접 낸 것(stderr)이거나 세션 기록에 남은 것일 때만 사실로 친다.
+  if (why.source !== 'stderr' && why.source !== 'session') return null
+  const kind = FAILURE_KINDS.find((k) => k.re.test(message))
+  if (!kind || !kind.limit) return null
+  return { at: new Date(now).toISOString(), resetAt: resetAtFrom(message, now) }
 }
 
 /**
@@ -3689,7 +4387,68 @@ function unfinishedAgents(dir, since) {
   return [...new Set(started)]
 }
 
-function failureFor(dir, sessionId, since, code) {
+/**
+ * 실행이 남긴 **출력**에서 사유를 찾는다. 아는 실패 유형에 걸릴 때만 받아들인다.
+ *
+ * 여기가 오래 비어 있었다. `claude -p`는 결과도 한도 안내도 **stdout**으로 내는데
+ * `stdio`가 `'ignore'`라 그걸 통째로 버리고 있었다 — 바로 옆 stderr에는 "예전에는
+ * 버렸는데 실패하면 코드만 남고 이유가 어디에도 없었다"고 적어 놓고 같은 실수를
+ * 한 칸 옆에서 되풀이한 것이다. 그래서 `FAILURE_KINDS`의 한도 판별은 만들어 둔 뒤로
+ * **입력이 도달한 적이 없었다.** 사용자에게는 `코드 1`만 남았다.
+ *
+ * 아무 문장이나 받지는 않는다. 팀원이 "rate limit"을 논한 것까지 사유가 되면 안 된다.
+ * 주석에는 그렇게 적어 두고 구현은 정확히 그 짓을 하고 있었다 — 8KB 꼬리 **전체**를
+ * `FAILURE_KINDS`로 훑었으니, 결제 기능을 만드는 프로젝트에서 리드가 "rate limit은
+ * 429로 응답합니다"라고 답하면 그게 곧 "토큰 사용량 한도"가 됐다.
+ */
+// stdout에서 사유로 인정할 줄. **CLI가 낸 줄처럼 보일 때만** 받는다.
+//   - `API Error: …` / `Error: …` 처럼 오류 접두가 **같은 줄에** 있거나
+//   - CLI가 그대로 찍는 한도 안내 문구이거나
+//     (실측: "You've hit your session limit · resets 6:50pm (Asia/Seoul)" — 접두가 없다)
+const CLI_ERROR_LINE = /(?:^|[\s\][(])(?:api\s+error|execution\s+error|fatal(?:\s+error)?|error)\s*[:\-]/i
+const CLI_LIMIT_LINE = /(?:you(?:'ve|\s+have)?\s+(?:hit|reached)\s+your\b|usage\s+limit\s+reached|limit\s+reached\b)/i
+
+/**
+ * @param {string} output 볼 텍스트
+ * @param {{trusted?: boolean}} [opts] `trusted`면 CLI가 직접 낸 것(stderr)이라 줄을 가리지 않는다
+ */
+function failureFromOutput(output, opts) {
+  const trusted = !!(opts && opts.trusted)
+  const text = String(output ?? '').trim()
+  if (!text) return null
+  const lines = text.split(/\r?\n/)
+  let at = -1
+  let kind = null
+  for (let i = 0; i < lines.length; i++) {
+    const hit = FAILURE_KINDS.find((k) => k.re.test(lines[i]))
+    if (!hit) continue
+    if (!trusted && !CLI_ERROR_LINE.test(lines[i]) && !CLI_LIMIT_LINE.test(lines[i])) continue
+    at = i // 걸린 줄 중 마지막 것을 쓴다 — 사유는 끝쪽에 있다
+    kind = hit
+  }
+  if (!kind) return null
+  // 8KB를 통째로 화면에 붙이지 않는다. 걸린 줄만 보여 준다.
+  const message = lines[at].trim().slice(0, 400)
+  // 다만 **풀리는 시각은 다음 줄에 있을 수 있다**(줄바꿈해서 오는 문구가 있다).
+  // 보여 줄 문구는 한 줄로 좁히되, 시각은 인접한 줄까지 훑어서 찾는다.
+  const near = lines.slice(at, at + 3).join(' ')
+  return {
+    message,
+    label: kind.label,
+    hint: kind.hint ?? null,
+    wait: !!kind.wait,
+    resetAt: kind.wait ? resetTimeFrom(near) : null,
+    // 이 사유가 어디에서 왔는가. `limitHitFrom`이 이걸 보고 "한도에 걸렸던 기록"을
+    // 남길지 정한다 — stdout 본문에서 주운 것은 사실로 치지 않는다.
+    source: trusted ? 'stderr' : 'stdout',
+  }
+}
+
+/**
+ * @param {{stdout?: string, stderr?: string}} out 실행이 남긴 출력. **두 갈래를 섞지 않는다** —
+ *   stderr는 CLI가 낸 것이고 stdout 꼬리는 모델의 답변 본문이라 믿는 정도가 다르다.
+ */
+function failureFor(dir, sessionId, since, code, out) {
   if (code === 0) {
     // **끝나지 않은 팀원이 남았으면 끝난 게 아니다.**
     const left = unfinishedAgents(dir, since)
@@ -3700,16 +4459,24 @@ function failureFor(dir, sessionId, since, code) {
       hint: '`계속진행해줘`로 이어서 시키면 중단된 지점부터 다시 합니다.',
       wait: false, // 이어서 시켜야 한다 — 기다린다고 풀리지 않는다
       resetAt: null,
+      source: 'events',
     }
   }
+  const stdout = out && typeof out === 'object' ? out.stdout : ''
+  const stderr = out && typeof out === 'object' ? out.stderr : ''
   return (
-    readSessionError(dir, sessionId, since) || {
+    // 믿는 순서대로 본다. 세션 기록이 가장 정확하고(이번 실행 것만 골라 본다),
+    // 그 다음이 CLI가 낸 stderr, 마지막이 stdout 꼬리(모델의 답변 본문일 수 있다)다.
+    readSessionError(dir, sessionId, since) ||
+    failureFromOutput(stderr, { trusted: true }) ||
+    failureFromOutput(stdout, { trusted: false }) || {
       message: `실행이 코드 ${code}로 끝났습니다. 이유가 기록에 남지 않았습니다.`,
       label: null,
       hint: '같은 지시를 다시 보내 보시고, 되풀이되면 상단 `기록`에서 로그를 확인하세요.',
       // **모르는 것을 "기다리면 된다"고 하지 않는다.** 사유를 못 찾았을 뿐이다.
       wait: false,
       resetAt: null,
+      source: null,
     }
   )
 }
@@ -3774,6 +4541,8 @@ function readSessionError(dir, sessionId, since) {
     // 기다리면 되는 실패인가, 손봐야 하는 실패인가. 화면이 이 둘을 다르게 보여 준다.
     wait: !!kind?.wait,
     resetAt: kind?.wait ? resetTimeFrom(message) : null,
+    // 세션 기록은 CLI가 남긴 것이다 — 여기서 온 한도는 사실로 친다.
+    source: 'session',
   }
 }
 
@@ -3835,11 +4604,17 @@ function runCommand(c, cmd) {
       // 쪼개지고 줄바꿈 뒤는 통째로 잘린다 — 실측으로 프롬프트 하나가 인자 35개가
       // 되고 정작 지시 내용("지시: ...")은 사라졌다. 그동안 리드가 엉뚱한 일을 한
       // 이유가 여기 있었다. stdin은 셸 파싱을 거치지 않으므로 그대로 도착한다.
-      // **stderr는 받아 둔다.** 예전에는 버렸는데, 실행이 실패하면 코드만 남고
-      // 이유가 어디에도 없었다("코드 1로 끝남"이 전부였다). 받아서 마지막 몇 줄만
-      // 들고 있다가 실패했을 때 같이 보여 준다. stdout은 계속 흘려보낸다 —
-      // 진행 상황은 훅이 이벤트로 남기므로 여기서 또 받을 이유가 없다.
-      stdio: ['pipe', 'ignore', 'pipe'],
+      // **stdout·stderr를 둘 다 받아 둔다.** 예전에는 버렸는데, 실행이 실패하면 코드만
+      // 남고 이유가 어디에도 없었다("코드 1로 끝남"이 전부였다).
+      //
+      // stdout은 한동안 계속 버리고 있었다("진행 상황은 훅이 남기니 받을 이유가 없다").
+      // 그게 틀렸다 — `claude -p`는 **결과도 한도 안내도 stdout으로 낸다.** 사용자는
+      // `⚠ 지시 처리가 코드 1로 끝났습니다`만 보고 이유를 못 봤고, FAILURE_KINDS의
+      // 한도 판별은 입력이 도달하지 않아 한 번도 걸리지 않았다.
+      //
+      // 다만 **통째로 쌓지는 않는다.** 긴 작업의 stdout은 MB 단위다. 끝 8KB만 들고
+      // 있다가 실패했을 때 사유 판별에 넘긴다.
+      stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...process.env, TEAMVIEW_POLLER: String(process.pid) },
     })
     child.stdin.on('error', () => {}) // 자식이 먼저 죽으면 EPIPE가 난다 — 무시
@@ -3875,17 +4650,43 @@ function runCommand(c, cmd) {
     errLines.push(...String(b).split(/\r?\n/).filter((l) => l.trim()))
     if (errLines.length > 60) errLines.splice(0, errLines.length - 60)
   })
+  // stdout도 마찬가지로 비워 준다. 다만 **끝 8KB만** 링버퍼로 들고 있는다 —
+  // 긴 작업의 stdout은 MB 단위라 통째로 쌓으면 그게 곧 메모리 누수다.
+  const outTail = makeTailBuffer(OUT_TAIL_MAX)
+  let outEnded = false
+  child.stdout?.on('data', (b) => outTail.push(b))
+  child.stdout?.once('end', () => {
+    outEnded = true
+  })
+  // **파이프도 실패한다.** 자식이 죽으면서 파이프가 끊기면(EPIPE·ECONNRESET) 스트림이
+  // `error`를 내는데, 핸들러가 없으면 그건 던져진 예외가 된다 — 그 자리에서
+  // `finishExit`이 불리지 못하고 실행이 끝난 표시도 알림도 남지 않는다.
+  // stdin에는 이미 달아 뒀는데 stdout·stderr만 빠져 있었다.
+  const pipeDied = (which) => (err) => {
+    if (which === 'stdout') outEnded = true // 더 기다려 봐야 올 것이 없다
+    logRenderer(`claude ${which} 파이프가 끊김(${path.basename(dir)}): ${err.message}`, '지시')
+  }
+  child.stdout?.on('error', pipeDied('stdout'))
+  child.stderr?.on('error', pipeDied('stderr'))
 
   child.on('error', (err) => logRenderer(`claude 실행 실패(${dir}): ${err.message}`, '지시'))
-  child.on('exit', (code) => {
-    if (c.child === child) c.child = null
+  let exitHandled = false
+  const finishExit = (code) => {
+    if (exitHandled) return
+    exitHandled = true
     if (code !== 0 && child.teamviewCanceled) {
       // 사람이 멈춘 것이다. 실패로 적으면 무엇이 잘못된 줄 알고 원인을 찾게 된다.
       logActivity(`중지로 끝남 (${path.basename(dir)})`)
     } else if (code !== 0) {
-      const tail = errLines.slice(-12)
-      // stderr는 대개 비어 있다 — claude는 실패 사유를 세션 기록에만 남긴다.
-      const why = failureFor(dir, sid, startedAt, code)
+      // stderr는 대개 비어 있다 — 사유는 stdout이나 세션 기록에 있다. 둘 다 넘기되
+      // **갈래를 지운 채 합쳐 넘기지 않는다.** 받는 쪽이 믿는 정도를 달리해야 한다.
+      const output = { stdout: outTail.text(), stderr: errLines.join('\n') }
+      // stderr가 있으면 예전처럼 그것만 보여 준다. 비어 있을 때만 stdout 끝을 붙인다 —
+      // 그동안 화면에는 붙일 줄이 하나도 없어서 "코드 1"이 전부였다.
+      const tail = errLines.length ? errLines.slice(-12) : outTail.lines(8)
+      const why = failureFor(dir, sid, startedAt, code, output)
+      // 한도에 걸린 사실과 풀리는 시각을 남긴다. 사용량 화면이 이걸 보여 준다.
+      lastLimitHit = limitHitFrom(why, Date.now()) || lastLimitHit
       // **기다리면 되는 것은 실패라고 적지 않는다.** 실측(08-02 08:13:58):
       //     회사 실행이 코드 1로 끝남 (daily)
       //         토큰 사용량 한도: You've hit your session limit · resets 6:50pm (Asia/Seoul)
@@ -3920,7 +4721,25 @@ function runCommand(c, cmd) {
     // 떴다 — 사용량 한도에 걸려 아무것도 못 했는데 사용자는 다 된 줄 알았다.
     // 중지는 사람이 방금 누른 것이라 알릴 것이 없다.
     if (child.teamviewCanceled) return
-    if (!pendingCount(dir)) notifyDone(dir, failureFor(dir, sid, startedAt, code))
+    if (!pendingCount(dir)) {
+      notifyDone(dir, failureFor(dir, sid, startedAt, code, { stdout: outTail.text(), stderr: errLines.join('\n') }))
+    }
+  }
+
+  child.on('exit', (code) => {
+    if (c.child === child) c.child = null
+    // **자식이 죽는 것과 파이프가 비는 것은 다른 사건이다.** `exit`은 stdout의 마지막
+    // 조각이 도착하기 전에 올 수 있는데, 정작 한도 안내가 그 마지막 조각에 실려 온다.
+    // 그렇다고 `close`를 기다리면 손자 프로세스가 파이프를 물고 있을 때 영영 오지
+    // 않는다(shell: true라 cmd.exe를 거친다). 그래서 **실패했을 때만 잠깐** 기다린다.
+    if (code === 0 || child.teamviewCanceled || outEnded || !child.stdout) return finishExit(code)
+    // 이 타이머 하나 때문에 앱 종료가 늦어지지 않게 한다(다른 지연 실행도 같다).
+    const t = setTimeout(() => finishExit(code), OUT_FLUSH_MS)
+    t.unref?.()
+    child.stdout.once('end', () => {
+      clearTimeout(t)
+      finishExit(code)
+    })
   })
 }
 
