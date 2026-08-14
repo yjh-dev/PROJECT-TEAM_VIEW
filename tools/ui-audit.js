@@ -1287,12 +1287,16 @@ function holdShapeProblems(hold) {
     out.notes.push('main.js를 읽지 못해 홀드 계약을 프로덕션과 대조하지 못했다')
     return out
   }
-  const at = src.search(/hold:\s*\{/)
+  // **못 찾으면 알림이 아니라 실패다.** 예전에는 `hold: {`를 찾았는데 main.js는
+  // `hold: holdInfo(dir)`로 싣는다 — 정규식이 영원히 안 맞았고, "백엔드 작업 중"이라는
+  // 알림만 매번 뜨면서 **계약 대조가 한 번도 돌지 않았다.** 검사가 조용히 건너뛰는 것이
+  // 이 저장소에서 가장 자주 난 사고다. 그래서 알림이 아니라 실패로 세운다.
+  const at = src.search(/function holdInfo\b/)
   if (at < 0) {
-    out.notes.push('main.js에 아직 홀드가 없어 계약을 프로덕션과 대조하지 못했다(백엔드 작업 중)')
+    out.found.push('main.js에서 holdInfo를 찾지 못해 홀드 계약을 대조하지 못했다 — 검사가 낡았다')
     return out
   }
-  const open = src.indexOf('{', at)
+  const open = src.indexOf('{', src.indexOf('return {', at))
   const close = src.indexOf('}', open)
   const want = src
     .slice(open + 1, close)

@@ -3028,7 +3028,17 @@ async function usageChecks() {
       /const output = \{ stdout: outTail\.text\(\), stderr: errLines\.join\('\\n'\) \}/.test(mainSrc),
       'true',
     )
-    eq('알림 쪽도 같은 모양으로 넘긴다', /notifyDone\(dir, failureFor\(dir, sid, startedAt, code, \{ stdout:/.test(mainSrc), 'true')
+    // 사유를 판별할 때는 알림 쪽도 **같은 두 갈래**를 넘긴다(합쳐 넘기면 믿는 정도를 가릴 수 없다).
+    eq(
+      '알림 쪽도 같은 모양으로 넘긴다',
+      /failureFor\(dir, sid, startedAt, code, \{ stdout: outTail\.text\(\), stderr: errLines\.join\('\\n'\) \}\)/.test(mainSrc),
+      'true',
+    )
+    // **끝까지 돈 것을 실패라고 적지 않는다.** `failureFor`는 세션 기록의 `is_error`를 보는데
+    // 그건 도중에 실패한 도구 호출 하나일 뿐이다 — 팀원이 `npm test`로 실패를 확인하는 것은
+    // 일의 정상적인 일부다. 실측(08-14 00:57): 리드가 "추가하고 검수까지 마쳤습니다"라고
+    // 답하고 파일에도 반영됐는데 1초 뒤 "지시 실패"가 떴다. 종료 코드 0이면 실패가 아니다.
+    eq('끝까지 돈 것을 실패라고 하지 않는다', /code === 0 \? null : failureFor\(/.test(mainSrc), 'true')
     eq('한도에 걸린 사실을 남긴다', /lastLimitHit = limitHitFrom\(why, Date\.now\(\)\)/.test(mainSrc), 'true')
     eq('그 기록은 출처를 가려서 남긴다', /why\.source !== 'stderr' && why\.source !== 'session'/.test(mainSrc), 'true')
     // 창 밖의 날은 0이 아니라 null로 나간다(1번 결함의 배선).
