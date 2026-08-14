@@ -35,6 +35,23 @@ const WORKER_NAME = 'team-worker.json'
 const CANCEL_NAME = 'team-cancel.flag'
 const COMMANDS_NAME = 'team-commands.jsonl'
 
+// 대화가 이만큼 자라면 claude가 **스스로 요약해서 줄인다**(`--autocompact`).
+//
+// 토큰을 먹는 것은 만들어 내는 양이 아니라 **매 턴 앞의 대화를 통째로 다시 읽는 것**이다.
+// 실측(insta-filter): 캐시 생성 5.57M은 읽기 31.98M보다 12.5배 비싸 **가중 비용의 69%**를
+// 차지했고, 그 생성의 71%가 지시의 첫 턴이 아니라 **대화가 자라며 생긴 뒤따르는 턴**에서
+// 나왔다. 같은 질문이 215턴째에는 처음의 9배가 든다(21k → 183k).
+//
+// 갈아타기(`새 대화 시작`)도 같은 문제를 풀지만 **맥락을 통째로 버린다.** 그래서 화면에
+// 무게를 계속 적어 두어도 아무도 누르지 않았다 — 무서워서다. 압축은 **요약해서 남기므로**
+// 사람이 결정할 일이 아니게 된다.
+//
+// 값: 100_000. CLI가 받는 범위는 100k~1M이고(50k는 거부된다) **하한을 고른다.** 기본값
+// (`auto`)은 컨텍스트 한계 근처에서야 줄이므로 위 183k 같은 상태를 그대로 통과시킨다.
+// 우리는 그 앞에서 끊어야 이득이다. 압축 자체도 토큰을 쓰지만, 한 번 요약하는 비용은
+// 줄지 않은 대화를 매 턴 다시 읽는 비용보다 훨씬 싸다.
+const AUTOCOMPACT_TOKENS = 100_000
+
 // 동시에 붙일 수 있는 프로젝트 수. 늘리기 전에 생각할 것: 회사 하나가 claude를
 // 하나씩 띄우므로 N개면 claude가 N개 동시에 돈다(토큰도 N배).
 const MAX_PROJECTS = 3
@@ -4692,7 +4709,7 @@ function runCommand(c, cmd) {
   // 여기서부터 쌓이는 토큰이 '이번 지시' 몫이다.
   markUsage(dir)
   const sid = sessionIdFor(dir)
-  const args = ['-p', '--permission-mode', PERMISSION_MODE]
+  const args = ['-p', '--permission-mode', PERMISSION_MODE, '--autocompact', String(AUTOCOMPACT_TOKENS)]
   // 이미 있는 세션이면 잇고, 처음이면 그 id로 새로 만든다.
   args.push(sessionExists(dir, sid) ? '--resume' : '--session-id', sid)
 

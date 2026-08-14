@@ -3025,6 +3025,16 @@ async function usageChecks() {
     const mainSrc = fs.readFileSync(path.join(ROOT, 'main.js'), 'utf8').replace(/\r\n/g, '\n')
     const preSrc = fs.readFileSync(path.join(ROOT, 'preload.js'), 'utf8')
     eq('stdout을 더는 버리지 않는다', /stdio: \['pipe', 'pipe', 'pipe'\]/.test(mainSrc), 'true')
+    // **대화가 스스로 줄어들게 한다.** 이게 빠지면 대화가 한계까지 자라고 매 턴 그 전부를
+    // 다시 읽는다(실측: 215턴째 한 질문에 183k, 처음의 9배). 갈아타기는 사람이 눌러야 하고
+    // 맥락이 끊겨서 아무도 안 눌렀다 — 압축은 요약해서 남기므로 눌릴 필요가 없다.
+    eq('대화를 스스로 줄이게 시킨다', /'--autocompact', String\(AUTOCOMPACT_TOKENS\)/.test(mainSrc), 'true')
+    // CLI가 받는 범위는 100k~1M이다(50k는 실제로 거부됐다). 벗어나면 claude가 즉시
+    // 종료해 **모든 지시가 실패**한다 — 범위를 코드에서 지킨다.
+    {
+      const v = Number((mainSrc.match(/const AUTOCOMPACT_TOKENS = ([\d_]+)/) || [])[1]?.replace(/_/g, ''))
+      eq('줄이는 기준이 CLI가 받는 범위 안이다', v >= 100000 && v <= 1000000, 'true')
+    }
     eq('stdout을 링버퍼로 받는다', /child\.stdout\?\.on\('data', \(b\) => outTail\.push\(b\)\)/.test(mainSrc), 'true')
     eq('그 출력이 사유 판별로 넘어간다', /failureFor\(dir, sid, startedAt, code, output\)/.test(mainSrc), 'true')
     // **stdout과 stderr를 합쳐 넘기지 않는다.** 합치면 받는 쪽이 믿는 정도를 가릴 수 없다.
