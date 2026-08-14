@@ -393,8 +393,13 @@ for (const cmd of ['rm -rf board', 'git reset --hard origin/main', 'Remove-Item 
 // 실측: 순서 규칙을 넣을 때 `code-reviewer`만 못 박고 `qa-tester`는 "필요한 규모면"으로
 // 남겼다. 그 한 단어 때문에 파일 45개짜리 웹앱에 테스트가 0개로 끝났다 — 판단을
 // 넘기면 매번 "아니다"가 된다. **관문이 조용히 빠지는 것을 여기서 잡는다.**
-const guide = fs.readFileSync(path.join(ROOT, 'templates', 'CLAUDE.md'), 'utf8')
-const lead = fs.readFileSync(path.join(ROOT, 'main.js'), 'utf8')
+// **줄바꿈을 맞춘 뒤에 자른다.** 아래에서 `lead.indexOf('\n]\n')` 같은 자리로 소스를
+// 잘라 임시 파일로 만들어 require 하는데, 체크아웃이 CRLF면 그 자리를 못 찾아
+// **깨진 코드가 만들어지고 require가 던진다.** 실측: 워크트리(LF)에서는 통과하던
+// 검사가 같은 커밋의 메인 폴더(CRLF)에서 터졌다 — 검사가 환경에 따라 다른 답을 냈다.
+// 이 파일의 다른 24곳은 이미 정규화하고 있었고 여기만 빠져 있었다.
+const guide = fs.readFileSync(path.join(ROOT, 'templates', 'CLAUDE.md'), 'utf8').replace(/\r\n/g, '\n')
+const lead = fs.readFileSync(path.join(ROOT, 'main.js'), 'utf8').replace(/\r\n/g, '\n')
 const inLead = (re) => re.test(lead)
 for (const [who, 이름] of [['planner', '기획'], ['ux-designer', '설계'], ['code-reviewer', '리뷰'], ['qa-tester', '검수']]) {
   lead.includes(who)
